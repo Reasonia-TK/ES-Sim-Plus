@@ -208,7 +208,7 @@ export default function GasPanel({
       />
       <p className="hint">
         NTC 法 + VHS 分子モデルによる定常ガス流れ解析。既存の三角形メッシュをセルとして使う
-        (平面2Dのみ対応)。結果は PIC の MCC で「DSMCガス場を使用」を有効にすると背景ガスとして使える。
+        (平面2D・軸対称 r-z の両対応)。結果は PIC の MCC で「DSMCガス場を使用」を有効にすると背景ガスとして使える。
       </p>
       </>
       )}
