@@ -51,8 +51,9 @@ const DEFAULT_GAS: DsmcGas = {
   t_ref_k: 273.0,
 };
 
-// 有効チェックを一度オフにしても、再度オンにしたときに直前の値を復元できるよう保持する既定値
-const DEFAULT_DSMC: DsmcSettings = {
+// 有効チェックを一度オフにしても、再度オンにしたときに直前の値を復元できるよう保持する既定値。
+// App 側のガス境界配置ツール (キャンバス2点クリック) が project.dsmc==null から有効化する際にも流用する
+export const DEFAULT_DSMC: DsmcSettings = {
   gas: DEFAULT_GAS,
   boundaries: [],
   wall_temperature_k: 300.0,
@@ -67,7 +68,9 @@ const DEFAULT_DSMC: DsmcSettings = {
   smoothing_passes: 0,
 };
 
-const DEFAULT_BOUNDARY: DsmcBoundary = {
+// 「境界を追加」ボタン・キャンバスの「ガス境界」ツールが追加する新規境界の共通既定値
+// (両者で内容を一致させるため App 側からも import して使う)
+export const DEFAULT_BOUNDARY: DsmcBoundary = {
   edges: [],
   p1: null,
   p2: null,
@@ -248,6 +251,9 @@ export default function GasPanel({
           <p className="hint">
             流入口 (inlet) は圧力指定に加えて流量指定 [sccm] も選べます。
             1 sccm = 標準状態の 1 cm³/min (奥行き1m換算)。流量指定では入射粒子は壁反射になり、正味流量が指定値に一致します。
+          </p>
+          <p className="hint">
+            キャンバスの「ガス境界」ツールで2点クリックでも追加できます (発見性のため案内)。
           </p>
           <div className="collector-list">
             {dsmc.boundaries.length === 0 && <div className="muted">(未指定。すべて壁境界として扱われます)</div>}

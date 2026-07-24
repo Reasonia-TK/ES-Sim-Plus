@@ -24,7 +24,7 @@ import type { LengthUnit } from "../units";
  * - 粒子軌道: traceResult をシアン系の半透明ポリラインで描画 (吸収位置は小さな点)
  */
 
-export type Tool = "select" | "polyline" | "rect" | "circle" | "profile" | "emitter" | "collector";
+export type Tool = "select" | "polyline" | "rect" | "circle" | "profile" | "emitter" | "collector" | "gasbc";
 
 // カラーマップの対象: 電位 V か |E|
 export type FieldView = "v" | "e_abs";
@@ -49,6 +49,17 @@ const COLLECTOR_COLORS = [
 ];
 function collectorColor(i: number): string {
   return COLLECTOR_COLORS[i % COLLECTOR_COLORS.length];
+}
+
+// DSMC 線分境界の表示色 (橙系)。コレクタのパレットとは重ならない固定色にして、
+// 見た目でコレクタ (黄・シアン等) とガス境界を区別できるようにする
+const GAS_BOUNDARY_COLOR = "#ffb454";
+
+// 配置済み DSMC 線分境界のオーバーレイ表示用ビュー (p1/p2 を持つ境界のみが対象、prompts/72)
+export interface GasBoundaryView {
+  label: string;
+  p1: Point;
+  p2: Point;
 }
 
 // PIC結果フィールド表示 (done後の「結果表示」セレクトでライブ以外を選んだ場合の描画データ)。
@@ -104,6 +115,9 @@ interface Props {
   // 間引き済み座標をメッシュ/領域の上に点描画する。App 側で実行中〜完了までのみ渡す
   // (完了後は結果フィールド表示に切り替わるため残さない)
   gasParticles?: Point[] | null;
+  // 配置済み DSMC 線分境界 (常時オーバーレイ表示の対象、prompts/72)。エッジ指定のみの境界は
+  // p1/p2 を持たないため対象外 (App 側で p1/p2 を持つものだけ抽出して渡す)
+  gasBoundaries?: GasBoundaryView[];
   onSelectRegion: (id: string | null) => void;
   onDeleteRegion: (id: string) => void;
   onAddRegion: (geom: Point[] | CircleShape) => void;
@@ -113,6 +127,8 @@ interface Props {
   onProfileLine: (p1: Point, p2: Point) => void;
   onSetEmitter: (p1: Point, p2: Point) => void;
   onSetCollector: (p1: Point, p2: Point) => void;
+  // ガス境界配置ツールの確定通知 (コレクタと同じ2点クリックUX、prompts/72)
+  onSetGasBoundary: (p1: Point, p2: Point) => void;
 }
 
 interface View {
@@ -334,6 +350,7 @@ export default function CadCanvas({
   picFrame,
   picFieldView,
   gasParticles,
+  gasBoundaries = [],
   onSelectRegion,
   onDeleteRegion,
   onAddRegion,
@@ -343,6 +360,7 @@ export default function CadCanvas({
   onProfileLine,
   onSetEmitter,
   onSetCollector,
+  onSetGasBoundary,
 }: Props) {
   // 軸対称 (r-z) モードかどうか。x=z(軸方向)・y=r(径方向) と読み替えて表示する
   const isRz = project.coord === "rz";
@@ -974,6 +992,21 @@ export default function CadCanvas({
       ctx.beginPath();
       ctx.arc(sx(x0c), sy(y0c), 3, 0, Math.PI * 2);
       ctx.fill();
+    } else if (tool === "gasbc" && drawPts.length === 1 && cursor) {
+      // ガス境界配置ツールのラバーバンド (橙系破線、コレクタと同じ2点クリックUX)
+      const [x0g, y0g] = drawPts[0];
+      const [x1g, y1g] = cursor;
+      ctx.strokeStyle = GAS_BOUNDARY_COLOR;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(sx(x0g), sy(y0g));
+      ctx.lineTo(sx(x1g), sy(y1g));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = GAS_BOUNDARY_COLOR;
+      ctx.beginPath();
+      ctx.arc(sx(x0g), sy(y0g), 3, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     // 確定済みプロファイル線のオーバーレイ (白破線 + 端点マーカー)
@@ -1036,6 +1069,36 @@ export default function CadCanvas({
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
       ctx.fillText(c.label, sx(mx), sy(my) - 6);
+    });
+
+    // 配置済み DSMC 線分境界のオーバーレイ (常時表示、橙系固定色。コレクタと混同しないよう
+    // パレットを共有せず単色にする、prompts/72)
+    gasBoundaries.forEach((g) => {
+      const [xg0, yg0] = g.p1;
+      const [xg1, yg1] = g.p2;
+      ctx.strokeStyle = GAS_BOUNDARY_COLOR;
+      ctx.lineWidth = 3.5;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(sx(xg0), sy(yg0));
+      ctx.lineTo(sx(xg1), sy(yg1));
+      ctx.stroke();
+      ctx.fillStyle = GAS_BOUNDARY_COLOR;
+      ctx.strokeStyle = "#1b1e24";
+      ctx.lineWidth = 1;
+      for (const [px, py] of [g.p1, g.p2]) {
+        ctx.beginPath();
+        ctx.arc(sx(px), sy(py), 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      const mx = (xg0 + xg1) / 2;
+      const my = (yg0 + yg1) / 2;
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.fillStyle = GAS_BOUNDARY_COLOR;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(g.label, sx(mx), sy(my) - 6);
     });
 
     // 粒子軌道 (trace 結果): シアン系半透明ポリライン。粒子数が多くても見えるように線幅は細く保つ
@@ -1249,6 +1312,7 @@ export default function CadCanvas({
     picFrame,
     picFieldView,
     gasParticles,
+    gasBoundaries,
     isRz,
     isRzX0,
     isAxisym,
@@ -1530,6 +1594,14 @@ export default function CadCanvas({
             } else {
               const p1 = drawPts[0];
               onSetCollector(p1, pt);
+              setDrawPts([]);
+            }
+          } else if (tool === "gasbc") {
+            if (drawPts.length === 0) {
+              setDrawPts([pt]);
+            } else {
+              const p1 = drawPts[0];
+              onSetGasBoundary(p1, pt);
               setDrawPts([]);
             }
           }

@@ -5,7 +5,7 @@ import type { MultiPolygon } from "polygon-clipping";
 import { api } from "./api";
 import { getPort, initPort, setPort } from "./backendPort";
 import CadCanvas from "./canvas/CadCanvas";
-import type { FieldView, PicCollectorView, PicFieldView, Tool } from "./canvas/CadCanvas";
+import type { FieldView, GasBoundaryView, PicCollectorView, PicFieldView, Tool } from "./canvas/CadCanvas";
 import ProfilePanel from "./panels/ProfilePanel";
 import FieldPanel, { EDGE_LABELS_RZ, EDGE_LABELS_RZ_X0, EDGE_LABELS_XY } from "./panels/FieldPanel";
 import type { FieldSection } from "./panels/FieldPanel";
@@ -14,7 +14,7 @@ import type { TreeNode } from "./ProjectTree";
 import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
 import type { CyclePicField, PicResultField } from "./panels/PicPanel";
-import GasPanel, { GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
+import GasPanel, { DEFAULT_BOUNDARY, DEFAULT_DSMC, GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
 import type { GasResultField } from "./panels/GasPanel";
 import { Toggle } from "./Toggle";
 import { PicClient } from "./picClient";
@@ -30,6 +30,7 @@ import type {
   BField,
   BoundaryCondition,
   CircleShape,
+  DsmcBoundary,
   DsmcResult,
   EdgeBcType,
   Health,
@@ -176,6 +177,7 @@ const TOOL_LABELS: Record<Tool, string> = {
   profile: "プロファイル",
   emitter: "エミッタ",
   collector: "コレクタ",
+  gasbc: "ガス境界",
 };
 
 // 電極ラベル ("edge0".."edge3" は FieldPanel の EDGE_LABELS_* で辺名に変換、
@@ -707,6 +709,18 @@ export default function App() {
     setActiveNode("study-pic");
   };
 
+  // ガス境界配置ツール (CadCanvas) からの確定通知。コレクタと同じ2点クリックUX (prompts/72)。
+  // project.dsmc が null な状態はツール自体は表示されるが実行不能なため、2点クリックした時点で
+  // 「DSMCを使う」意図が明確 → GasPanel の既定設定 (DEFAULT_DSMC) で有効化してから境界を追加する。
+  // project.dsmc は Undo/Redo 対象の Project 本体フィールドなので setDsmc (commitProject) 経由で反映する
+  const setGasBoundaryPoints = (p1: Point, p2: Point) => {
+    const base = project.dsmc ?? DEFAULT_DSMC;
+    // 新規境界の既定値は GasPanel の「境界を追加」ボタンと同一 (DEFAULT_BOUNDARY を共有) + p1/p2
+    const boundary: DsmcBoundary = { ...DEFAULT_BOUNDARY, p1, p2 };
+    setDsmc({ ...base, boundaries: [...base.boundaries, boundary] });
+    setActiveNode("study-gas");
+  };
+
   // コレクタ一覧 (PICパネル) の1件を更新する (ラベル・tol の編集)
   const updateCollector = (index: number, patch: Partial<PicCollectorSettings>) => {
     const collectors = pic.collectors ?? [];
@@ -1196,6 +1210,12 @@ export default function App() {
     p2: c.p2,
     label: c.label && c.label.trim() !== "" ? c.label : `C${i + 1}`,
   }));
+
+  // 配置済み DSMC 線分境界一覧 (CadCanvas への常時オーバーレイ表示用、prompts/72)。
+  // edges のみ指定でp1/p2を持たない境界は線分として描けないため対象外 (ラベルは線分境界のみで連番)
+  const gasBoundariesList: GasBoundaryView[] = (project.dsmc?.boundaries ?? [])
+    .filter((b) => b.p1 != null && b.p2 != null)
+    .map((b, i) => ({ p1: b.p1 as Point, p2: b.p2 as Point, label: `G${i + 1}` }));
 
   // コレクタ一覧の選択インデックス (範囲外・未選択なら先頭を既定選択とする)
   const selectedCollectorIndex: number | null =
@@ -1792,6 +1812,13 @@ export default function App() {
                 コレクタは最大{MAX_COLLECTORS}個に達しました
               </span>
             )}
+            <button
+              className={`tool ${tool === "gasbc" ? "active" : ""}`}
+              onClick={() => setTool("gasbc")}
+              title="2点クリックでDSMCの線分境界 (流入口など) を追加します"
+            >
+              ガス境界
+            </button>
             <div className="sep" />
             <Toggle label="グリッドスナップ" checked={gridSnap} onChange={setGridSnap} />
             <label className="snap">
@@ -1832,6 +1859,7 @@ export default function App() {
             picFrame={onGasNode ? null : picLiveFrame}
             picFieldView={finalPicFieldView}
             gasParticles={gasRunning && gasShowParticles ? gasLiveParticles : null}
+            gasBoundaries={gasBoundariesList}
             onSelectRegion={selectRegionFromCanvas}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}
@@ -1841,6 +1869,7 @@ export default function App() {
             onProfileLine={(p1, p2) => setProfileLine([p1, p2])}
             onSetEmitter={setEmitterPoints}
             onSetCollector={setCollectorPoints}
+            onSetGasBoundary={setGasBoundaryPoints}
           />
           {profileLine && (
             <ProfilePanel
