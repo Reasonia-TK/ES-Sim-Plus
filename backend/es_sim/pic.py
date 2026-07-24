@@ -45,7 +45,7 @@ from .particles import (
     _walk_step,
     b_vector,
 )
-from .schema import PicSettings, Project, rf_components
+from .schema import PicSettings, Project, VoltageWaveform, rf_components
 
 # フレーム送出時の種ごとの最大粒子数 (間引き)
 MAX_FRAME_PARTICLES = 2000
@@ -70,6 +70,24 @@ def _walk_pool() -> ThreadPoolExecutor:
     if _WALK_POOL is None:
         _WALK_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pic-walk")
     return _WALK_POOL
+
+
+def _eval_waveform(phase, v, freq_hz: float, t):
+    """CSV インポート波形 V_wf(t) の評価 (prompts/73)。単体テストから直接呼べるよう
+    モジュール関数として切り出す (PicSimulation の初期化なしで検証できる)。
+
+    phase は [0, 1) に正規化済みの位相 (昇順)、v は対応する電圧。実際の周期は
+    freq_hz で決まり、時刻 t の位相は frac(t·freq_hz) (0〜1 を繰り返す)。
+    末尾サンプルと先頭サンプルの間 (位相 phase[-1] 〜 1) が非連続にならないよう、
+    phase 配列の末尾に仮想的に (phase[0]+1, v[0]) を足してから線形補間する
+    (= 1周期ループの折返しを連続にするため)。
+    """
+    phase = np.asarray(phase, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    frac = np.mod(np.asarray(t, dtype=np.float64) * freq_hz, 1.0)
+    phase_ext = np.concatenate([phase, [phase[0] + 1.0]])
+    v_ext = np.concatenate([v, [v[0]]])
+    return np.interp(frac, phase_ext, v_ext)
 
 
 @dataclass
@@ -179,6 +197,25 @@ class PicSimulation:
                 self.rf_amp[row, kc] = amp
                 self.rf_omega[row, kc] = 2.0 * math.pi * freq
                 self.rf_phase[row, kc] = math.radians(ph)
+        # CSV インポート波形 (prompts/73): 種類数が少ない想定なので、電極ごとに
+        # 配列を持つのではなく「波形リスト (self._waveforms) + 節点→波形インデックス
+        # (self._wf_index、-1=波形なし)」で持つ。評価時 (_dirichlet_values) は
+        # 波形ごとに np.interp を1回だけ呼び、インデックスで各節点へ展開する
+        wf_map = mesh.dirichlet_waveform
+        self._waveforms: list[VoltageWaveform] = []
+        self._wf_index = np.full(n_fixed, -1, dtype=np.int64)
+        wf_id_to_idx: dict[int, int] = {}
+        for row, (i, _) in enumerate(items):
+            wf = wf_map.get(i)
+            if wf is None:
+                continue
+            key = id(wf)
+            idx = wf_id_to_idx.get(key)
+            if idx is None:
+                idx = len(self._waveforms)
+                wf_id_to_idx[key] = idx
+                self._waveforms.append(wf)
+            self._wf_index[row] = idx
         exclude = self.fixed
         if self.canon is not None:
             # 周期スレーブ節点は自由度から除外する (剛性行列の行がマスターへ寄っている)
@@ -527,18 +564,24 @@ class PicSimulation:
     # ---- 内部処理 -----------------------------------------------------------
 
     def _find_rf_freq(self) -> float | None:
-        """boundaries / conductor 領域の voltage_rf から位相分解の基本周波数を返す。
+        """boundaries / conductor 領域の voltage_rf / voltage_waveform から
+        位相分解の基本周波数を返す。
 
         デュアル周波数 (prompts/49) では全成分の最小周波数 (= 基本波。低周波の
-        1周期に高周波の複数サイクルが収まる) を使う。無ければ None (cycle 無効)。
-        単一周波数のみの従来構成では従来と同じ値になる。
+        1周期に高周波の複数サイクルが収まる) を使う。CSV 波形 (prompts/73) の
+        freq_hz も同じ集合に加える (波形も1周期ループなので基本波として扱える)。
+        無ければ None (cycle 無効)。単一周波数のみの従来構成では従来と同じ値になる。
         """
         freqs: list[float] = []
         for bc in self.project.geometry.boundaries:
             freqs.extend(c.freq_hz for c in rf_components(bc.voltage_rf))
+            if bc.voltage_waveform is not None:
+                freqs.append(bc.voltage_waveform.freq_hz)
         for region in self.project.geometry.regions:
             if region.type == "conductor":
                 freqs.extend(c.freq_hz for c in rf_components(region.voltage_rf))
+                if region.voltage_waveform is not None:
+                    freqs.append(region.voltage_waveform.freq_hz)
         return min(freqs) if freqs else None
 
     def _phase_bin(self, t: float) -> int:
@@ -1018,13 +1061,22 @@ class PicSimulation:
         return f
 
     def _dirichlet_values(self, t: float) -> np.ndarray:
-        """時刻 t の Dirichlet 値 V(t) = V_dc + Σ_k A_k sin(ω_k t + φ_k)。
+        """時刻 t の Dirichlet 値 V(t) = V_dc + Σ_k A_k sin(ω_k t + φ_k) + V_wf(t)。
 
         デュアル周波数対応 (prompts/49): rf_* は (n_fixed, K) 行列で、成分和を取る。
+        CSV 波形 (prompts/73) は種類数が少ない想定なので、波形ごとに1回だけ
+        _eval_waveform を呼び、節点→波形インデックス (self._wf_index) で展開する。
         """
-        return self.v_dc + np.sum(
+        v = self.v_dc + np.sum(
             self.rf_amp * np.sin(self.rf_omega * t + self.rf_phase), axis=1
         )
+        if self._waveforms:
+            wf_vals = np.array(
+                [_eval_waveform(wf.phase, wf.v, wf.freq_hz, t) for wf in self._waveforms]
+            )
+            mask = self._wf_index >= 0
+            v[mask] += wf_vals[self._wf_index[mask]]
+        return v
 
     def _solve_phi(self, f_dep: np.ndarray, t: float) -> np.ndarray:
         """ポアソン求解。前分解済み LU で右辺のみ更新して解く (再分解しない)。"""

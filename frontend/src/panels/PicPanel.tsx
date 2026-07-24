@@ -178,7 +178,8 @@ function emitterSummary(e: Emitter, lengthUnit: LengthUnit): string {
 
 // project.geometry.boundaries の Dirichlet 境界に設定された RF 周波数を、全境界・全成分から
 // 重複排除して昇順に集める (prompts/68: ステップ数のRFサイクル換算に使う)。
-// 0Hz や未設定 (voltage_rf なし) は換算の意味がないので除外する
+// 0Hz や未設定 (voltage_rf なし) は換算の意味がないので除外する。
+// CSV波形 (voltage_waveform、prompts/73) も1周期でループする周波数として同様に含める
 function collectRfFrequencies(project: Project): number[] {
   const freqs = new Set<number>();
   for (const bc of project.geometry.boundaries) {
@@ -186,6 +187,7 @@ function collectRfFrequencies(project: Project): number[] {
     for (const rf of rfComponents(bc.voltage_rf)) {
       if (rf.freq_hz > 0) freqs.add(rf.freq_hz);
     }
+    if (bc.voltage_waveform && bc.voltage_waveform.freq_hz > 0) freqs.add(bc.voltage_waveform.freq_hz);
   }
   return Array.from(freqs).sort((a, b) => a - b);
 }

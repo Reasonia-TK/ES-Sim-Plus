@@ -26,6 +26,15 @@ export function rfComponents(rf: VoltageRf | VoltageRf[] | null | undefined): Vo
   return Array.isArray(rf) ? rf : [rf];
 }
 
+// CSV インポート波形 (prompts/73)。V(t) = interp(frac(t·freq_hz), phase, v) として
+// 指定周波数の1周期でループ再生する (voltage_rf と併用可、PICのみ使用)。
+// phase は CSV の時間を [0, 1) に正規化した位相 (昇順、取り込み時にフロントで計算)
+export interface VoltageWaveform {
+  freq_hz: number;    // [Hz]
+  phase: number[];    // 正規化位相 [0, 1) (昇順)
+  v: number[];        // 対応する電圧 [V]
+}
+
 export interface Region {
   id: string;
   type: RegionType;
@@ -36,6 +45,8 @@ export interface Region {
   eps_r?: number;   // dielectric
   rho?: number;     // charge
   voltage_rf?: VoltageRf | VoltageRf[]; // conductor: RF重畳 (未指定なら直流のみ。複数成分でデュアル周波数)
+  // conductor: CSV波形 (prompts/73)。スキーマ上のみ対応、UIは境界条件辺のみ (下記 DirichletBC 参照)
+  voltage_waveform?: VoltageWaveform;
   see_gamma?: number; // conductor: 二次電子放出係数 γ (未指定/0 で無効)
 }
 
@@ -61,6 +72,8 @@ export interface DirichletBC {
   type: "dirichlet";
   voltage: number;
   voltage_rf?: VoltageRf | VoltageRf[]; // RF重畳 (未指定なら直流のみ。複数成分でデュアル周波数)
+  // CSV インポート波形 (prompts/73)。voltage_rf と併用可 (V(t) = voltage + Σ RF + V_wf(t))
+  voltage_waveform?: VoltageWaveform;
   see_gamma?: number; // 二次電子放出係数 γ (未指定/0 で無効)
 }
 

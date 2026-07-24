@@ -47,6 +47,34 @@ def rf_components(rf: "VoltageRF | list[VoltageRF] | None") -> "list[VoltageRF]"
     return list(rf)
 
 
+class VoltageWaveform(BaseModel):
+    """CSV からインポートした任意周期波形 (prompts/73)。
+
+    CSV の時間列は波形の「形状」を定義するためだけに使い、実際の周期は
+    freq_hz (ユーザー指定) で決まる。取り込み時にフロント側で時間 t を
+    [t_min, t_max] → [0, 1) へ線形写像した正規化位相として保存するため、
+    ここでは phase を昇順・[0,1) の範囲としてのみ検証する。
+    評価は V_wf(t) = interp(frac(t·freq_hz), phase, v) (pic.py 参照)。
+    voltage_rf と同じく静電ソルブでは無視され、PIC のみが使う。
+    """
+
+    freq_hz: float = Field(..., gt=0)
+    phase: list[float]  # 正規化位相 [0, 1) (昇順)
+    v: list[float]       # 対応する電圧 [V]
+
+    @model_validator(mode="after")
+    def _check_phase(self) -> "VoltageWaveform":
+        if len(self.phase) != len(self.v):
+            raise ValueError("VoltageWaveform: phase と v は同じ長さが必要です")
+        if len(self.phase) < 2:
+            raise ValueError("VoltageWaveform: phase/v は2点以上必要です")
+        if any(p < 0.0 or p >= 1.0 for p in self.phase):
+            raise ValueError("VoltageWaveform: phase は [0, 1) の範囲である必要があります")
+        if any(a >= b for a, b in zip(self.phase, self.phase[1:])):
+            raise ValueError("VoltageWaveform: phase は狭義昇順である必要があります")
+        return self
+
+
 class Region(BaseModel):
     id: str
     type: Literal["conductor", "dielectric", "charge"]
@@ -55,6 +83,9 @@ class Region(BaseModel):
     voltage: float | None = None  # conductor: 電位 [V] (直流分)
     # conductor: RF 成分 (PIC のみ使用)。単一またはリスト (デュアル周波数、prompts/49)
     voltage_rf: VoltageRF | list[VoltageRF] | None = None
+    # conductor: CSV インポート波形 (PIC のみ使用、prompts/73)。voltage_rf と併用可
+    # (V(t) = voltage + Σ RF + V_wf(t))。UI は境界条件辺のみ対応、スキーマ上のみ対応
+    voltage_waveform: VoltageWaveform | None = None
     eps_r: float = 1.0            # dielectric: 比誘電率
     rho: float = 0.0              # charge: 電荷密度 [C/m^3]
     see_gamma: float = Field(
@@ -87,6 +118,9 @@ class BoundaryCondition(BaseModel):
     voltage: float = 0.0
     # RF 成分 (PIC のみ使用)。単一またはリスト (デュアル周波数、prompts/49)
     voltage_rf: VoltageRF | list[VoltageRF] | None = None
+    # CSV インポート波形 (PIC のみ使用、prompts/73)。voltage_rf と併用可
+    # (V(t) = voltage + Σ RF + V_wf(t))。dirichlet のみ有効
+    voltage_waveform: VoltageWaveform | None = None
     see_gamma: float = Field(0.0, ge=0, description="二次電子放出係数 γ (0 = 無効、PIC のみ使用)")
 
     @model_validator(mode="after")

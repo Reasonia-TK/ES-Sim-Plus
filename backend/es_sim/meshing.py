@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 import gmsh
 import numpy as np
 
-from .schema import Project, Region, rf_components
+from .schema import Project, Region, VoltageWaveform, rf_components
 
 # 円形状の多角形分割数の下限・上限 (仕様書 §8 スキーマ契約参照)
 CIRCLE_SEGMENTS_MIN = 24
@@ -38,6 +38,9 @@ class Mesh:
     # 節点番号 -> RF 成分列 ((振幅 [V], 周波数 [Hz], 位相 [deg]), ...)。
     # デュアル周波数対応 (prompts/49) で成分のタプル列。PIC のみ使用 (フェーズ1/2 は無視)
     dirichlet_rf: dict[int, tuple[tuple[float, float, float], ...]] = field(default_factory=dict)
+    # 節点番号 -> CSV インポート波形 (prompts/73)。PIC のみ使用 (フェーズ1/2 は無視)。
+    # 種類数が少ない想定なので pic.py 側で「波形リスト + 節点インデックス」に組み替える
+    dirichlet_waveform: dict[int, VoltageWaveform] = field(default_factory=dict)
     # 節点番号 -> 二次電子放出係数 γ (>0 の節点のみ)。PIC のみ使用
     see_gamma: dict[int, float] = field(default_factory=dict)
     # 周期境界の正準化写像 (N,)。periodic_map[i] = 節点 i のマスター節点番号
@@ -197,7 +200,8 @@ def _generate_unstructured(project: Project) -> Mesh:
                     if c in kept_curve_set and c not in curves:
                         curves.append(c)
             conductor_curves.append(
-                (region.id, region.voltage, region.voltage_rf, region.see_gamma, curves)
+                (region.id, region.voltage, region.voltage_rf, region.voltage_waveform,
+                 region.see_gamma, curves)
             )
 
         # 局所メッシュサイズ用: 各領域のフラグメント境界点 (従来相当の挙動維持)
@@ -310,6 +314,7 @@ def _generate_unstructured(project: Project) -> Mesh:
         # ---- Dirichlet 節点 ------------------------------------------------
         dirichlet: dict[int, float] = {}
         dirichlet_rf: dict[int, tuple[tuple[float, float, float], ...]] = {}
+        dirichlet_waveform: dict[int, VoltageWaveform] = {}
         see_gamma: dict[int, float] = {}
         electrode: dict[int, str] = {}
 
@@ -317,8 +322,9 @@ def _generate_unstructured(project: Project) -> Mesh:
             tags, _, _ = gmsh.model.mesh.getNodes(1, curve_tag, includeBoundary=True)
             return tag_to_index[np.asarray(tags, dtype=np.int64)]
 
-        def _assign(n: int, voltage: float, rf, label: str) -> None:
-            """節点に直流分・RF 成分列・電極ラベルを設定する (RF なしなら既存 RF を消して上書き)。
+        def _assign(n: int, voltage: float, rf, wf: VoltageWaveform | None, label: str) -> None:
+            """節点に直流分・RF 成分列・CSV波形・電極ラベルを設定する
+            (RF/波形なしなら既存の設定を消して上書き)。
 
             label は fem.py の残差法による電荷計算用の帰属先 ("edge0".."edge3" または
             conductor の region id)。dirichlet と同じ呼び出し順で上書きするため、
@@ -331,6 +337,10 @@ def _generate_unstructured(project: Project) -> Mesh:
                 dirichlet_rf[n] = tuple((c.amplitude, c.freq_hz, c.phase_deg) for c in comps)
             else:
                 dirichlet_rf.pop(n, None)
+            if wf is not None:
+                dirichlet_waveform[n] = wf
+            else:
+                dirichlet_waveform.pop(n, None)
 
         def _assign_gamma(n: int, gamma: float) -> None:
             """節点に SEE 係数 γ を設定する (共有節点は最大値を採用)。"""
@@ -344,14 +354,14 @@ def _generate_unstructured(project: Project) -> Mesh:
             for edge in bc.edges:
                 for c in edge_curves.get(edge, []):
                     for n in _curve_nodes(c):
-                        _assign(int(n), bc.voltage, bc.voltage_rf, f"edge{edge}")
+                        _assign(int(n), bc.voltage, bc.voltage_rf, bc.voltage_waveform, f"edge{edge}")
                         _assign_gamma(int(n), bc.see_gamma)
 
         # 電極輪郭 (電極の指定を優先して上書き。外枠に重なった区間も電極が勝つ)
-        for region_id, voltage, rf, gamma, curves in conductor_curves:
+        for region_id, voltage, rf, wf, gamma, curves in conductor_curves:
             for c in curves:
                 for n in _curve_nodes(c):
-                    _assign(int(n), voltage, rf, region_id)
+                    _assign(int(n), voltage, rf, wf, region_id)
                     _assign_gamma(int(n), gamma)
 
         # ---- 周期節点対応 (スレーブ → マスター) ------------------------------
@@ -368,7 +378,8 @@ def _generate_unstructured(project: Project) -> Mesh:
 
         # ---- 未参照節点の除去・再番号付け・周期正準化 (共通後処理) -------------
         return _finalize_mesh(
-            nodes, triangles, tri_region, dirichlet, dirichlet_rf, see_gamma, pairs, electrode
+            nodes, triangles, tri_region, dirichlet, dirichlet_rf, dirichlet_waveform,
+            see_gamma, pairs, electrode,
         )
     finally:
         gmsh.finalize()
@@ -380,6 +391,7 @@ def _finalize_mesh(
     tri_region: np.ndarray,
     dirichlet: dict[int, float],
     dirichlet_rf: dict[int, tuple[tuple[float, float, float], ...]],
+    dirichlet_waveform: dict[int, VoltageWaveform],
     see_gamma: dict[int, float],
     pairs: dict[int, int],
     electrode: dict[int, str] | None = None,
@@ -398,6 +410,7 @@ def _finalize_mesh(
 
     dirichlet = {int(remap[n]): v for n, v in dirichlet.items() if remap[n] >= 0}
     dirichlet_rf = {int(remap[n]): v for n, v in dirichlet_rf.items() if remap[n] >= 0}
+    dirichlet_waveform = {int(remap[n]): v for n, v in dirichlet_waveform.items() if remap[n] >= 0}
     see_gamma = {int(remap[n]): v for n, v in see_gamma.items() if remap[n] >= 0}
     electrode = {int(remap[n]): v for n, v in electrode.items() if remap[n] >= 0}
 
@@ -424,6 +437,8 @@ def _finalize_mesh(
                     dirichlet[m] = dirichlet[n]
                     if n in dirichlet_rf:
                         dirichlet_rf[m] = dirichlet_rf[n]
+                    if n in dirichlet_waveform:
+                        dirichlet_waveform[m] = dirichlet_waveform[n]
                     if n in electrode:
                         electrode[m] = electrode[n]
             for n in list(see_gamma):
@@ -433,7 +448,8 @@ def _finalize_mesh(
 
     return Mesh(nodes=nodes, triangles=triangles,
                 tri_region=tri_region, dirichlet=dirichlet,
-                dirichlet_rf=dirichlet_rf, see_gamma=see_gamma,
+                dirichlet_rf=dirichlet_rf, dirichlet_waveform=dirichlet_waveform,
+                see_gamma=see_gamma,
                 periodic_map=periodic_map, electrode=electrode)
 
 
@@ -568,11 +584,13 @@ def _generate_structured(project: Project) -> Mesh:
     # ---- Dirichlet 節点 -------------------------------------------------------
     dirichlet: dict[int, float] = {}
     dirichlet_rf: dict[int, tuple[tuple[float, float, float], ...]] = {}
+    dirichlet_waveform: dict[int, VoltageWaveform] = {}
     see_gamma: dict[int, float] = {}
     electrode: dict[int, str] = {}
 
-    def _assign(n: int, voltage: float, rf, label: str) -> None:
-        """節点に直流分・RF 成分列・電極ラベルを設定する (RF なしなら既存 RF を消して上書き)。
+    def _assign(n: int, voltage: float, rf, wf: VoltageWaveform | None, label: str) -> None:
+        """節点に直流分・RF 成分列・CSV波形・電極ラベルを設定する
+        (RF/波形なしなら既存の設定を消して上書き)。
 
         label は fem.py の残差法による電荷計算用の帰属先 ("edge0".."edge3" または
         conductor の region id)。
@@ -584,6 +602,10 @@ def _generate_structured(project: Project) -> Mesh:
             dirichlet_rf[n] = tuple((c.amplitude, c.freq_hz, c.phase_deg) for c in comps)
         else:
             dirichlet_rf.pop(n, None)
+        if wf is not None:
+            dirichlet_waveform[n] = wf
+        else:
+            dirichlet_waveform.pop(n, None)
 
     def _assign_gamma(n: int, gamma: float) -> None:
         """節点に SEE 係数 γ を設定する (共有節点は最大値を採用)。"""
@@ -597,7 +619,7 @@ def _generate_structured(project: Project) -> Mesh:
         for edge in bc.edges:
             q1, q2 = poly[edge % 4], poly[(edge + 1) % 4]
             for n in np.nonzero(_points_on_segment(nodes, q1, q2, tol))[0]:
-                _assign(int(n), bc.voltage, bc.voltage_rf, f"edge{edge}")
+                _assign(int(n), bc.voltage, bc.voltage_rf, bc.voltage_waveform, f"edge{edge}")
                 _assign_gamma(int(n), bc.see_gamma)
 
     # 電極: conductor に内包される節点 (電極の指定を優先して上書き)。
@@ -605,7 +627,7 @@ def _generate_structured(project: Project) -> Mesh:
     for i in conductor_ids:
         region = geo.regions[i]
         for n in np.nonzero(_points_in_region(region, nodes, tol))[0]:
-            _assign(int(n), region.voltage, region.voltage_rf, region.id)
+            _assign(int(n), region.voltage, region.voltage_rf, region.voltage_waveform, region.id)
             _assign_gamma(int(n), region.see_gamma)
 
     # ---- periodic: 対辺の節点は格子で完全一致するので座標対応で組む -----------
@@ -636,5 +658,6 @@ def _generate_structured(project: Project) -> Mesh:
 
     # ---- 共通後処理 (未参照節点の除去・再番号付け・周期正準化) ----------------
     return _finalize_mesh(
-        nodes, triangles, tri_region, dirichlet, dirichlet_rf, see_gamma, pairs, electrode
+        nodes, triangles, tri_region, dirichlet, dirichlet_rf, dirichlet_waveform,
+        see_gamma, pairs, electrode,
     )

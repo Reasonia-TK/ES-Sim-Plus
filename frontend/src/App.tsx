@@ -53,6 +53,7 @@ import type {
   SolveResult,
   TraceResult,
   VoltageRf,
+  VoltageWaveform,
 } from "./types";
 
 // 粒子パネルの既定値 (project.particles が未設定の場合の初期表示に使う)
@@ -809,11 +810,23 @@ export default function App() {
 
   const edgeState = (
     edgeIndex: number,
-  ): { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf | VoltageRf[]; seeGamma: number } => {
+  ): {
+    type: EdgeBcType;
+    voltage: number;
+    voltageRf?: VoltageRf | VoltageRf[];
+    voltageWaveform?: VoltageWaveform;
+    seeGamma: number;
+  } => {
     const b = project.geometry.boundaries.find((b) => b.edges.includes(edgeIndex));
     if (!b) return { type: "neumann", voltage: 0, seeGamma: 0 };
     if (b.type === "dirichlet") {
-      return { type: "dirichlet", voltage: b.voltage, voltageRf: b.voltage_rf, seeGamma: b.see_gamma ?? 0 };
+      return {
+        type: "dirichlet",
+        voltage: b.voltage,
+        voltageRf: b.voltage_rf,
+        voltageWaveform: b.voltage_waveform,
+        seeGamma: b.see_gamma ?? 0,
+      };
     }
     return { type: b.type, voltage: 0, seeGamma: 0 };
   };
@@ -859,6 +872,21 @@ export default function App() {
         ...p.geometry,
         boundaries: p.geometry.boundaries.map((b) =>
           b.type === "dirichlet" && b.edges.includes(edgeIndex) ? { ...b, voltage_rf } : b,
+        ),
+      },
+    });
+  };
+
+  // 境界条件のCSV波形設定 (対象エッジが Dirichlet でない場合は何もしない、prompts/73)。
+  // voltage_rf と併用可 (V(t) = voltage + Σ RF + V_wf(t))。undefined で解除
+  const setEdgeVoltageWaveform = (edgeIndex: number, voltage_waveform: VoltageWaveform | undefined) => {
+    const p = projectRef.current;
+    commitProject({
+      ...p,
+      geometry: {
+        ...p.geometry,
+        boundaries: p.geometry.boundaries.map((b) =>
+          b.type === "dirichlet" && b.edges.includes(edgeIndex) ? { ...b, voltage_waveform } : b,
         ),
       },
     });
@@ -1484,6 +1512,7 @@ export default function App() {
                 setEdgeType={setEdgeType}
                 setEdgeVoltage={setEdgeVoltage}
                 setEdgeVoltageRf={setEdgeVoltageRf}
+                setEdgeVoltageWaveform={setEdgeVoltageWaveform}
                 setEdgeSeeGamma={setEdgeSeeGamma}
                 setMeshSize={setMeshSize}
                 setMeshMode={setMeshMode}

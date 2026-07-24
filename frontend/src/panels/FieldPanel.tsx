@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
 import { Toggle } from "../Toggle";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
@@ -15,6 +15,7 @@ import type {
   RegionType,
   SolveResult,
   VoltageRf,
+  VoltageWaveform,
 } from "../types";
 
 /**
@@ -98,6 +99,109 @@ function RfComponentsEditor({
   );
 }
 
+// CSV波形インポート (prompts/73)。1列目=時間、2列目=電圧の (t, v) 行を取り出し、
+// t の [t_min, t_max] を [0, 1) の正規化位相へ線形写像する。
+// 末尾行 (t = t_max) は評価時の周期折返し点 ((phase[0]+1, v[0]) を仮想的に補う、
+// pic.py 側) と同じ位相 (=1) に重なるため保存対象からは除く
+// (含めると phase が [0,1) の範囲制約に違反するため)。
+function parseWaveformCsv(text: string): { phase: number[]; v: number[]; freqHz: number } | { error: string } {
+  const rows: [number, number][] = [];
+  for (const rawLine of text.split(/\r\n|\r|\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    // 区切りはカンマ/タブ/空白のいずれにも対応する
+    const parts = line.split(/[,\t\s]+/).filter((s) => s.length > 0);
+    if (parts.length < 2) continue;
+    const t = Number(parts[0]);
+    const v = Number(parts[1]);
+    // 数値2つに解釈できない行 (ヘッダ等) は黙ってスキップする
+    if (!Number.isFinite(t) || !Number.isFinite(v)) continue;
+    rows.push([t, v]);
+  }
+  if (rows.length < 2) return { error: "有効な数値行 (時間, 電圧) が2点未満です" };
+  rows.sort((a, b) => a[0] - b[0]);
+  const tMin = rows[0][0];
+  const tMax = rows[rows.length - 1][0];
+  if (tMax === tMin) return { error: "時間の範囲が0です (全行が同じ時刻)" };
+  const kept = rows.slice(0, -1); // 末尾 (t_max) は折返し点と重複するため除外
+  if (kept.length < 2) return { error: "有効な数値行 (時間, 電圧) が2点未満です" };
+  return {
+    phase: kept.map(([t]) => (t - tMin) / (tMax - tMin)),
+    v: kept.map(([, vv]) => vv),
+    freqHz: 1 / (tMax - tMin), // CSVの時間レンジをそのまま1周期と解釈した周波数を初期値にする
+  };
+}
+
+// CSV波形 (voltage_waveform) の編集UI (Dirichlet辺のみ)。未取り込み時はインポートボタン、
+// 取り込み後は周波数入力+解除ボタンを表示する。RF重畳 (voltage_rf) とは独立に併用できる
+function WaveformImportEditor({
+  waveform,
+  onChange,
+}: {
+  waveform: VoltageWaveform | undefined;
+  onChange: (next: VoltageWaveform | undefined) => void;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const parsed = parseWaveformCsv(String(reader.result ?? ""));
+      if ("error" in parsed) {
+        setError(parsed.error);
+        return;
+      }
+      setError(null);
+      onChange({ freq_hz: parsed.freqHz, phase: parsed.phase, v: parsed.v });
+    };
+    reader.readAsText(file);
+  };
+
+  return (
+    <div className="rf-editor">
+      <span className="rf-comp-label">CSV波形</span>
+      {waveform ? (
+        <div className="edge-rf-row">
+          <span>{waveform.phase.length}点 読み込み済み</span>
+          <label className="rf-compact-label" title="周波数 [Hz] (1周期の繰り返し周波数)">
+            f
+            <CommitNumberInput
+              className="rf-compact"
+              value={waveform.freq_hz}
+              onCommit={(freq_hz) => onChange({ ...waveform, freq_hz })}
+            />
+          </label>
+          <button type="button" className="rf-remove-btn" title="CSV波形を解除" onClick={() => onChange(undefined)}>
+            解除
+          </button>
+        </div>
+      ) : (
+        <div className="edge-rf-row">
+          <button type="button" className="secondary" onClick={() => fileRef.current?.click()}>
+            CSVをインポート
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="file-input"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) handleFile(f);
+              e.target.value = "";
+            }}
+          />
+        </div>
+      )}
+      {error && <div className="error">{error}</div>}
+      <div className="hint">
+        1列目=時間、2列目=電圧のCSV。波形は指定周波数の1周期としてループ再生されます (PICでのみ有効)。
+      </div>
+    </div>
+  );
+}
+
 // 矩形 domain の外周エッジ順: 0=下, 1=右, 2=上, 3=左
 // (ProjectTree でもエッジ名を揃えて表示するため export する)
 export const EDGE_LABELS_XY = ["下 (y=0)", "右 (x=w)", "上 (y=h)", "左 (x=0)"];
@@ -114,12 +218,17 @@ interface Props {
   domainH: number;
   setDomainSize: (w: number, h: number) => void;
   setCoord: (coord: "xy" | "rz" | "rz_x0") => void;
-  edgeState: (
-    edgeIndex: number,
-  ) => { type: EdgeBcType; voltage: number; voltageRf?: VoltageRf | VoltageRf[]; seeGamma: number };
+  edgeState: (edgeIndex: number) => {
+    type: EdgeBcType;
+    voltage: number;
+    voltageRf?: VoltageRf | VoltageRf[];
+    voltageWaveform?: VoltageWaveform;
+    seeGamma: number;
+  };
   setEdgeType: (edgeIndex: number, type: EdgeBcType) => void;
   setEdgeVoltage: (edgeIndex: number, voltage: number) => void;
   setEdgeVoltageRf: (edgeIndex: number, voltage_rf: VoltageRf | VoltageRf[] | undefined) => void;
+  setEdgeVoltageWaveform: (edgeIndex: number, voltage_waveform: VoltageWaveform | undefined) => void;
   setEdgeSeeGamma: (edgeIndex: number, see_gamma: number) => void;
   setMeshSize: (size: number) => void;
   setMeshMode: (mode: "unstructured" | "structured") => void;
@@ -164,6 +273,7 @@ export default function FieldPanel({
   setEdgeType,
   setEdgeVoltage,
   setEdgeVoltageRf,
+  setEdgeVoltageWaveform,
   setEdgeSeeGamma,
   setMeshSize,
   setMeshMode,
@@ -296,6 +406,12 @@ export default function FieldPanel({
                 </div>
                 {!isAxisEdge && st.type === "dirichlet" && rfList.length > 0 && (
                   <RfComponentsEditor components={rfList} onChange={(next) => setEdgeVoltageRf(i, next)} />
+                )}
+                {!isAxisEdge && st.type === "dirichlet" && (
+                  <WaveformImportEditor
+                    waveform={st.voltageWaveform}
+                    onChange={(next) => setEdgeVoltageWaveform(i, next)}
+                  />
                 )}
               </div>
             );
