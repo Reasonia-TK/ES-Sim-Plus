@@ -275,21 +275,21 @@ export default function ProjectTree({
           </div>
           {openStudy && (
             <div className="tree-section-body">
-              {match("静電場FEM") && (
+              {match("静電場") && (
                 <div
                   className={`tree-row ${activeNode === "study-fem" ? "active" : ""}`}
                   onClick={() => onSelectNode("study-fem")}
                 >
-                  <span>静電場 FEM</span>
+                  <span>静電場</span>
                   <StatusBadge {...femBadge()} />
                 </div>
               )}
-              {match("粒子軌道追跡") && (
+              {match("粒子追跡") && (
                 <div
                   className={`tree-row ${activeNode === "study-trace" ? "active" : ""}`}
                   onClick={() => onSelectNode("study-trace")}
                 >
-                  <span>粒子軌道追跡</span>
+                  <span>粒子追跡</span>
                   <StatusBadge {...traceBadge()} />
                 </div>
               )}
@@ -302,12 +302,12 @@ export default function ProjectTree({
                   <StatusBadge {...picBadge()} />
                 </div>
               )}
-              {match("ガス流れDSMC") && (
+              {match("DSMC") && (
                 <div
                   className={`tree-row ${activeNode === "study-gas" ? "active" : ""}`}
                   onClick={() => onSelectNode("study-gas")}
                 >
-                  <span>ガス流れ DSMC</span>
+                  <span>DSMC</span>
                   <StatusBadge {...gasBadge()} />
                 </div>
               )}
@@ -326,36 +326,36 @@ export default function ProjectTree({
             <div className="tree-section-body">
               {/* 静電場の結果 (電位分布φ/電場|E|/ラインプロファイル) は他モジュールと同様
                   1モジュール=1結果ノードに揃えるため単一ノードにまとめる (prompts/69) */}
-              {match("静電場結果") && (
+              {match("静電場") && (
                 <div
                   className={`tree-row ${activeNode === "result-fem" ? "active" : ""}`}
                   onClick={() => onSelectNode("result-fem")}
                 >
-                  静電場結果
+                  静電場
                 </div>
               )}
-              {match("粒子軌道") && (
+              {match("粒子追跡") && (
                 <div
                   className={`tree-row ${activeNode === "result-trace" ? "active" : ""}`}
                   onClick={() => onSelectNode("result-trace")}
                 >
-                  粒子軌道
+                  粒子追跡
                 </div>
               )}
-              {match("PIC結果") && (
+              {match("PIC-MCC") && (
                 <div
                   className={`tree-row ${activeNode === "result-pic" ? "active" : ""}`}
                   onClick={() => onSelectNode("result-pic")}
                 >
-                  PIC 結果
+                  PIC-MCC
                 </div>
               )}
-              {match("ガス流れ結果") && (
+              {match("DSMC") && (
                 <div
                   className={`tree-row ${activeNode === "result-gas" ? "active" : ""}`}
                   onClick={() => onSelectNode("result-gas")}
                 >
-                  ガス流れ結果
+                  DSMC
                 </div>
               )}
             </div>

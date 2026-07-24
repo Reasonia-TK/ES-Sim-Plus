@@ -344,7 +344,7 @@ export default function ParticlePanel({
 
           {/* results専用ページで未実行の場合のヒント (mode="all" の従来ページでは出さない) */}
           {mode === "results" && !traceResult && (
-            <p className="hint">トレースが未実行です。スタディ「粒子軌道追跡」から実行してください。</p>
+            <p className="hint">トレースが未実行です。スタディ「粒子追跡」から実行してください。</p>
           )}
         </>
       )}

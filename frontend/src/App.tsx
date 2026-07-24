@@ -156,14 +156,14 @@ const NODE_TITLES: Record<TreeNode, string> = {
   boundary: "ジオメトリ — 境界条件",
   mesh: "ジオメトリ — メッシュ",
   bfield: "ジオメトリ — 磁場",
-  "study-fem": "スタディ — 静電場 FEM",
-  "study-trace": "スタディ — 粒子軌道追跡",
+  "study-fem": "スタディ — 静電場",
+  "study-trace": "スタディ — 粒子追跡",
   "study-pic": "スタディ — PIC-MCC",
-  "study-gas": "スタディ — ガス流れ DSMC",
+  "study-gas": "スタディ — DSMC",
   "result-fem": "結果 — 静電場",
-  "result-trace": "結果 — 粒子軌道",
-  "result-pic": "結果 — PIC 結果",
-  "result-gas": "結果 — ガス流れ結果",
+  "result-trace": "結果 — 粒子追跡",
+  "result-pic": "結果 — PIC-MCC",
+  "result-gas": "結果 — DSMC",
 };
 
 // ツールバーの現在ツールをステータスバーに表示するための日本語ラベル
@@ -181,7 +181,7 @@ const TOOL_LABELS: Record<Tool, string> = {
 // セクションと同内容だが、結果ノード単体でも確認できるようにここでも表示する)
 function ResultSummary({ result, isAxisym }: { result: SolveResult | null; isAxisym: boolean }) {
   if (!result) {
-    return <div className="muted">(まだ解析結果がありません。スタディ「静電場 FEM」で Solve を実行してください)</div>;
+    return <div className="muted">(まだ解析結果がありません。スタディ「静電場」で Solve を実行してください)</div>;
   }
   return (
     <>
@@ -1635,7 +1635,7 @@ export default function App() {
                 result が無い場合も表示オプション等は操作可能なままにし、先頭にヒントのみ出す */}
             <div style={{ display: showResultFemPage ? "block" : "none" }}>
               {!result && (
-                <p className="hint">静電場FEMが未実行です。スタディ「静電場 FEM」から実行してください。</p>
+                <p className="hint">静電場FEMが未実行です。スタディ「静電場」から実行してください。</p>
               )}
               <h2>結果表示</h2>
               <label className="snap">
@@ -1823,7 +1823,7 @@ export default function App() {
         {statusError ? (
           <span className="statusbar-error">{statusError}</span>
         ) : busy ? (
-          <span>静電場FEM/トレース 計算中...</span>
+          <span>静電場/トレース 計算中...</span>
         ) : picRunning ? (
           <>
             <span>
@@ -1835,7 +1835,7 @@ export default function App() {
           </>
         ) : gasRunning ? (
           <>
-            <span>ガス流れDSMC 実行中... {gasPct}%</span>
+            <span>DSMC 実行中... {gasPct}%</span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${gasPct}%` }} />
             </div>

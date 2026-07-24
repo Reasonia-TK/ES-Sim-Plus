@@ -337,7 +337,7 @@ export default function FieldPanel({
         <>
           <h2>一様磁場 [T]</h2>
           <div className="hint">
-            粒子軌道追跡・PIC のローレンツ力に適用 (静電場ソルブには影響しない)。軸対称モードでは使用不可
+            粒子追跡・PIC のローレンツ力に適用 (静電場ソルブには影響しない)。軸対称モードでは使用不可
           </div>
           {isAxisym && (
             <div className="hint">軸対称モードでは一様磁場は設定できません (∇·B=0 と矛盾するため)。</div>

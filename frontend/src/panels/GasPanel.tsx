@@ -584,7 +584,7 @@ export default function GasPanel({
       {/* results専用ページで未実行の場合のヒント (mode="all" の従来ページでは出さない)。
           dsmc が無効の場合も含め、結果セクションが表示されないケースをまとめて拾う */}
       {mode === "results" && !(dsmc && result) && (
-        <p className="hint">DSMC計算が未実行です。スタディ「ガス流れ DSMC」から実行してください。</p>
+        <p className="hint">DSMC計算が未実行です。スタディ「DSMC」から実行してください。</p>
       )}
     </>
   );
