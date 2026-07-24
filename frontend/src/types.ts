@@ -507,6 +507,15 @@ export interface MeshResult {
   region_of_triangle: number[];
 }
 
+// 電極 (domain 外周の Dirichlet エッジ or conductor 領域) ごとの誘起電荷 (prompts/71)。
+// label は "edge0".."edge3" (FieldPanel の EDGE_LABELS_* で辺名に変換する) または
+// conductor の region id。q の単位は xy: [C/m] (奥行き1m)、rz/rz_x0: [C]
+export interface ElectrodeCharge {
+  label: string;
+  voltage: number;
+  q: number;
+}
+
 export interface SolveResult {
   mesh: MeshResult;
   v: number[];
@@ -515,6 +524,11 @@ export interface SolveResult {
   v_max: number;
   e_abs_max: number;
   energy: number;
+  // 後方互換のため optional (旧バックエンドの応答には無い)
+  charges?: ElectrodeCharge[];
+  // 静電容量。電極電位がちょうど2水準・空間電荷ρ=0の場合のみ非 null。
+  // xy: [F/m]、rz/rz_x0: [F] (prompts/71)
+  capacitance?: number | null;
 }
 
 export interface Health {

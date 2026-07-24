@@ -178,12 +178,26 @@ const TOOL_LABELS: Record<Tool, string> = {
   collector: "コレクタ",
 };
 
+// 電極ラベル ("edge0".."edge3" は FieldPanel の EDGE_LABELS_* で辺名に変換、
+// conductor の region id はそのまま表示する)
+function electrodeDisplayLabel(label: string, coord: Project["coord"]): string {
+  const m = /^edge(\d+)$/.exec(label);
+  if (!m) return label;
+  const edgeLabels =
+    coord === "rz" ? EDGE_LABELS_RZ : coord === "rz_x0" ? EDGE_LABELS_RZ_X0 : EDGE_LABELS_XY;
+  const i = Number(m[1]);
+  return edgeLabels[i] ?? label;
+}
+
 // 「静電場結果」インスペクタページの解析結果サマリ (FieldPanel の solve
 // セクションと同内容だが、結果ノード単体でも確認できるようにここでも表示する)
-function ResultSummary({ result, isAxisym }: { result: SolveResult | null; isAxisym: boolean }) {
+function ResultSummary({ result, coord }: { result: SolveResult | null; coord: Project["coord"] }) {
   if (!result) {
     return <div className="muted">(まだ解析結果がありません。スタディ「静電場」で Solve を実行してください)</div>;
   }
+  const isAxisym = isAxisymmetric(coord);
+  const capUnit = isAxisym ? "F" : "F/m";
+  const qUnit = isAxisym ? "C" : "C/m";
   return (
     <>
       <div className="kv"><span>節点数</span><span>{result.mesh.nodes.length}</span></div>
@@ -191,6 +205,25 @@ function ResultSummary({ result, isAxisym }: { result: SolveResult | null; isAxi
       <div className="kv"><span>V min/max</span><span>{result.v_min.toFixed(1)} / {result.v_max.toFixed(1)} V</span></div>
       <div className="kv"><span>|E| max</span><span>{result.e_abs_max.toExponential(2)} V/m</span></div>
       <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} {isAxisym ? "J" : "J/m"}</span></div>
+      <div className="kv">
+        <span>静電容量</span>
+        <span>
+          {result.capacitance != null
+            ? `${result.capacitance.toExponential(3)} ${capUnit}`
+            : "- (2電極系のみ)"}
+        </span>
+      </div>
+      {result.charges && result.charges.length > 0 && (
+        <>
+          <div className="muted">電極電荷</div>
+          {result.charges.map((c) => (
+            <div className="kv" key={c.label}>
+              <span>{electrodeDisplayLabel(c.label, coord)} ({c.voltage}V)</span>
+              <span>{c.q.toExponential(3)} {qUnit}</span>
+            </div>
+          ))}
+        </>
+      )}
     </>
   );
 }
@@ -1679,7 +1712,7 @@ export default function App() {
               )}
 
               <h2>解析結果</h2>
-              <ResultSummary result={result} isAxisym={isAxisym} />
+              <ResultSummary result={result} coord={project.coord} />
             </div>
           </div>
         </div>

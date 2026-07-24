@@ -636,6 +636,29 @@ export default function FieldPanel({
               <div className="kv"><span>V min/max</span><span>{result.v_min.toFixed(1)} / {result.v_max.toFixed(1)} V</span></div>
               <div className="kv"><span>|E| max</span><span>{result.e_abs_max.toExponential(2)} V/m</span></div>
               <div className="kv"><span>エネルギー</span><span>{result.energy.toExponential(3)} {isAxisym ? "J" : "J/m"}</span></div>
+              <div className="kv">
+                <span>静電容量</span>
+                <span>
+                  {result.capacitance != null
+                    ? `${result.capacitance.toExponential(3)} ${isAxisym ? "F" : "F/m"}`
+                    : "- (2電極系のみ)"}
+                </span>
+              </div>
+              {result.charges && result.charges.length > 0 && (
+                <>
+                  <div className="muted">電極電荷</div>
+                  {result.charges.map((c) => {
+                    const m = /^edge(\d+)$/.exec(c.label);
+                    const label = m ? edgeLabels[Number(m[1])] ?? c.label : c.label;
+                    return (
+                      <div className="kv" key={c.label}>
+                        <span>{label} ({c.voltage}V)</span>
+                        <span>{c.q.toExponential(3)} {isAxisym ? "C" : "C/m"}</span>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
             </>
           ) : (
             !meshResult && <div className="muted">(まだ Mesh/Solve を実行していません)</div>

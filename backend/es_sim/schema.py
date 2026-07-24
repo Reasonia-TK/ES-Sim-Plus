@@ -546,6 +546,14 @@ class MeshResult(BaseModel):
     region_of_triangle: list[int]       # 要素 → regions のインデックス (-1: 背景=真空)
 
 
+class ElectrodeCharge(BaseModel):
+    """電極 (Dirichlet エッジ or conductor 領域) ごとの誘起電荷 (fem.py 残差法。prompts/71)。"""
+
+    label: str      # "edge0".."edge3" (domain 外周) または conductor の region id
+    voltage: float  # 電極電位 [V] (直流分)
+    q: float        # 誘起電荷。xy: [C/m] (奥行き1m あたり)、軸対称: [C]
+
+
 class SolveResult(BaseModel):
     mesh: MeshResult
     v: list[float]                      # 節点電位 [V]
@@ -554,6 +562,10 @@ class SolveResult(BaseModel):
     v_max: float
     e_abs_max: float
     energy: float                       # 蓄積エネルギー W = 1/2 ∫ ε|E|^2 dΩ [J/m (奥行き単位)]
+    charges: list[ElectrodeCharge] = []  # 電極ごとの誘起電荷 (prompts/71)
+    # 静電容量。電極電位がちょうど2水準かつ空間電荷が全域0の場合のみ定義 (それ以外は null)。
+    # xy: [F/m]、軸対称: [F] (prompts/71)
+    capacitance: float | None = None
 
 
 class ProfileRequest(BaseModel):

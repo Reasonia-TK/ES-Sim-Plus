@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import scipy.sparse as sp
@@ -28,6 +28,12 @@ class Solution:
     v: np.ndarray        # (N,) 節点電位 [V]
     e_field: np.ndarray  # (M, 2) 要素ごとの E = -∇V [V/m]
     energy: float        # 蓄積エネルギー [J/m] (奥行き単位長あたり)
+    # 電極ごとの誘起電荷 (label, voltage [V], q)。xy: [C/m]、軸対称: [C]。
+    # label は "edge0".."edge3" (domain 外周の Dirichlet エッジ) または conductor の region id
+    charges: list[tuple[str, float, float]] = field(default_factory=list)
+    # 静電容量 [F/m] (xy) / [F] (軸対称)。電極の電位がちょうど2水準かつ空間電荷が
+    # 全域 0 の場合のみ定義。それ以外 (3水準以上・電荷あり・電極なし) は None
+    capacitance: float | None = None
 
 
 def _element_geometry(nodes: np.ndarray, tris: np.ndarray):
@@ -98,6 +104,74 @@ def assemble(project: Project, mesh: Mesh):
     return k, f
 
 
+def _label_order(project: Project) -> list[str]:
+    """電極ラベルの表示順を決める (エッジ境界の指定順 → conductor 領域の定義順)。
+
+    charges の並びを毎回決定的にするため (dict の走査順に依存させない)。
+    """
+    order: list[str] = []
+    seen: set[str] = set()
+    for bc in project.geometry.boundaries:
+        if bc.type != "dirichlet":
+            continue
+        for edge in bc.edges:
+            label = f"edge{edge}"
+            if label not in seen:
+                seen.add(label)
+                order.append(label)
+    for region in project.geometry.regions:
+        if region.type == "conductor" and region.id not in seen:
+            seen.add(region.id)
+            order.append(region.id)
+    return order
+
+
+def _electrode_charges(
+    project: Project, mesh: Mesh, k: sp.csr_matrix, f: np.ndarray, v: np.ndarray
+) -> tuple[list[tuple[str, float, float]], float | None]:
+    """電極ごとの誘起電荷と (定義できれば) 静電容量を、残差法で計算する。
+
+    残差 r = Kφ - f は、BC 適用前の全体剛性・右辺に対する各節点の「不釣り合い力」で、
+    Dirichlet 節点上ではこれがその節点に集中する電荷 (弱形式の ∮ε∂φ/∂n) に一致する
+    (フラックスを要素境界で積分するより高精度な標準手法)。電極 (edge/conductor) ごとに
+    帰属節点の残差を合計すれば、その電極の全電荷が得られる。
+
+    周期境界のスレーブ節点は assemble() で行が丸ごとマスターへ寄せられているため
+    (mesh.periodic_map)、K のスレーブ行は全て 0 → 残差も 0 になり、二重計上の
+    心配なく単純に合計してよい (mesh.electrode にスレーブ節点が含まれていても影響しない)。
+
+    軸対称モードの fem.py の剛性は 2π を含まない r̄ 重み近似 (assemble 参照) なので、
+    残差もそのままでは 2π 分小さい。ここで 2π を掛けて物理電荷 [C] に直す
+    (xy は奥行き1m あたりの [C/m] のまま)。
+    """
+    r = k @ v - f
+    ridx = _radial_index(project.coord)
+    factor = 2.0 * np.pi if ridx is not None else 1.0
+
+    groups: dict[str, list[float]] = {}  # label -> [voltage, q_sum]
+    for node, label in mesh.electrode.items():
+        q = factor * float(r[node])
+        if label in groups:
+            groups[label][1] += q
+        else:
+            groups[label] = [mesh.dirichlet[node], q]
+
+    charges = [(label, groups[label][0], groups[label][1])
+               for label in _label_order(project) if label in groups]
+
+    # 静電容量: 電極電位がちょうど2水準、かつ空間電荷 (charge 領域の rho) が全域 0 の場合のみ
+    capacitance: float | None = None
+    _, rho = _material_arrays(project, mesh)
+    if len(charges) >= 2 and not np.any(rho != 0.0):
+        voltages = sorted({voltage for _, voltage, _ in charges})
+        if len(voltages) == 2:
+            v_lo, v_hi = voltages
+            q_hi = sum(q for _, voltage, q in charges if voltage == v_hi)
+            capacitance = q_hi / (v_hi - v_lo)
+
+    return charges, capacitance
+
+
 def solve(project: Project, mesh: Mesh) -> Solution:
     k, f = assemble(project, mesh)
     n = len(mesh.nodes)
@@ -142,4 +216,5 @@ def solve(project: Project, mesh: Mesh) -> Solution:
     else:
         energy = float(np.sum(0.5 * eps * (ex**2 + ey**2) * area))
 
-    return Solution(v=v, e_field=e_field, energy=energy)
+    charges, capacitance = _electrode_charges(project, mesh, k, f, v)
+    return Solution(v=v, e_field=e_field, energy=energy, charges=charges, capacitance=capacitance)

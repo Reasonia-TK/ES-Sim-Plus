@@ -26,6 +26,7 @@ from .dsmc import DsmcSimulation
 from .mcc import GasField
 from .schema import (
     DsmcResultModel,
+    ElectrodeCharge,
     LxcatParseRequest,
     LxcatParseResult,
     MeshResult,
@@ -85,6 +86,9 @@ def solve_endpoint(project: Project) -> SolveResult:
         v_max=float(sol.v.max()),
         e_abs_max=float(e_abs.max()),
         energy=sol.energy,
+        charges=[ElectrodeCharge(label=label, voltage=voltage, q=q)
+                 for label, voltage, q in sol.charges],
+        capacitance=sol.capacitance,
     )
 
 
