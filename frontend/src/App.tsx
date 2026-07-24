@@ -160,9 +160,7 @@ const NODE_TITLES: Record<TreeNode, string> = {
   "study-trace": "スタディ — 粒子軌道追跡",
   "study-pic": "スタディ — PIC-MCC",
   "study-gas": "スタディ — ガス流れ DSMC",
-  "result-phi": "結果 — 電位分布 φ",
-  "result-e": "結果 — 電場 |E|",
-  "result-profile": "結果 — ラインプロファイル",
+  "result-fem": "結果 — 静電場",
   "result-trace": "結果 — 粒子軌道",
   "result-pic": "結果 — PIC 結果",
   "result-gas": "結果 — ガス流れ結果",
@@ -179,7 +177,7 @@ const TOOL_LABELS: Record<Tool, string> = {
   collector: "コレクタ",
 };
 
-// result-phi / result-e インスペクタページ共通の解析結果サマリ (FieldPanel の solve
+// 「静電場結果」インスペクタページの解析結果サマリ (FieldPanel の solve
 // セクションと同内容だが、結果ノード単体でも確認できるようにここでも表示する)
 function ResultSummary({ result, isAxisym }: { result: SolveResult | null; isAxisym: boolean }) {
   if (!result) {
@@ -692,14 +690,12 @@ export default function App() {
     if (id !== null) setActiveNode("regions");
   };
 
-  // プロジェクトツリーでのノード選択。ノードによって連動する副作用がある
-  // (結果表示ノードを選ぶとキャンバスの表示設定も追従させる、既存の activeTab 連動と同様)
+  // プロジェクトツリーでのノード選択。boundary 以外へ移動したら辺フィルタは解除する
+  // ("result-fem" 選択時に fieldView/tool を切替える副作用は廃止。統一後は表示切替・
+  // プロファイル起動ともにページ内 UI から行うため、ノード選択自体には副作用を持たせない、prompts/69)
   const selectNode = (node: TreeNode) => {
     setActiveNode(node);
     if (node !== "boundary") setEdgeFilter(null);
-    if (node === "result-phi") setFieldView("v");
-    if (node === "result-e") setFieldView("e_abs");
-    if (node === "result-profile") setTool("profile");
   };
 
   // プロジェクトツリーで境界条件の子ノード (辺) をクリックした場合
@@ -1276,9 +1272,7 @@ export default function App() {
   const showPicResultsPage = activeNode === "result-pic";
   const showGasSetupPage = activeNode === "study-gas";
   const showGasResultsPage = activeNode === "result-gas";
-  const showResultPhiPage = activeNode === "result-phi";
-  const showResultEPage = activeNode === "result-e";
-  const showResultProfilePage = activeNode === "result-profile";
+  const showResultFemPage = activeNode === "result-fem";
 
   // インスペクタ上部のタイトル。boundary/regions は選択中の辺/領域名を付け加える
   const edgeLabelsForTitle =
@@ -1636,8 +1630,21 @@ export default function App() {
               />
             </div>
 
-            <div style={{ display: showResultPhiPage ? "block" : "none" }}>
-              <h2>表示オプション</h2>
+            {/* 「静電場結果」ページ: 旧・電位分布φ/電場|E|/ラインプロファイルの3ノードを統合
+                (他モジュールと同じ「1モジュール=1結果ノード」に揃える、prompts/69)。
+                result が無い場合も表示オプション等は操作可能なままにし、先頭にヒントのみ出す */}
+            <div style={{ display: showResultFemPage ? "block" : "none" }}>
+              {!result && (
+                <p className="hint">静電場FEMが未実行です。スタディ「静電場 FEM」から実行してください。</p>
+              )}
+              <h2>結果表示</h2>
+              <label className="snap">
+                表示
+                <select value={fieldView} onChange={(e) => setFieldView(e.target.value as FieldView)}>
+                  <option value="v">電位 V</option>
+                  <option value="e_abs">|E|</option>
+                </select>
+              </label>
               <label className="checkbox-row">
                 <input type="checkbox" checked={showIsolines} onChange={(e) => setShowIsolines(e.target.checked)} />
                 等電位線
@@ -1646,31 +1653,23 @@ export default function App() {
                 <input type="checkbox" checked={showVectors} onChange={(e) => setShowVectors(e.target.checked)} />
                 ベクトル
               </label>
-              <h2>解析結果</h2>
-              <ResultSummary result={result} isAxisym={isAxisym} />
-            </div>
 
-            <div style={{ display: showResultEPage ? "block" : "none" }}>
-              <h2>表示オプション</h2>
-              <label className="checkbox-row">
-                <input type="checkbox" checked={showIsolines} onChange={(e) => setShowIsolines(e.target.checked)} />
-                等電位線
-              </label>
-              <label className="checkbox-row">
-                <input type="checkbox" checked={showVectors} onChange={(e) => setShowVectors(e.target.checked)} />
-                ベクトル
-              </label>
-              <h2>解析結果</h2>
-              <ResultSummary result={result} isAxisym={isAxisym} />
-            </div>
-
-            <div style={{ display: showResultProfilePage ? "block" : "none" }}>
               <h2>ラインプロファイル</h2>
               <div className="hint">
-                キャンバス上でツール「プロファイル」を選び、2点クリックすると、その間の
+                「プロファイル線を引く」を押してからキャンバス上で2点クリックすると、その間の
                 電位/|E| 分布をキャンバス下部に表示します。
               </div>
+              <button className="secondary" onClick={() => setTool("profile")}>プロファイル線を引く</button>
               {!profileLine && <div className="muted">(まだプロファイル線が指定されていません)</div>}
+              {profileLine && (
+                <div className="kv">
+                  <span>プロファイル表示中</span>
+                  <button className="secondary" onClick={() => setProfileLine(null)}>閉じる</button>
+                </div>
+              )}
+
+              <h2>解析結果</h2>
+              <ResultSummary result={result} isAxisym={isAxisym} />
             </div>
           </div>
         </div>

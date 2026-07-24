@@ -32,9 +32,7 @@ export type TreeNode =
   | "study-trace"
   | "study-pic"
   | "study-gas"
-  | "result-phi"
-  | "result-e"
-  | "result-profile"
+  | "result-fem"
   | "result-trace"
   | "result-pic"
   | "result-gas";
@@ -326,28 +324,14 @@ export default function ProjectTree({
           </div>
           {openResult && (
             <div className="tree-section-body">
-              {match("電位分布") && (
+              {/* 静電場の結果 (電位分布φ/電場|E|/ラインプロファイル) は他モジュールと同様
+                  1モジュール=1結果ノードに揃えるため単一ノードにまとめる (prompts/69) */}
+              {match("静電場結果") && (
                 <div
-                  className={`tree-row ${activeNode === "result-phi" ? "active" : ""}`}
-                  onClick={() => onSelectNode("result-phi")}
+                  className={`tree-row ${activeNode === "result-fem" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-fem")}
                 >
-                  電位分布 φ
-                </div>
-              )}
-              {match("電場") && (
-                <div
-                  className={`tree-row ${activeNode === "result-e" ? "active" : ""}`}
-                  onClick={() => onSelectNode("result-e")}
-                >
-                  電場 |E|
-                </div>
-              )}
-              {match("ラインプロファイル") && (
-                <div
-                  className={`tree-row ${activeNode === "result-profile" ? "active" : ""}`}
-                  onClick={() => onSelectNode("result-profile")}
-                >
-                  ラインプロファイル
+                  静電場結果
                 </div>
               )}
               {match("粒子軌道") && (
