@@ -1770,32 +1770,8 @@ export default function App() {
                 <option value={14}>大</option>
               </select>
             </label>
-            <div className="sep" />
-            <span className="field-view-label">表示</span>
-            <select
-              className="field-view-select"
-              value={fieldView}
-              onChange={(e) => setFieldView(e.target.value as FieldView)}
-            >
-              <option value="v">電位 V</option>
-              <option value="e_abs">|E|</option>
-            </select>
-            <label className="snap">
-              <input
-                type="checkbox"
-                checked={showIsolines}
-                onChange={(e) => setShowIsolines(e.target.checked)}
-              />
-              等電位線
-            </label>
-            <label className="snap">
-              <input
-                type="checkbox"
-                checked={showVectors}
-                onChange={(e) => setShowVectors(e.target.checked)}
-              />
-              ベクトル
-            </label>
+            {/* 表示 (電位V/|E|)・等電位線・ベクトルの切替は「静電場結果」インスペクタページへ
+                集約済みのため、ツールバーからは撤去した (二重配置の解消、prompts/69 の続き) */}
           </div>
 
           <CadCanvas
