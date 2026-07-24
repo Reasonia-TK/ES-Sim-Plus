@@ -1250,8 +1250,12 @@ export default function App() {
 
   // 描画優先順位: 周期アニメーション > 結果フィールド表示 (PIC) > ガス流れ結果表示
   // (> ライブ表示 > Solve結果、CadCanvas側で処理)。
-  // CadCanvas へは既存の picFieldView prop をそのまま使い回す (新規propは増やさない)
-  const finalPicFieldView = picCycleView ?? picFieldView ?? gasFieldView;
+  // CadCanvas へは既存の picFieldView prop をそのまま使い回す (新規propは増やさない)。
+  // ただしガス関連ノード選択中は PIC 側のビュー (周期アニメ・結果フィールド・ライブ) を
+  // 抑止してガス結果を優先する (不具合修正: PIC 実行後に「ガス流れ結果」を開いても
+  // PIC の結果フィールドが優先チェーンで勝ち続け、DSMC の数密度等が見えなかった)
+  const onGasNode = activeNode === "study-gas" || activeNode === "result-gas";
+  const finalPicFieldView = onGasNode ? gasFieldView : (picCycleView ?? picFieldView);
 
   // --- インスペクタ (中カラム) の表示制御 ---
   // FieldPanel は1インスタンスのみ mount し、選択ノードに応じて sections/edgeFilter を切替える
@@ -1814,7 +1818,7 @@ export default function App() {
             emitter={particles.emitter}
             traceResult={traceResult}
             showTrajectories={showTrajectories}
-            picFrame={picLiveFrame}
+            picFrame={onGasNode ? null : picLiveFrame}
             picFieldView={finalPicFieldView}
             gasParticles={gasRunning && gasShowParticles ? gasLiveParticles : null}
             onSelectRegion={selectRegionFromCanvas}
