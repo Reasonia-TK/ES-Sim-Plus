@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { CommitNumberInput } from "../CommitInput";
+import { Toggle } from "../Toggle";
 import type { DirichletBC, FnEmission, Project } from "../types";
 
 /**
@@ -60,14 +61,7 @@ export default function FnEmissionSection({ project, fn, onChange, mode }: Props
   return (
     <>
       <h2>FN電界放出</h2>
-      <div className="field">
-        <span className="label">有効</span>
-        <input
-          type="checkbox"
-          checked={!!fn}
-          onChange={(e) => onChange(e.target.checked ? defaultsRef.current : null)}
-        />
-      </div>
+      <Toggle label="有効" checked={!!fn} onChange={(v) => onChange(v ? defaultsRef.current : null)} />
       {fn && (
         <>
           <p className="hint">FN 使用時はエミッタ・粒子種は使われません (電子固定)</p>
@@ -126,25 +120,23 @@ export default function FnEmissionSection({ project, fn, onChange, mode }: Props
             )}
             {dirichletBoundaries.map((b) =>
               b.edges.map((edge) => (
-                <label className="fn-surface-item" key={`edge-${edge}`}>
-                  <input
-                    type="checkbox"
+                <div className="fn-surface-item" key={`edge-${edge}`}>
+                  <Toggle
+                    label={`エッジ ${edge} (${b.voltage} V)`}
                     checked={fn.edges.includes(edge)}
-                    onChange={(e) => toggleEdge(edge, e.target.checked)}
+                    onChange={(v) => toggleEdge(edge, v)}
                   />
-                  エッジ {edge} ({b.voltage} V)
-                </label>
+                </div>
               )),
             )}
             {conductorRegions.map((r) => (
-              <label className="fn-surface-item" key={`region-${r.id}`}>
-                <input
-                  type="checkbox"
+              <div className="fn-surface-item" key={`region-${r.id}`}>
+                <Toggle
+                  label={`領域 ${r.id} (${r.voltage ?? 0} V)`}
                   checked={fn.regions.includes(r.id)}
-                  onChange={(e) => toggleRegion(r.id, e.target.checked)}
+                  onChange={(v) => toggleRegion(r.id, v)}
                 />
-                領域 {r.id} ({r.voltage ?? 0} V)
-              </label>
+              </div>
             ))}
           </div>
         </>

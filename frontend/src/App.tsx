@@ -16,6 +16,7 @@ import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
 import type { CyclePicField, PicResultField } from "./panels/PicPanel";
 import GasPanel, { GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
 import type { GasResultField } from "./panels/GasPanel";
+import { Toggle } from "./Toggle";
 import { PicClient } from "./picClient";
 import type { PicClientCallbacks } from "./picClient";
 import { DsmcClient } from "./dsmcClient";
@@ -1660,14 +1661,8 @@ export default function App() {
                   <option value="e_abs">|E|</option>
                 </select>
               </label>
-              <label className="checkbox-row">
-                <input type="checkbox" checked={showIsolines} onChange={(e) => setShowIsolines(e.target.checked)} />
-                等電位線
-              </label>
-              <label className="checkbox-row">
-                <input type="checkbox" checked={showVectors} onChange={(e) => setShowVectors(e.target.checked)} />
-                ベクトル
-              </label>
+              <Toggle label="等電位線" checked={showIsolines} onChange={setShowIsolines} />
+              <Toggle label="ベクトル" checked={showVectors} onChange={setShowVectors} />
 
               <h2>ラインプロファイル</h2>
               <div className="hint">
@@ -1765,14 +1760,7 @@ export default function App() {
               </span>
             )}
             <div className="sep" />
-            <label className="snap">
-              <input
-                type="checkbox"
-                checked={gridSnap}
-                onChange={(e) => setGridSnap(e.target.checked)}
-              />
-              グリッドスナップ
-            </label>
+            <Toggle label="グリッドスナップ" checked={gridSnap} onChange={setGridSnap} />
             <label className="snap">
               ルーラー文字
               <select

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CommitNumberInput, CommitTextInput } from "../CommitInput";
+import { Toggle } from "../Toggle";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
 import { isAxisymmetric, rfComponents } from "../types";
@@ -275,14 +276,13 @@ export default function FieldPanel({
                   {!isAxisEdge && st.type === "dirichlet" && (
                     <>
                       <CommitNumberInput value={st.voltage} onCommit={(v) => setEdgeVoltage(i, v)} />
-                      <label className="rf-check-inline">
-                        <input
-                          type="checkbox"
+                      <div className="rf-check-inline">
+                        <Toggle
+                          label="RF"
                           checked={rfList.length > 0}
-                          onChange={(e) => setEdgeVoltageRf(i, e.target.checked ? [DEFAULT_VOLTAGE_RF] : undefined)}
+                          onChange={(v) => setEdgeVoltageRf(i, v ? [DEFAULT_VOLTAGE_RF] : undefined)}
                         />
-                        RF
-                      </label>
+                      </div>
                       <label className="rf-check-inline" title="二次電子放出係数 γ">
                         γ
                         <CommitNumberInput
@@ -457,18 +457,15 @@ export default function FieldPanel({
                       onCommit={(v) => updateRegion(selected.id, { voltage: v })}
                     />
                   </label>
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={rfComponents(selected.voltage_rf).length > 0}
-                      onChange={(e) =>
-                        updateRegion(selected.id, {
-                          voltage_rf: e.target.checked ? [DEFAULT_VOLTAGE_RF] : undefined,
-                        })
-                      }
-                    />
-                    RF重畳
-                  </label>
+                  <Toggle
+                    label="RF重畳"
+                    checked={rfComponents(selected.voltage_rf).length > 0}
+                    onChange={(v) =>
+                      updateRegion(selected.id, {
+                        voltage_rf: v ? [DEFAULT_VOLTAGE_RF] : undefined,
+                      })
+                    }
+                  />
                   {rfComponents(selected.voltage_rf).length > 0 && (
                     <RfComponentsEditor
                       components={rfComponents(selected.voltage_rf)}

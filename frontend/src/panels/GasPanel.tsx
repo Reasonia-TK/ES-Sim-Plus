@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput } from "../CommitInput";
+import { Toggle } from "../Toggle";
 import type { DsmcBoundary, DsmcBoundaryType, DsmcGas, DsmcResult, DsmcSettings, Point, Project } from "../types";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
@@ -200,14 +201,11 @@ export default function GasPanel({
       {show("setup") && (
       <>
       <h2>ガス流れ (DSMC)</h2>
-      <div className="field">
-        <span className="label">有効</span>
-        <input
-          type="checkbox"
-          checked={dsmc !== null}
-          onChange={(e) => onChange(e.target.checked ? dsmcDefaultsRef.current : null)}
-        />
-      </div>
+      <Toggle
+        label="有効"
+        checked={dsmc !== null}
+        onChange={(v) => onChange(v ? dsmcDefaultsRef.current : null)}
+      />
       <p className="hint">
         NTC 法 + VHS 分子モデルによる定常ガス流れ解析。既存の三角形メッシュをセルとして使う
         (平面2Dのみ対応)。結果は PIC の MCC で「DSMCガス場を使用」を有効にすると背景ガスとして使える。
@@ -492,15 +490,12 @@ export default function GasPanel({
             保存され、結果表示と PIC 連成の両方に適用されます。目安 1〜5
           </p>
 
-          <div className="field">
-            <span className="label">粒子を表示</span>
-            <input
-              type="checkbox"
-              checked={showParticles}
-              onChange={(e) => onShowParticlesChange(e.target.checked)}
-              title="実行中のキャンバスに間引き粒子位置をライブ表示する (PICのライブ粒子表示と同様)"
-            />
-          </div>
+          <Toggle
+            label="粒子を表示"
+            checked={showParticles}
+            onChange={onShowParticlesChange}
+            title="実行中のキャンバスに間引き粒子位置をライブ表示する (PICのライブ粒子表示と同様)"
+          />
           <div className="actions">
             <button onClick={onRun} disabled={!canRun || running}>
               {running ? "計算中..." : "ガス流れ計算"}
@@ -572,10 +567,7 @@ export default function GasPanel({
                   ))}
                 </select>
               </div>
-              <div className="field">
-                <span className="label">対数スケール</span>
-                <input type="checkbox" checked={logScale} onChange={(e) => onLogScaleChange(e.target.checked)} />
-              </div>
+              <Toggle label="対数スケール" checked={logScale} onChange={onLogScaleChange} />
             </>
           )}
         </>

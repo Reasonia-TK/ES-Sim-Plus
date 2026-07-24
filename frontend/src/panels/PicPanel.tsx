@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { saveTextFile } from "../saveFile";
 import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput, formatNumber } from "../CommitInput";
+import { Toggle } from "../Toggle";
 import FnEmissionSection from "./FnPanel";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
@@ -351,16 +352,11 @@ export default function PicPanel({
       {show("setup") && (
       <>
       <h2>PIC: 初期プラズマ</h2>
-      <div className="field">
-        <span className="label">有効</span>
-        <input
-          type="checkbox"
-          checked={pic.initial_plasma !== null}
-          onChange={(e) =>
-            onChange({ ...pic, initial_plasma: e.target.checked ? plasmaDefaultsRef.current : null })
-          }
-        />
-      </div>
+      <Toggle
+        label="有効"
+        checked={pic.initial_plasma !== null}
+        onChange={(v) => onChange({ ...pic, initial_plasma: v ? plasmaDefaultsRef.current : null })}
+      />
       {pic.initial_plasma && (
         <>
           <div className="field">
@@ -382,14 +378,11 @@ export default function PicPanel({
               onCommit={(v) => updatePlasma({ ion_mass_amu: v })}
             />
           </div>
-          <div className="field">
-            <span className="label">イオン固定</span>
-            <input
-              type="checkbox"
-              checked={pic.initial_plasma.immobile_ions}
-              onChange={(e) => updatePlasma({ immobile_ions: e.target.checked })}
-            />
-          </div>
+          <Toggle
+            label="イオン固定"
+            checked={pic.initial_plasma.immobile_ions}
+            onChange={(v) => updatePlasma({ immobile_ions: v })}
+          />
           <div className="field">
             <span className="label">乱数シード</span>
             <CommitNumberInput
@@ -401,25 +394,22 @@ export default function PicPanel({
       )}
 
       <h2>PIC: 注入</h2>
-      <div className="field">
-        <span className="label">有効</span>
-        <input
-          type="checkbox"
-          checked={pic.injection !== null}
-          onChange={(e) =>
-            onChange({
-              ...pic,
-              injection: e.target.checked
-                ? {
-                    emitter,
-                    species: injectionDefaultsRef.current.species,
-                    current_a_per_m: injectionDefaultsRef.current.current_a_per_m,
-                  }
-                : null,
-            })
-          }
-        />
-      </div>
+      <Toggle
+        label="有効"
+        checked={pic.injection !== null}
+        onChange={(v) =>
+          onChange({
+            ...pic,
+            injection: v
+              ? {
+                  emitter,
+                  species: injectionDefaultsRef.current.species,
+                  current_a_per_m: injectionDefaultsRef.current.current_a_per_m,
+                }
+              : null,
+          })
+        }
+      />
       {pic.injection && (
         <>
           <p className="hint">
@@ -447,14 +437,11 @@ export default function PicPanel({
       )}
 
       <h2>PIC: MCC(衝突)</h2>
-      <div className="field">
-        <span className="label">有効</span>
-        <input
-          type="checkbox"
-          checked={pic.mcc !== null}
-          onChange={(e) => onChange({ ...pic, mcc: e.target.checked ? mccDefaultsRef.current : null })}
-        />
-      </div>
+      <Toggle
+        label="有効"
+        checked={pic.mcc !== null}
+        onChange={(v) => onChange({ ...pic, mcc: v ? mccDefaultsRef.current : null })}
+      />
       {pic.mcc && (
         <>
           <div className="field">
@@ -534,14 +521,11 @@ export default function PicPanel({
             <CommitNumberInput value={pic.mcc.seed} onCommit={(v) => updateMcc({ seed: Math.round(v) })} />
           </div>
 
-          <div className="field">
-            <span className="label">DSMCガス場を使用</span>
-            <input
-              type="checkbox"
-              checked={pic.mcc.use_dsmc_gas ?? false}
-              onChange={(e) => updateMcc({ use_dsmc_gas: e.target.checked })}
-            />
-          </div>
+          <Toggle
+            label="DSMCガス場を使用"
+            checked={pic.mcc.use_dsmc_gas ?? false}
+            onChange={(v) => updateMcc({ use_dsmc_gas: v })}
+          />
           <p className="hint">
             直前に実行したガス流れ (DSMC) の n・T・u を背景ガスとして使う
             (圧力・温度の一様指定は無視される)
@@ -888,14 +872,7 @@ export default function PicPanel({
             </select>
           </div>
           {resultField !== "live" && (
-            <div className="field">
-              <span className="label">対数スケール</span>
-              <input
-                type="checkbox"
-                checked={logScale}
-                onChange={(e) => onLogScaleChange(e.target.checked)}
-              />
-            </div>
+            <Toggle label="対数スケール" checked={logScale} onChange={onLogScaleChange} />
           )}
         </>
       )}
@@ -1364,9 +1341,8 @@ function IaedfChart({ result, bins }: IaedfChartProps) {
           ? `${hoverAngleLo.toFixed(1)} 〜 ${hoverAngleHi.toFixed(1)} deg, ${hoverEnergyLo.toFixed(2)} 〜 ${hoverEnergyHi.toFixed(2)} eV: ${hoverCount!.toExponential(3)}`
           : " "}
       </div>
-      <div className="field iaedf-log-field">
-        <span className="label">対数スケール</span>
-        <input type="checkbox" checked={logScale} onChange={(e) => setLogScale(e.target.checked)} />
+      <div className="iaedf-log-field">
+        <Toggle label="対数スケール" checked={logScale} onChange={setLogScale} />
       </div>
     </div>
   );
@@ -1423,22 +1399,8 @@ function PicCyclePlayer({
           ))}
         </select>
       </div>
-      <div className="field">
-        <span className="label">対数スケール</span>
-        <input
-          type="checkbox"
-          checked={logScale}
-          onChange={(e) => onLogScaleChange(e.target.checked)}
-        />
-      </div>
-      <div className="field">
-        <span className="label">粒子スナップショット表示</span>
-        <input
-          type="checkbox"
-          checked={showParticles}
-          onChange={(e) => onShowParticlesChange(e.target.checked)}
-        />
-      </div>
+      <Toggle label="対数スケール" checked={logScale} onChange={onLogScaleChange} />
+      <Toggle label="粒子スナップショット表示" checked={showParticles} onChange={onShowParticlesChange} />
 
       <div className="actions">
         <button className="secondary" onClick={() => onPlayingChange(!playing)}>

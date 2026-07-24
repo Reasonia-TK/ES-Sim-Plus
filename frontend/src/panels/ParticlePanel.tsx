@@ -1,4 +1,5 @@
 import { CommitNullableNumberInput, CommitNumberInput } from "../CommitInput";
+import { Toggle } from "../Toggle";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
 import FnEmissionSection from "./FnPanel";
@@ -270,14 +271,9 @@ export default function ParticlePanel({
 
       {/* エミッタのキャンバス表示切替 (FN 有効時もエミッタの緑マーカーが邪魔になるため常に出す) */}
       {showEmitter !== undefined && onToggleEmitter && (
-            <label className="snap particle-trace-toggle">
-              <input
-                type="checkbox"
-                checked={showEmitter}
-                onChange={(e) => onToggleEmitter(e.target.checked)}
-              />
-              エミッタを表示
-            </label>
+            <div className="particle-trace-toggle">
+              <Toggle label="エミッタを表示" checked={showEmitter} onChange={onToggleEmitter} />
+            </div>
           )}
 
       <h2>積分設定</h2>
@@ -329,23 +325,13 @@ export default function ParticlePanel({
               </select>
             </div>
           )}
-          <label className="snap particle-trace-toggle">
-            <input
-              type="checkbox"
-              checked={showTrajectories}
-              onChange={(e) => onToggleTrajectories(e.target.checked)}
-            />
-            軌道を表示
-          </label>
+          <div className="particle-trace-toggle">
+            <Toggle label="軌道を表示" checked={showTrajectories} onChange={onToggleTrajectories} />
+          </div>
           {showEmitter !== undefined && onToggleEmitter && (
-            <label className="snap particle-trace-toggle">
-              <input
-                type="checkbox"
-                checked={showEmitter}
-                onChange={(e) => onToggleEmitter(e.target.checked)}
-              />
-              エミッタを表示
-            </label>
+            <div className="particle-trace-toggle">
+              <Toggle label="エミッタを表示" checked={showEmitter} onChange={onToggleEmitter} />
+            </div>
           )}
 
           {summary && (

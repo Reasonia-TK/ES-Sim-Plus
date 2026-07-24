@@ -325,3 +325,26 @@ button.danger:hover { background: #b34747; }
 }
 .statusbar-progress-bar { height: 100%; background: var(--accent); }
 .iaedf-log-field { margin: 2px 0 6px; }
+
+/* トグルスイッチ (チェックボックス置換、prompts/70)。ダークテーマの --panel/--border/--accent に
+   馴染ませる。input 自体は視覚的に隠すが、位置は absolute にするだけでレイアウトからは
+   外さない (フォーカスやクリック判定はネイティブ input のまま保つため) */
+.toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; }
+.toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.toggle-track {
+  width: 32px; height: 18px; border-radius: 9px; background: var(--border);
+  position: relative; transition: background 0.15s; flex: none;
+}
+.toggle-knob {
+  position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--muted); transition: left 0.15s, background 0.15s;
+}
+.toggle input:checked + .toggle-track { background: var(--accent); }
+.toggle input:checked + .toggle-track .toggle-knob { left: 16px; background: #fff; }
+.toggle input:focus-visible + .toggle-track { outline: 2px solid var(--accent); outline-offset: 1px; }
+.toggle input:disabled + .toggle-track { cursor: default; }
+.toggle.disabled { opacity: 0.5; cursor: default; }
+.toggle-label { color: var(--muted); }
+/* .field 内 (ラベル左端・右端2カラム) に置き換えて使う場合、Toggle 自体が隣接1行になるため
+   space-between は不要。.field を使わず Toggle 単体を1行として配置する箇所が大半のため
+   ここでは .field 側のCSSには触れない */
