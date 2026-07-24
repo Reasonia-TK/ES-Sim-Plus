@@ -274,6 +274,9 @@ export default function App() {
   const [particles, setParticles] = useState<ParticleSettings>(DEFAULT_PARTICLES);
   const [traceResult, setTraceResult] = useState<TraceResult | null>(null);
   const [showTrajectories, setShowTrajectories] = useState(true);
+  // 「結果 — 粒子追跡」ページの背景表示 (電位V/|E|/なし)。軌道だけを見たいときに
+  // 静電場の色マップを消せるようにする (result-trace ノード選択中のみ効く)
+  const [traceBackground, setTraceBackground] = useState<"v" | "e_abs" | "none">("v");
 
   // PIC設定 (particles と同様、Undo/Redo履歴には積まない。保存/読込 (project.pic) の対象ではある)
   const [pic, setPic] = useState<PicSettings>(DEFAULT_PIC);
@@ -1251,6 +1254,9 @@ export default function App() {
   // 抑止してガス結果を優先する (不具合修正: PIC 実行後に「ガス流れ結果」を開いても
   // PIC の結果フィールドが優先チェーンで勝ち続け、DSMC の数密度等が見えなかった)
   const onGasNode = activeNode === "study-gas" || activeNode === "result-gas";
+  // 「結果 — 粒子追跡」ノード選択中は背景表示 (traceBackground) を CadCanvas の
+  // result/fieldView に反映する (なし=背景の色マップ・等値線・ベクトルを消す)
+  const onTraceResultNode = activeNode === "result-trace";
   const finalPicFieldView = onGasNode ? gasFieldView : (picCycleView ?? picFieldView);
 
   // --- インスペクタ (中カラム) の表示制御 ---
@@ -1479,6 +1485,8 @@ export default function App() {
                 showTrajectories={showTrajectories}
                 onToggleTrajectories={setShowTrajectories}
                 mode="results"
+                background={traceBackground}
+                onBackgroundChange={setTraceBackground}
               />
             </div>
 
@@ -1777,14 +1785,14 @@ export default function App() {
           <CadCanvas
             project={project}
             lengthUnit={lengthUnit}
-            result={result}
+            result={onTraceResultNode && traceBackground === "none" ? null : result}
             meshResult={meshResult}
             showMesh={showMesh}
             tool={tool}
             gridSnap={gridSnap}
             rulerFontSize={rulerFontSize}
             selectedRegionId={selectedRegionId}
-            fieldView={fieldView}
+            fieldView={onTraceResultNode && traceBackground !== "none" ? traceBackground : fieldView}
             showIsolines={showIsolines}
             showVectors={showVectors}
             profileLine={profileLine}

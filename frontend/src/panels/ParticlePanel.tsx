@@ -30,6 +30,9 @@ interface Props {
   // 表示モード: "all"=従来通り全表示 (既定・後方互換)、"setup"=設定/実行UIのみ、
   // "results"=結果表示のみ (結果ノード用インスペクタページで使う)
   mode?: "all" | "setup" | "results";
+  // 結果ページの背景表示 (電位V/|E|/なし)。未指定なら select 自体を出さない (後方互換)
+  background?: "v" | "e_abs" | "none";
+  onBackgroundChange?: (v: "v" | "e_abs" | "none") => void;
 }
 
 const ELECTRON: Species = { preset: "electron" };
@@ -46,6 +49,8 @@ export default function ParticlePanel({
   traceResult,
   showTrajectories,
   onToggleTrajectories,
+  background,
+  onBackgroundChange,
   mode = "all",
 }: Props) {
   // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
@@ -292,6 +297,21 @@ export default function ParticlePanel({
 
       {show("results") && (
         <>
+          {/* 軌道の背景に静電場ソルブ結果を重ねるかの選択 (このノード選択中のみ有効)。
+              軌道だけを見たいときに「なし」で背景の色マップを消せるようにする */}
+          {background !== undefined && onBackgroundChange && (
+            <div className="field">
+              <span className="label">背景表示</span>
+              <select
+                value={background}
+                onChange={(e) => onBackgroundChange(e.target.value as "v" | "e_abs" | "none")}
+              >
+                <option value="v">電位 V</option>
+                <option value="e_abs">|E|</option>
+                <option value="none">なし</option>
+              </select>
+            </div>
+          )}
           <label className="snap particle-trace-toggle">
             <input
               type="checkbox"
