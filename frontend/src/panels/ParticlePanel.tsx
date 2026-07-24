@@ -33,6 +33,9 @@ interface Props {
   // 結果ページの背景表示 (電位V/|E|/なし)。未指定なら select 自体を出さない (後方互換)
   background?: "v" | "e_abs" | "none";
   onBackgroundChange?: (v: "v" | "e_abs" | "none") => void;
+  // エミッタのキャンバス表示 ON/OFF。未指定ならチェックボックスを出さない (後方互換)
+  showEmitter?: boolean;
+  onToggleEmitter?: (v: boolean) => void;
 }
 
 const ELECTRON: Species = { preset: "electron" };
@@ -51,6 +54,8 @@ export default function ParticlePanel({
   onToggleTrajectories,
   background,
   onBackgroundChange,
+  showEmitter,
+  onToggleEmitter,
   mode = "all",
 }: Props) {
   // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
@@ -263,6 +268,18 @@ export default function ParticlePanel({
 
       <FnEmissionSection project={project} fn={fn} onChange={setFn} mode="trace" />
 
+      {/* エミッタのキャンバス表示切替 (FN 有効時もエミッタの緑マーカーが邪魔になるため常に出す) */}
+      {showEmitter !== undefined && onToggleEmitter && (
+            <label className="snap particle-trace-toggle">
+              <input
+                type="checkbox"
+                checked={showEmitter}
+                onChange={(e) => onToggleEmitter(e.target.checked)}
+              />
+              エミッタを表示
+            </label>
+          )}
+
       <h2>積分設定</h2>
       <div className="field">
         <span className="label">dt [s] (空欄=自動)</span>
@@ -320,6 +337,16 @@ export default function ParticlePanel({
             />
             軌道を表示
           </label>
+          {showEmitter !== undefined && onToggleEmitter && (
+            <label className="snap particle-trace-toggle">
+              <input
+                type="checkbox"
+                checked={showEmitter}
+                onChange={(e) => onToggleEmitter(e.target.checked)}
+              />
+              エミッタを表示
+            </label>
+          )}
 
           {summary && (
             <>

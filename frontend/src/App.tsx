@@ -274,6 +274,9 @@ export default function App() {
   const [particles, setParticles] = useState<ParticleSettings>(DEFAULT_PARTICLES);
   const [traceResult, setTraceResult] = useState<TraceResult | null>(null);
   const [showTrajectories, setShowTrajectories] = useState(true);
+  // エミッタのオーバーレイ (緑の線分/×マーカー+矢印) をキャンバスに描くか。
+  // FN 電界放出のみのケース等でエミッタ表示が邪魔なときに消せるようにする
+  const [showEmitter, setShowEmitter] = useState(true);
   // 「結果 — 粒子追跡」ページの背景表示 (電位V/|E|/なし)。軌道だけを見たいときに
   // 静電場の色マップを消せるようにする (result-trace ノード選択中のみ効く)
   const [traceBackground, setTraceBackground] = useState<"v" | "e_abs" | "none">("v");
@@ -1469,6 +1472,8 @@ export default function App() {
                 traceResult={traceResult}
                 showTrajectories={showTrajectories}
                 onToggleTrajectories={setShowTrajectories}
+                showEmitter={showEmitter}
+                onToggleEmitter={setShowEmitter}
                 mode="setup"
               />
             </div>
@@ -1484,6 +1489,8 @@ export default function App() {
                 traceResult={traceResult}
                 showTrajectories={showTrajectories}
                 onToggleTrajectories={setShowTrajectories}
+                showEmitter={showEmitter}
+                onToggleEmitter={setShowEmitter}
                 mode="results"
                 background={traceBackground}
                 onBackgroundChange={setTraceBackground}
@@ -1798,7 +1805,7 @@ export default function App() {
             profileLine={profileLine}
             collectors={collectorsList}
             selectedCollectorIndex={selectedCollectorIndex}
-            emitter={particles.emitter}
+            emitter={showEmitter ? particles.emitter : null}
             traceResult={traceResult}
             showTrajectories={showTrajectories}
             picFrame={onGasNode ? null : picLiveFrame}

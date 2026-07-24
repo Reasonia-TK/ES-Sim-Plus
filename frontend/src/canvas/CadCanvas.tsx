@@ -90,7 +90,7 @@ interface Props {
   // コレクタ一覧 (PICパネル) で選択中のインデックス。キャンバス上で該当線分を強調表示する
   selectedCollectorIndex: number | null;
   // 粒子エミッタ (常時オーバーレイ表示の対象)。粒子パネル側で必ず既定値を持つため常に非 null
-  emitter: Emitter;
+  emitter: Emitter | null; // null なら描画しない (「エミッタを表示」オプションOFF)
   // 粒子軌道トレース結果 (Trace 実行前は null)
   traceResult: TraceResult | null;
   showTrajectories: boolean;
@@ -1059,8 +1059,9 @@ export default function CadCanvas({
       });
     }
 
-    // エミッタのオーバーレイ (常時表示): line は緑線分、point は×マーカー。中点/p1 から射出方向へ矢印を描く
-    {
+    // エミッタのオーバーレイ: line は緑線分、point は×マーカー。中点/p1 から射出方向へ矢印を描く。
+    // null は「エミッタを表示」オプションOFF (非表示)
+    if (emitter) {
       ctx.strokeStyle = "#4ddd8c";
       ctx.fillStyle = "#4ddd8c";
       ctx.lineWidth = 2;
