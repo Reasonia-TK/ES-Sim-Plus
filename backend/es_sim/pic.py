@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -542,6 +543,21 @@ class PicSimulation:
             )
         }
         self._f_immobile: dict[str, np.ndarray] = {}  # 不動種の堆積キャッシュ
+
+        # ---- 位相別プロファイル計測 (prompts/75) -------------------------------
+        # 大規模化に向けた高速化①の土台として、1ステップ内の主要フェーズの
+        # 累積時間を常時計測する (ON/OFF切替は無し)。time.perf_counter の呼び出しは
+        # 1ステップあたり数回程度なのでオーバーヘッドは無視できる。
+        # done メッセージ (server.py) で返し、continue では区間分のみ返すよう
+        # prepare_continue でリセットする
+        self.timing: dict[str, float] = {
+            "solve": 0.0,       # ポアソン求解 (前分解済み LU の rhs 更新+solve)
+            "gather_push": 0.0,  # E 補間 + リープフロッグ押し出し
+            "walk": 0.0,        # walk 探索・境界吸収・反射・周期・SEE
+            "deposit": 0.0,     # 電荷堆積 (節点荷重ベクトルへの散布)
+            "mcc": 0.0,         # MCC 衝突 (電子・イオン)
+            "other": 0.0,       # 注入・FN放出・時間平均積算・診断記録など
+        }
 
         # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ) --------------
         # E は vx, vy のみに作用する (vz は不変)
@@ -1304,7 +1320,14 @@ class PicSimulation:
         )
 
         # 1. 電荷堆積 → 2. ポアソン求解 (RF 含む V(t) で Dirichlet 更新)
-        phi = self._solve_phi(self._deposit(), t)
+        # 位相別計測 (prompts/75): 堆積とポアソン求解を別フェーズとして計測する
+        t_dep0 = time.perf_counter()
+        f_dep = self._deposit()
+        t_dep1 = time.perf_counter()
+        self.timing["deposit"] += t_dep1 - t_dep0
+        phi = self._solve_phi(f_dep, t)
+        t_solve1 = time.perf_counter()
+        self.timing["solve"] += t_solve1 - t_dep1
         # 3. E 補間の準備 (要素ごとの一定値)
         ex, ey = self._e_field(phi)
         # 場のエネルギー (xy: [J/m]、rz: [J]。elem_vol は xy では area と同一)
@@ -1374,10 +1397,16 @@ class PicSimulation:
                 r_new = np.maximum(x_new[:, self.ridx], _R_TINY)
                 v_new[:, 2] = np.where(ang_l != 0.0, ang_l / r_new, 0.0)
             pushed.append((sp, v_new, x_new, np.empty((len(x_new), 3))))
+        t_push1 = time.perf_counter()
+        self.timing["gather_push"] += t_push1 - t_solve1
 
         # 5. walk 更新 (種ごとに独立・決定的なので、2種のときは並列に実行して
         #    2コアを使う。numpy の大きな ufunc は GIL を解放するため実効的)
+        # 位相別計測 (prompts/75): スレッド並列時も submit〜完了待ちの壁時計時間を
+        # そのまま計測する (_run_walks 内部で完了待ちまで行うため)
         walk_results = self._run_walks(pushed)
+        t_walk1 = time.perf_counter()
+        self.timing["walk"] += t_walk1 - t_push1
 
         # 5.1. 境界吸収・鏡面反射・SEE (種の順序は従来どおり electron → ion)
         for (sp, v_new, x_new, l_new), res_walk in zip(pushed, walk_results):
@@ -1436,6 +1465,9 @@ class PicSimulation:
             sp.nidx = None  # 所属要素が変わったので節点番号キャッシュを無効化
             if sp.name == "ion":
                 self._f_ion_cache = None  # イオンが動いたので堆積キャッシュを無効化
+        # 境界吸収・反射・周期・SEE も「5. walk 更新・境界吸収」の一部として計測する
+        t_walk2 = time.perf_counter()
+        self.timing["walk"] += t_walk2 - t_walk1
 
         # 5.5. MCC 衝突 (衝突は位置を変えないので所属要素の更新は不要)
         if self.mcc is not None:
@@ -1479,6 +1511,9 @@ class PicSimulation:
                 self.mcc.collide_ions(
                     io.v, dt * self._sub if self._sub > 1 else dt, io.elem
                 )
+        # MCC 無効時も t_walk2 との差分は測るので常に加算する (self.mcc is None なら ≈0)
+        t_mcc1 = time.perf_counter()
+        self.timing["mcc"] += t_mcc1 - t_walk2
 
         # 6. 注入
         if self.pic.injection is not None:
@@ -1514,6 +1549,9 @@ class PicSimulation:
         # FN 電界放出: このステップの総放出電流 [A/m] と累計放出マクロ電子数
         h["fn_i"].append(fn_i)
         h["fn_events"].append(self.fn_events)
+        # 注入・FN放出・時間平均積算・診断記録などの細かい処理をまとめて計測する
+        t_other1 = time.perf_counter()
+        self.timing["other"] += t_other1 - t_mcc1
         return phi
 
     # ---- 節点密度の時間平均 ---------------------------------------------------
@@ -1777,6 +1815,8 @@ class PicSimulation:
 
         # 診断 history は追加区間分のみ (キー構成は不変)
         self.history = {k: [] for k in self.history}
+        # 位相別計測 (prompts/75) も追加区間分のみ返すようリセットする
+        self.timing = {k: 0.0 for k in self.timing}
         # 平均・位相・コレクタ系のアキュムレータをリセット
         self._accum_start = None
         self._accum_count = 0

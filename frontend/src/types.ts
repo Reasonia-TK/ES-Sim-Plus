@@ -443,6 +443,9 @@ export interface PicDoneMsg {
   cycle?: PicCycle;        // RF 1周期の位相分解 (RFなし/phase_bins=0 では省略)
   collector?: PicCollectorResult;    // 旧単数キー (コレクタが1個のときのみ、後方互換)
   collectors?: PicCollectorResult[]; // 複数コレクタの結果 (collectors と同順)
+  // 位相別プロファイル計測 (prompts/75)。キーは solve/gather_push/walk/deposit/mcc/other/total [秒]。
+  // continue では区間分のみ (未対応バックエンドでは省略、optional)
+  timing?: Record<string, number>;
 }
 
 export interface PicErrorMsg {

@@ -7,9 +7,12 @@ WebSocket ではなく PicSimulation.run_batch の同期 API で検証する。
 2. エネルギー保存: 同上設定 (ωpe·dt = 0.1) で全エネルギードリフトが 5% 以内
 3. CCP スモーク: 平行平板 (片側 RF ±50V/13.56MHz、対向 GND) + 初期プラズマで
    200 ステップ → NaN なし・粒子数単調非増加・RF 1周期平均の中央電位が両壁より高い
+4. 位相別プロファイル計測 (prompts/75): timing の各キーが妥当な値を持ち、
+   合計が run_batch の実測壁時計時間と一致すること
 """
 
 import math
+import time
 
 import numpy as np
 
@@ -188,3 +191,86 @@ def test_ccp_smoke():
     phi_right = phi_avg[right_mask].mean()
     assert phi_center > phi_left
     assert phi_center > phi_right
+
+
+# ---- 4. 位相別プロファイル計測 (prompts/75) -------------------------------------
+
+
+def test_timing_phases():
+    """MCC 電離ありの小ケースを実行し、位相別タイマーが妥当な値を返すこと。
+
+    - 全キーが 0 以上
+    - 各フェーズの合計 (= done メッセージの total) が run_batch の実測壁時計時間と
+      ±計測誤差で一致する (step() 内の全時間が漏れなく・二重計上なくどこかの
+      フェーズに割り当てられていることの確認)
+    - 少なくとも solve/walk/deposit/mcc は正の時間を計上する
+      (このケースは MCC 有効なので mcc も確実に発火する)
+    """
+    n_steps = 20
+    project = Project.model_validate(
+        {
+            "geometry": {
+                "domain": {"polygon": [[0, 0], [0.02, 0], [0.02, 0.01], [0, 0.01]]},
+                "boundaries": [
+                    {"edges": [3], "voltage": 0.0},
+                    {"edges": [1], "voltage": 0.0},
+                ],
+            },
+            "mesh": {"size": 1.2e-3},
+            "pic": {
+                "initial_plasma": {
+                    "density": DENSITY,
+                    "te_ev": 5.0,
+                    "ti_ev": 0.03,
+                    "ion_mass_amu": 40.0,
+                    "seed": 3,
+                },
+                "n_macro": 1500,
+                "dt": 5e-10,
+                "n_steps": n_steps,
+                "frame_every": n_steps,
+                "mcc": {
+                    "gas": {"name": "Ar", "pressure_pa": 100.0, "temperature_k": 300.0},
+                    "electron_processes": [
+                        {
+                            "kind": "ionization",
+                            "label": "synthetic ionization",
+                            "threshold_ev": 5.0,
+                            "energy_ev": [5.0, 5.0 + 1e-6, 1000.0],
+                            "sigma_m2": [0.0, 2.0e-20, 2.0e-20],
+                        }
+                    ],
+                    "ion_processes": [],
+                    "seed": 11,
+                },
+            },
+        }
+    )
+    sim = PicSimulation(project)
+    t0 = time.perf_counter()
+    sim.run_batch()
+    wall = time.perf_counter() - t0
+    timing = sim.timing
+
+    for key in ("solve", "gather_push", "walk", "deposit", "mcc", "other"):
+        assert key in timing
+        assert timing[key] >= 0.0
+
+    total = sum(timing.values())
+    assert total > 0.0
+    assert timing["solve"] > 0.0
+    assert timing["walk"] > 0.0
+    assert timing["deposit"] > 0.0
+    assert timing["mcc"] > 0.0
+    # run_batch には run_batch 自身のループ管理・フレーム構築・averaged_fields() 等
+    # step() の外側のわずかなコストも含まれるため、total は wall 以下かつ大部分を
+    # 占めるはず (下限は緩めに 50%、上限は計測誤差を見込んで少し余裕を持たせる)
+    assert 0.5 * wall <= total <= wall + 0.05
+
+    # continue 後は区間分のみを返す (前区間の値を引きずらない)
+    sim.prepare_continue(n_steps)
+    for key in timing:
+        assert sim.timing[key] == 0.0
+    sim.run_batch()
+    total2 = sum(sim.timing.values())
+    assert total2 > 0.0

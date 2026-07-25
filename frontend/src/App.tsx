@@ -340,6 +340,9 @@ export default function App() {
   const [picError, setPicError] = useState<string | null>(null);
   // done メッセージで受け取った時間平均フィールド一式。新規実行開始時にリセットする
   const [picFields, setPicFields] = useState<PicFields | null>(null);
+  // done メッセージで受け取った位相別プロファイル計測 (prompts/75)。continue では
+  // 区間分のみに置き換わる (累積ではない)。新規実行開始時にリセットする
+  const [picTiming, setPicTiming] = useState<Record<string, number> | null>(null);
   // 「結果表示」セレクトの選択と対数スケールチェックボックス。新規実行開始時に既定 (ライブ/線形) へ戻す
   const [picResultField, setPicResultField] = useState<PicResultField>("live");
   const [picLogScale, setPicLogScale] = useState(false);
@@ -667,6 +670,7 @@ export default function App() {
       const added = toDiagArray(msg.history);
       setPicHistory((h) => (isContinue ? [...h, ...added] : added));
       setPicFields(msg.fields ?? null);
+      setPicTiming(msg.timing ?? null);
       setPicCycle(msg.cycle ?? null);
       // collectors 配列が来ればそちらを使い、旧バックエンドで単数 collector のみの場合は
       // 先頭(1個)として扱う (prompts/37、必須ではないが安全に対応しておく)
@@ -692,6 +696,7 @@ export default function App() {
     setPicContinueReady(false);
     // 新しい実行を開始したら結果フィールド表示 (前回 done の残骸) をリセットする
     setPicFields(null);
+    setPicTiming(null); // 位相別プロファイル計測 (prompts/75) も前回 done の残骸を消す
     setPicResultField("live");
     setPicLogScale(false);
     // 周期アニメーションの状態も新規実行開始時にリセットする (前回 done の cycle・再生状態を破棄)
@@ -725,6 +730,7 @@ export default function App() {
     // 選択が残っているとライブ表示が隠れ、続き実行中の画面が追従しない (不具合修正)。
     // 新しい fields / cycle / collectors は追加区間の done で置き換わる
     setPicFields(null);
+    setPicTiming(null);
     setPicResultField("live");
     setPicLogScale(false);
     setPicCycle(null);
@@ -1666,6 +1672,7 @@ export default function App() {
                 history={picHistory}
                 error={picError}
                 fields={picFields}
+                timing={picTiming}
                 resultField={picResultField}
                 onResultFieldChange={(v) => {
                   // 結果表示の切替時はアニメ優先を解除し、選択したフィールドを表示する
@@ -1715,6 +1722,7 @@ export default function App() {
                 history={picHistory}
                 error={picError}
                 fields={picFields}
+                timing={picTiming}
                 resultField={picResultField}
                 onResultFieldChange={(v) => {
                   // 結果表示の切替時はアニメ優先を解除し、選択したフィールドを表示する

@@ -93,6 +93,9 @@ interface Props {
   error: string | null;
   // done メッセージで受け取った時間平均フィールド一式 (未受信 or 未対応バックエンドでは null)
   fields: PicFields | null;
+  // done メッセージで受け取った位相別プロファイル計測 (prompts/75)。
+  // continue では区間分のみに置き換わる。未受信 or 未対応バックエンドでは null
+  timing: Record<string, number> | null;
   // 「結果表示」セレクトの現在値と対数スケールチェックボックスの状態 (App 側で保持・CadCanvas に反映)
   resultField: PicResultField;
   onResultFieldChange: (v: PicResultField) => void;
@@ -217,6 +220,7 @@ export default function PicPanel({
   history,
   error,
   fields,
+  timing,
   resultField,
   onResultFieldChange,
   logScale,
@@ -859,6 +863,9 @@ export default function PicPanel({
           <PicHistoryChart history={history} />
         </>
       )}
+
+      {/* 位相別プロファイル計測 (prompts/75、done 後のみ表示。実行中/未実行は非表示) */}
+      {timing && <PicTimingSection timing={timing} />}
       </>
       )}
 
@@ -912,6 +919,46 @@ export default function PicPanel({
           <div className="error">{error}</div>
         </>
       )}
+    </>
+  );
+}
+
+// 位相別プロファイル計測 (prompts/75) の日本語ラベル。timing のキーと1対1対応させる
+// (total はここに含めず、フェーズ一覧の下に別枠で表示する)
+const TIMING_PHASE_LABELS: Record<string, string> = {
+  solve: "場ソルブ",
+  gather_push: "粒子押し出し",
+  walk: "walk探索",
+  deposit: "電荷デポジット",
+  mcc: "MCC衝突",
+  other: "その他",
+};
+
+// PIC: 実行時間内訳。done メッセージの timing を値の大きい順に「名称 / 秒 / %」で表示する
+// (次フェーズ (Numba化・粒子マージ) の効果測定のベースライン確認用、prompts/75)。
+// 未知のキー (将来の位相追加) も TIMING_PHASE_LABELS に無ければキー名そのままで表示する
+function PicTimingSection({ timing }: { timing: Record<string, number> }) {
+  const total = timing.total ?? Object.entries(timing)
+    .filter(([k]) => k !== "total")
+    .reduce((sum, [, v]) => sum + v, 0);
+  const rows = Object.entries(timing)
+    .filter(([k]) => k !== "total")
+    .sort((a, b) => b[1] - a[1]);
+  return (
+    <>
+      <h2>PIC: 実行時間内訳</h2>
+      {rows.map(([key, sec]) => (
+        <div className="kv" key={key}>
+          <span>{TIMING_PHASE_LABELS[key] ?? key}</span>
+          <span>
+            {sec.toFixed(3)} s ({total > 0 ? ((100 * sec) / total).toFixed(1) : "0.0"}%)
+          </span>
+        </div>
+      ))}
+      <div className="kv">
+        <span>合計</span>
+        <span>{total.toFixed(3)} s</span>
+      </div>
     </>
   );
 }

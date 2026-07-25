@@ -457,6 +457,9 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
             await ws.send_json(frame)
         history, _ = await run_task
         done_msg: dict = {"type": "done", "history": history}
+        # 位相別プロファイル計測 (prompts/75)。total は表示用に別途加算しておく
+        # (continue では sim.timing が区間分のみを持つので、total もその区間分になる)
+        done_msg["timing"] = {**sim.timing, "total": sum(sim.timing.values())}
         # 時間平均フィールド (prompts/26)。平均区間を積算できていれば添付する
         if sim.fields is not None:
             done_msg["fields"] = {
