@@ -315,7 +315,11 @@ export default function PicPanel({
     reader.readAsText(file);
   };
 
-  const progressPct = started && started.n_steps > 0 ? Math.min(100, ((frame?.step ?? 0) / started.n_steps) * 100) : 0;
+  // 続きから実行では frame.step が通算のため、区間開始オフセット (started.step_offset) を
+  // 引いた区間内ステップで進捗率を出す (App のステータスバーと同じ扱い)
+  const segOffset = started?.step_offset ?? 0;
+  const segStep = Math.max(0, (frame?.step ?? segOffset) - segOffset);
+  const progressPct = started && started.n_steps > 0 ? Math.min(100, (segStep / started.n_steps) * 100) : 0;
 
   // ステップ数のRFサイクル換算 (prompts/68)。RF周波数は境界条件から収集、
   // dt は pic.dt (手動指定) を優先し、未指定なら直近実行の started.dt を使う
@@ -809,7 +813,7 @@ export default function PicPanel({
           </div>
           <div className="kv">
             <span>進捗</span>
-            <span>{frame?.step ?? 0} / {started.n_steps}</span>
+            <span>{segStep} / {started.n_steps}</span>
           </div>
           {started.warnings.length > 0 && (
             <div className="pic-warnings">

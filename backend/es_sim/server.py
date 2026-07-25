@@ -361,6 +361,9 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
             "type": "started",
             "dt": sim.dt,
             "n_steps": sim.pic.n_steps,
+            # 区間開始時の通算ステップ数。frame.step は start からの通算で進むため、
+            # continue の進捗率はフロント側で (step - step_offset)/n_steps として計算する
+            "step_offset": sim.step_count,
             "warnings": sim.warnings,
             "mesh": {
                 "nodes": sim.mesh.nodes.tolist(),

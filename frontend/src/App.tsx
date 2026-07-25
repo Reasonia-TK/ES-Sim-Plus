@@ -1378,7 +1378,13 @@ export default function App() {
   // --- 下部ステータスバー ---
   // エラーは error → picError → gasError の順で最初の非null を優先表示する
   const statusError = error ?? picError ?? gasError;
-  const picPct = picStarted && picStarted.n_steps > 0 ? Math.round(((picFrame?.step ?? 0) / picStarted.n_steps) * 100) : 0;
+  // 続きから実行では frame.step が通算で進むため、区間開始オフセットを引いて計算する
+  // (不具合修正: 分子だけ通算になり 100% 超の表示になっていた)
+  const picStepOffset = picStarted?.step_offset ?? 0;
+  const picSegStep = Math.max(0, (picFrame?.step ?? picStepOffset) - picStepOffset);
+  const picPct = picStarted && picStarted.n_steps > 0
+    ? Math.min(100, Math.round((picSegStep / picStarted.n_steps) * 100))
+    : 0;
   const gasPct = gasProgress && gasProgress.nSteps > 0 ? Math.round((gasProgress.step / gasProgress.nSteps) * 100) : 0;
 
   return (
@@ -1921,7 +1927,7 @@ export default function App() {
         ) : picRunning ? (
           <>
             <span>
-              PIC-MCC 実行中... {picPct}% ({picFrame?.step ?? 0}/{picStarted?.n_steps ?? 0})
+              PIC-MCC 実行中... {picPct}% ({picSegStep}/{picStarted?.n_steps ?? 0})
             </span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${picPct}%` }} />

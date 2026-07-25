@@ -378,6 +378,9 @@ export interface PicStartedMsg {
   type: "started";
   dt: number;
   n_steps: number;
+  // 区間開始時の通算ステップ (continue では前回までの累計)。frame.step が通算で進むため、
+  // 進捗率は (step - step_offset)/n_steps で計算する。旧バックエンドには無いので optional
+  step_offset?: number;
   warnings: string[];
   mesh: MeshResult;
 }
