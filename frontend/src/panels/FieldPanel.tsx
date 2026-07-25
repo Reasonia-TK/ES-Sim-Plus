@@ -132,8 +132,8 @@ function parseWaveformCsv(text: string): { phase: number[]; v: number[]; freqHz:
   };
 }
 
-// CSV波形 (voltage_waveform) の編集UI (Dirichlet辺のみ)。未取り込み時はインポートボタン、
-// 取り込み後は周波数入力+解除ボタンを表示する。RF重畳 (voltage_rf) とは独立に併用できる
+// CSV波形 (voltage_waveform) の編集UI (Dirichlet辺・conductor領域で共用)。未取り込み時は
+// インポートボタン、取り込み後は周波数入力+解除ボタンを表示する。RF重畳 (voltage_rf) とは独立に併用できる
 function WaveformImportEditor({
   waveform,
   onChange,
@@ -588,6 +588,12 @@ export default function FieldPanel({
                       onChange={(next) => updateRegion(selected.id, { voltage_rf: next })}
                     />
                   )}
+                  {/* CSV波形は conductor 領域電極にも適用できる (backend は prompts/73 で
+                      領域側も対応済み。辺と同じエディタを共用する) */}
+                  <WaveformImportEditor
+                    waveform={selected.voltage_waveform ?? undefined}
+                    onChange={(next) => updateRegion(selected.id, { voltage_waveform: next })}
+                  />
                   <label>
                     二次電子放出係数 γ
                     <CommitNumberInput
