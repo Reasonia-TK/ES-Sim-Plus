@@ -10,6 +10,10 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "pydantic>=2.6",
+    # 粒子カーネル (walk/デポジット/gather+push) の JIT 高速化 (prompts/76)。
+    # optional 依存として扱う (import 失敗時は numpy 実装へ自動フォールバックする、
+    # es_sim/_numba_kernels.py 参照) が、配布版には常に同梱して既定で有効にする
+    "numba>=0.59",
 ]
 
 [project.optional-dependencies]

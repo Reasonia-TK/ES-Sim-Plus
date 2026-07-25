@@ -558,6 +558,9 @@ export interface Health {
   status: string;
   version: string;
   gpu: boolean;
+  // 粒子カーネル (walk/デポジット/gather+push) が numba JIT で高速化されているか
+  // (prompts/76)。optional: 旧バックエンドとの互換のため省略可能にする
+  numba?: boolean;
 }
 
 export interface ProfileResult {

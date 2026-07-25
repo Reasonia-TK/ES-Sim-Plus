@@ -10,6 +10,16 @@
 - numpy / scipy: 公式 hooks (pyinstaller-hooks-contrib) が収集するが、
   uvicorn の文字列インポート "es_sim.server:app" などは静的解析に
   かからないため hiddenimports で明示する
+- numba (prompts/76、粒子カーネルの JIT 化。optional 依存): pip install pyinstaller
+  が pyinstaller-hooks-contrib を連れてくるため、同梱の hook-numba.py /
+  hook-llvmlite.py により hiddenimports (cloudpickle 等) も llvmlite の共有
+  ライブラリ (libllvmlite.so/dll、gmsh と同種の ctypes 動的ロード) も自動収集
+  される (このリポジトリの Linux 環境で実際に onedir ビルドして確認済み)。
+  "numba" は _numba_kernels.py の try/except 内で import しており、PyInstaller の
+  静的解析 (AST 走査、try/except の有無に関わらず import 文自体は検出される) で
+  通常は拾われるはずだが、念のため下の hiddenimports にも明示しておく。
+  実行時の最終確認は GET /health の "numba" が true を返すことで行う
+  (release.yml の smoke テストでアサーション、prompts/76)
 
 ビルド:
     pyinstaller --clean --noconfirm es_sim_server.spec
@@ -62,6 +72,7 @@ hiddenimports = [
     "es_sim",
     "es_sim.server",   # uvicorn.run("es_sim.server:app") の文字列参照
     "gmsh",
+    "numba",           # _numba_kernels.py の try/except 内 import の保険 (prompts/76)
 ]
 # uvicorn のワーカ/ループ/プロトコル実装は動的インポートされる
 hiddenimports += collect_submodules("uvicorn")

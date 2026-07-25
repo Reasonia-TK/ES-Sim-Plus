@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import _numba_kernels
 from .fem import Solution, _radial_index
 from .fn import build_fn_surface, distribute_particles, fn_segment_currents
 from .meshing import Mesh
@@ -166,7 +167,27 @@ def _walk_step(
     l_out: np.ndarray | None = None,
     packed: np.ndarray | None = None,
 ):
-    """現在の要素から x_new へ向けて重心座標 walk を行う。
+    """walk の実装切り替え (numba あり/なし)。
+
+    毎呼び出しで _numba_kernels.HAVE_NUMBA を見て分岐する (import 時に一度だけ
+    束縛しないのは、テストで monkeypatch してフォールバック経路を強制できる
+    ようにするため、prompts/76)。両実装はビット単位で同じ結果を返す
+    (test_particles.py の等価性テストで担保)。
+    """
+    if _numba_kernels.HAVE_NUMBA:
+        return _numba_kernels.walk_step(coeffs, adjacency, elem0, x_new, l_out, packed)
+    return _walk_step_numpy(coeffs, adjacency, elem0, x_new, l_out, packed)
+
+
+def _walk_step_numpy(
+    coeffs,
+    adjacency: np.ndarray,
+    elem0: np.ndarray,
+    x_new: np.ndarray,
+    l_out: np.ndarray | None = None,
+    packed: np.ndarray | None = None,
+):
+    """現在の要素から x_new へ向けて重心座標 walk を行う (numpy ベクトル化実装)。
 
     戻り値:
         elem: 新しい所属要素 (吸収された粒子は最後にいた要素のまま)

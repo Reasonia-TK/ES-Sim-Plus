@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.sparse.linalg as spla
 
+from . import _numba_kernels
 from .fem import EPS0, _material_arrays, _radial_index, assemble
 from .fn import build_fn_surface, distribute_particles, fn_segment_currents
 from .mcc import GasField, MccModel
@@ -379,6 +380,9 @@ class PicSimulation:
             if self._nthreads > 1
             else None
         )
+        # numba の walk カーネル (prange) が使うスレッド数を pic.threads に合わせる
+        # (numba 無し環境では no-op。numpy フォールバックは上の _chunk_pool で並列化する)
+        _numba_kernels.set_num_threads(self._nthreads)
 
         # ---- 一様磁場 (prompts/51) --------------------------------------------
         # Boris 回転行列を種ごとに前計算する (イオンサブサイクルで dt が異なるため)。
@@ -1044,14 +1048,17 @@ class PicSimulation:
     def _deposit_species(self, sp: PicSpecies) -> np.ndarray:
         """1種の電荷を P1 形状関数 (重心座標) の重みで節点へ散布する。
 
-        f_i = Σ_p w_p q_p L_i(x_p)。散布は np.add.at と等価だが高速な
-        np.bincount で行う。重心座標は walk のキャッシュを再利用する。
+        f_i = Σ_p w_p q_p L_i(x_p)。numba があれば逐次 njit ループ (add.at 相当)、
+        なければ np.bincount で散布する (どちらも粒子順の逐次加算と等価な決定的
+        処理。bincount を並列化しない理由は _numba_kernels.py のモジュール docstring
+        を参照)。重心座標は walk のキャッシュを再利用する。
         """
         l = self._bary_cached(sp)
+        nidx = self._nidx_cached(sp)
+        if _numba_kernels.HAVE_NUMBA:
+            return _numba_kernels.deposit(nidx, l, sp.q, sp.w, self.n_nodes)
         contrib = (sp.q * sp.w)[:, None] * l
-        return np.bincount(
-            self._nidx_cached(sp).ravel(), weights=contrib.ravel(), minlength=self.n_nodes
-        )
+        return np.bincount(nidx.ravel(), weights=contrib.ravel(), minlength=self.n_nodes)
 
     def _deposit(self) -> np.ndarray:
         """全種の電荷堆積 (不動種はキャッシュを再利用)。
@@ -1269,7 +1276,21 @@ class PicSimulation:
         書き込み先も無いため、並列化しても結果はビット単位で不変。
         threads > 1 (prompts/50) では全種のチャンクをまとめてプールへ投入し、
         全ワーカーで消化する (種横断で負荷分散する)。
+
+        numba あり (prompts/76) では、walk カーネル自体が njit(parallel=True)
+        の prange で全コアを使うため、ここでの ThreadPoolExecutor チャンク分割は
+        二重の並列化になるだけで意味が無い (むしろスレッド起動オーバーヘッドが
+        増える)。そのため numba 版では種ごとに1回ずつ素直に呼び出す
+        (_walk_step 内部で numba カーネルへ委譲される)。
         """
+        if _numba_kernels.HAVE_NUMBA:
+            return [
+                _walk_step(
+                    self.coeffs, self.adjacency, sp.elem, x_new, l_new,
+                    packed=self._coeffs_packed,
+                )
+                for sp, _v, x_new, l_new in pushed
+            ]
         if self._chunk_pool is not None:
             futures: list = []
             results = [
@@ -1355,6 +1376,19 @@ class PicSimulation:
                 ke[sp.name] = self._last_ke_i
                 continue
             dt_sp = dt * self._sub if (sp.name == "ion" and self._sub > 1) else dt
+            if _numba_kernels.HAVE_NUMBA and not self.rz and self._b is None:
+                # 基本経路 (軸対称・一様磁場なし、prompts/76): gather (E補間) と
+                # push を1つの njit ループに融合する。運動エネルギーのリダクション
+                # だけは numpy の np.sum に残す (下の numpy 経路と同じ和の取り方に
+                # して決定性・等価性を保つため。_numba_kernels.py 参照)
+                v_new, x_new, vdot = _numba_kernels.gather_push(
+                    exy, sp.elem, sp.q, sp.m, dt_sp, sp.x, sp.v
+                )
+                ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * vdot))
+                if sp.name == "ion":
+                    self._last_ke_i = ke[sp.name]
+                pushed.append((sp, v_new, x_new, np.empty((len(x_new), 3))))
+                continue
             e_at = exy[sp.elem]
             v_new = sp.v.copy()
             ang_l = None

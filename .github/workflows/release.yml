@@ -80,6 +80,12 @@ jobs:
             }
             if (-not $ok) { throw "backend /health が応答しません" }
             Write-Host "backend health OK: $($r | ConvertTo-Json -Compress)"
+            # numba パッケージ漏れの早期検出 (prompts/76)。PyInstaller ビルドで
+            # numba/llvmlite の同梱が欠けると、_numba_kernels.py の try/except が
+            # ImportError を握りつぶして numpy フォールバックへ静かに倒れるため、
+            # 起動やシミュレーション自体は失敗しない。ここで明示的に落とさないと
+            # 配布版だけが体感で遅い状態のまま気付かれずにリリースされてしまう
+            if ($r.numba -ne $true) { throw "backend /health の numba が true ではありません (PyInstaller のパッケージ漏れの可能性): $($r | ConvertTo-Json -Compress)" }
           } finally {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           }

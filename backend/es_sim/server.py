@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
+from . import _numba_kernels  # noqa: F401 (eager import。理由は下のコメント参照)
 from .backend import gpu_available
 from .fem import solve
 from .lxcat import parse_lxcat
@@ -36,6 +37,14 @@ from .schema import (
     SolveResult,
     TraceResult,
 )
+
+# _numba_kernels は particles.py などから optional 依存として import されるが、
+# 実際に import が走るのは初回 PIC/DSMC/trace 実行時 (遅延)。PyInstaller ビルドで
+# numba の同梱が漏れていると、そのときになって初めて (try/except で握りつぶされて)
+# numpy フォールバックへ静かに倒れ、パッケージ漏れに気付きにくい。ここで
+# モジュールレベルに先に import しておくことで、サーバー起動 (= /health が
+# 応答可能になる前) の時点で HAVE_NUMBA が確定し、/health の "numba" フィールドと
+# release.yml の smoke テストで漏れを早期検出できる (prompts/76)。
 
 app = FastAPI(title="ES-Sim backend", version=__version__)
 
@@ -59,7 +68,12 @@ def _mesh_result(mesh) -> MeshResult:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": __version__, "gpu": gpu_available()}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "gpu": gpu_available(),
+        "numba": _numba_kernels.HAVE_NUMBA,
+    }
 
 
 @app.post("/mesh", response_model=MeshResult)

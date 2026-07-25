@@ -1530,7 +1530,7 @@ export default function App() {
           title="開発時は uvicorn の --port をこの値に合わせてください。配布版ではアプリ再起動後にサイドカーへ反映されます"
         >
           {health
-            ? `backend v${health.version} ${health.gpu ? "(GPU)" : "(CPU)"}`
+            ? `backend v${health.version} ${health.gpu ? "(GPU)" : "(CPU)"}${health.numba ? " numba" : ""}`
             : `backend 未接続 — uvicorn es_sim.server:app --port ${getPort()} を起動してください`}
         </div>
       </div>

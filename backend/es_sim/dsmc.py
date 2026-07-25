@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import _numba_kernels
 from .fem import _radial_index
 from .meshing import generate_mesh
 from .particles import (
@@ -115,6 +116,9 @@ class DsmcSimulation:
             if self._nthreads > 1
             else None
         )
+        # numba の walk カーネル (prange) が使うスレッド数を threads に合わせる
+        # (numba 無し環境では no-op。numpy フォールバックは上の _chunk_pool で並列化する)
+        _numba_kernels.set_num_threads(self._nthreads)
         gas_area = float(
             self.vol.sum() if self._solid is None else self.vol[~self._solid].sum()
         )
@@ -390,9 +394,13 @@ class DsmcSimulation:
         ビット単位で一致する。粒子数が少ない場合はスレッド起動コストの方が
         高いためその場で逐次計算する (dsmc.py の _walk_step 呼び出しは l_new
         を渡していないため、ここでも常に None のまま _walk_step へ渡す)。
+
+        numba あり (prompts/76) では walk カーネル自体が njit(parallel=True) の
+        prange で全コアを使うため、ここでのスレッドチャンク分割は不要
+        (二重並列化になるだけ)。1回の呼び出しに委ねる。
         """
         n = len(elem)
-        if n < 4096 or self._chunk_pool is None:
+        if _numba_kernels.HAVE_NUMBA or n < 4096 or self._chunk_pool is None:
             return _walk_step(self.coeffs, self.adjacency, elem, x_new, packed=self._packed)
         k = self._nthreads
         bounds = [(i * n) // k for i in range(k + 1)]
