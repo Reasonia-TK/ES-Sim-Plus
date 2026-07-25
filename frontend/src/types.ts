@@ -290,6 +290,14 @@ export type DsmcClientCommand =
   // 保持中の状態から追加実行 (prompts/74)。avg_steps は null なら前回設定を踏襲
   | { cmd: "continue"; n_steps: number; avg_steps?: number | null };
 
+// 粒子マージ設定 (高速化③、prompts/77)。電離でマクロ粒子数が増え続けたときに
+// 種ごとの上限 n_max を超えたら every ステップごとにセル内保存的マージ (Vranic
+// k→2) で削減する。PicSettings.merge が null なら無効 (既定)
+export interface PicMerge {
+  n_max: number;  // 種ごとの上限マクロ粒子数
+  every: number;  // チェック間隔 [ステップ]
+}
+
 export interface PicSettings {
   initial_plasma: InitialPlasma | null;
   injection: PicInjection | null;
@@ -315,6 +323,8 @@ export interface PicSettings {
   // 粒子チャンク並列のスレッド数 (prompts/50)。walk 探索を threads 分割して並列実行する。
   // 結果は threads の値によらずビット単位で一致。省略/undefined = 1 (逐次)
   threads?: number;
+  // 粒子マージ (高速化③、prompts/77)。null/undefined = 無効 (既定)
+  merge?: PicMerge | null;
 }
 
 // IEDF/IADF コレクタ線分の設定
@@ -345,6 +355,8 @@ export interface PicDiag {
   // FN 電界放出 (prompts/46)。未対応バックエンドでは undefined
   fn_i?: number;        // そのステップの総放出電流 [A/m]
   fn_events?: number;   // 累計放出マクロ電子数
+  // 粒子マージ (prompts/77) で削減した累計マクロ粒子数。未対応バックエンドでは undefined
+  merged?: number;
 }
 
 // PIC診断履歴 (done メッセージの形式)。バックエンド (pic.py) は列ごとの辞書
@@ -371,6 +383,7 @@ export function toDiagArray(h: PicHistoryDict | PicDiag[] | null | undefined): P
       coll_e: colOpt(h.coll_e, i), ion_events: colOpt(h.ion_events, i), see_events: colOpt(h.see_events, i),
       surf_q: colOpt(h.surf_q, i),
       fn_i: colOpt(h.fn_i, i), fn_events: colOpt(h.fn_events, i),
+      merged: colOpt(h.merged, i),
     };
   }
   return out;

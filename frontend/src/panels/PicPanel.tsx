@@ -19,6 +19,7 @@ import type {
   PicFields,
   PicFrameMsg,
   PicInjection,
+  PicMerge,
   PicSettings,
   PicStartedMsg,
   Project,
@@ -149,6 +150,9 @@ const DEFAULT_MCC: McSettings = {
   ion_processes: [],
   seed: 0,
 };
+
+// 粒子マージ (prompts/77) の既定値。backend/es_sim/schema.py PicMerge の既定と同じ
+const DEFAULT_MERGE: PicMerge = { n_max: 100000, every: 100 };
 
 // プロセスラベルは長いことがあるので一覧表示では短縮する (title 属性でフルテキストを見せる)
 function shortLabel(label: string, max = 34): string {
@@ -290,6 +294,17 @@ export default function PicPanel({
   const updateGas = (patch: Partial<McSettings["gas"]>) => {
     if (!pic.mcc) return;
     onChange({ ...pic, mcc: { ...pic.mcc, gas: { ...pic.mcc.gas, ...patch } } });
+  };
+
+  // 粒子マージ (prompts/77)。有効チェックを一度オフにしても、再度オンにしたときに
+  // 直前の値を復元できるよう保持する (他の任意設定と同じ流儀)
+  const mergeDefaultsRef = useRef<PicMerge>(pic.merge ?? DEFAULT_MERGE);
+  useEffect(() => {
+    if (pic.merge) mergeDefaultsRef.current = pic.merge;
+  }, [pic.merge]);
+  const updateMerge = (patch: Partial<PicMerge>) => {
+    if (!pic.merge) return;
+    onChange({ ...pic, merge: { ...pic.merge, ...patch } });
   };
 
   // FN電界放出 (prompts/46)
@@ -644,6 +659,34 @@ export default function PicPanel({
         />
       </div>
 
+      <Toggle
+        label="粒子マージ"
+        checked={!!pic.merge}
+        onChange={(v) => onChange({ ...pic, merge: v ? mergeDefaultsRef.current : null })}
+      />
+      {pic.merge && (
+        <>
+          <div className="field">
+            <span className="label">上限マクロ粒子数 (種ごと)</span>
+            <CommitNumberInput
+              value={pic.merge.n_max}
+              onCommit={(v) => updateMerge({ n_max: Math.max(1000, Math.round(v)) })}
+            />
+          </div>
+          <div className="field">
+            <span className="label">チェック間隔 [ステップ]</span>
+            <CommitNumberInput
+              value={pic.merge.every}
+              onCommit={(v) => updateMerge({ every: Math.max(1, Math.round(v)) })}
+            />
+          </div>
+        </>
+      )}
+      <p className="hint">
+        電離で増え続けるマクロ粒子をセル内で保存的に統合します (重み・運動量・エネルギー保存)。
+        IEDF等の分布に僅かな統計的影響があります。
+      </p>
+
       </>
       )}
 
@@ -850,6 +893,12 @@ export default function PicPanel({
               {frame.diag.coll_e ?? "-"} / {frame.diag.ion_events ?? "-"} / {frame.diag.see_events ?? "-"}
             </span>
           </div>
+          {pic.merge && (
+            <div className="kv">
+              <span>マージ削減粒子数 (累計)</span>
+              <span>{frame.diag.merged ?? "-"}</span>
+            </div>
+          )}
           <div className="kv">
             <span>{isAxisymmetric(project.coord) ? "誘電体表面電荷 [C]" : "誘電体表面電荷 [C/m]"}</span>
             <span>{frame.diag.surf_q !== undefined ? frame.diag.surf_q.toExponential(3) : "-"}</span>

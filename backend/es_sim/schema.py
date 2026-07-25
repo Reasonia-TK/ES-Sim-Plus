@@ -370,6 +370,18 @@ class Collector(BaseModel):
     label: str = ""  # 表示用ラベル (空ならフロントが "C1" 等を振る、prompts/36)
 
 
+class PicMerge(BaseModel):
+    """粒子マージ設定 (高速化③、prompts/77)。
+
+    電離でマクロ粒子数が増え続けると計算コストが際限なく上がるため、種ごとの
+    マクロ粒子数が n_max を超えたら every ステップごとにセル内保存的マージ
+    (Vranic et al. 2015 の k→2 マージ) で削減する。null なら無効 (既定)。
+    """
+
+    n_max: int = Field(100000, ge=1000, description="種ごとの上限マクロ粒子数")
+    every: int = Field(100, ge=1, description="チェック間隔 [ステップ]")
+
+
 class PicSettings(BaseModel):
     initial_plasma: InitialPlasma | None = None
     injection: PicInjection | None = None
@@ -413,6 +425,9 @@ class PicSettings(BaseModel):
     # 粒子処理 (walk 探索) のワーカースレッド数 (prompts/50)。粒子ごとの walk は独立な
     # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。1 = 従来経路
     threads: int = Field(1, ge=1, le=32)
+    # 粒子マージ (高速化③、prompts/77)。null = 無効 (既定。マージ関連の処理・乱数消費が
+    # 一切発生せず、従来経路と完全一致する)
+    merge: PicMerge | None = None
 
 
 # ---- DSMC (定常ガス流れ、prompts/54) ------------------------------------------

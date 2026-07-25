@@ -49,6 +49,15 @@ from .particles import (
 )
 from .schema import PicSettings, Project, VoltageWaveform, rf_components
 
+# 粒子マージ (prompts/77) のトリガー後、削り過ぎないよう目標とする残存比率。
+# n_max ちょうどまで削ると次のチェック (every ステップ後) までにまた超過して
+# 毎回大掛かりにマージし直すことになるため、少し余裕を持って 90% まで削る
+MERGE_TARGET_FRAC = 0.9
+
+# マージ対象とする最小グループサイズ。2粒子への集約に意味があるのは k≥3 から
+# (k=2 では削減にならず、k=1 では合成のしようがない)
+MERGE_MIN_GROUP = 3
+
 # フレーム送出時の種ごとの最大粒子数 (間引き)
 MAX_FRAME_PARTICLES = 2000
 
@@ -455,6 +464,14 @@ class PicSimulation:
         # ---- 鏡面反射 (reflect_edges + symmetry)・周期エッジの前計算 -----------
         self._build_boundary_edges()
 
+        # ---- 粒子マージ (高速化③、prompts/77) ---------------------------------
+        # merge=None (既定) では以下は一切実行されず、rng も生成しない。
+        # これにより OFF 時は従来の実行経路とビット単位で完全一致する
+        self.merge_events = 0    # マージ実行 (セル×オクタントの置換) の累計回数
+        self.merge_removed = 0   # マージで削減した累計マクロ粒子数 (diag "merged")
+        if self.pic.merge is not None:
+            self._merge_rng = np.random.default_rng(mcc_seed + 54321)
+
         # ---- 節点密度アキュムレータ (enable_density_accum で有効化) -----------
         self._accum_start: int | None = None
         self._accum_count = 0
@@ -543,7 +560,7 @@ class PicSimulation:
                 "t", "ke_e", "ke_i", "fe", "n_e", "n_i",
                 "wall_e", "wall_i", "phi_min", "phi_max",
                 "coll_e", "ion_events", "see_events", "surf_q",
-                "fn_i", "fn_events",
+                "fn_i", "fn_events", "merged",
             )
         }
         self._f_immobile: dict[str, np.ndarray] = {}  # 不動種の堆積キャッシュ
@@ -1229,6 +1246,132 @@ class PicSimulation:
         self.fn_events += n_emit
         return i_tot
 
+    # ---- 粒子マージ (高速化③、prompts/77) -------------------------------------
+
+    def _merge_species(self, sp: PicSpecies, n_max: int) -> int:
+        """1種にセル内保存的マージ (Vranic et al. 2015 の k→2 マージ) を適用する。
+
+        種のマクロ粒子数が n_max を超えている場合のみ実行し、粒子数の多いセル
+        (メッシュ要素) から処理して n_max の MERGE_TARGET_FRAC (=90%) 程度まで
+        減ったら打ち切る (削りすぎ防止。届かなくても次回のトリガーでまた削る)。
+
+        セル内をさらに平均速度の符号 (最大8オクタント) で分割してから k(≥3) 個を
+        2個へ置き換えるのは、セル内の全粒子を一括で1グループにすると分布関数
+        (IEDF/IADF 等) が大きく歪むため。同方向・同程度の速度の粒子同士だけを
+        混ぜることで歪みをオクタント内のばらつき程度に抑える。
+
+        置換後の2粒子は重み W/2、速度 v± = P/W ± Δ·(等方ランダム単位ベクトル)
+        (|Δ|² = E/W − |P/W|²、Cauchy-Schwarz より非負のはずだが数値誤差で
+        僅かに負になり得るため 0 に clip)、位置は重み付き平均 x̄ = Σw·x/W
+        (同一セル内かつ P1 形状関数が affine なので、電荷堆積 Σw·L_i(x) は
+        マージ前後で厳密に不変 — L_i(x̄)·W = Σw·L_i(x) が affine 性から成り立つ)。
+
+        戻り値: 削減したマクロ粒子数 (削減が無ければ 0)。
+        """
+        n0 = len(sp.x)
+        if n0 <= n_max:
+            return 0
+        target = int(n_max * MERGE_TARGET_FRAC)
+
+        # 要素番号でソートしてセルごとにグループ化する (O(N log N))
+        order = np.argsort(sp.elem, kind="stable")
+        elem_sorted = sp.elem[order]
+        _cell_elem, cell_start, cell_count = np.unique(
+            elem_sorted, return_index=True, return_counts=True
+        )
+        # 粒子数の多いセルから処理する (少ないセルを処理しても削減効率が悪いため)
+        cell_order = np.argsort(-cell_count)
+
+        remove = np.zeros(n0, dtype=bool)
+        new_x: list[np.ndarray] = []
+        new_v: list[np.ndarray] = []
+        new_w: list[float] = []
+        new_elem: list[int] = []
+        n_cur = n0
+
+        for ci in cell_order:
+            if n_cur <= target:
+                break
+            cnt = int(cell_count[ci])
+            if cnt < MERGE_MIN_GROUP:
+                break  # cell_count は降順ソート済みなので、以降のセルも全て閾値未満
+            idx = order[cell_start[ci]: cell_start[ci] + cnt]  # 元インデックス (このセルの粒子)
+
+            # セル内平均速度 (単純平均。オクタント分割の基準に使うだけなので重み無しで十分)
+            v_cell = sp.v[idx]
+            v_mean = v_cell.mean(axis=0)
+            sign = v_cell >= v_mean
+            oct_key = (
+                sign[:, 0].astype(np.int64)
+                | (sign[:, 1].astype(np.int64) << 1)
+                | (sign[:, 2].astype(np.int64) << 2)
+            )
+            for k in range(8):
+                grp = idx[oct_key == k]
+                m = grp.size
+                if m < MERGE_MIN_GROUP:
+                    continue
+                w = sp.w[grp]
+                w_sum = float(w.sum())
+                if w_sum <= 0.0:
+                    continue
+                v_grp = sp.v[grp]
+                x_grp = sp.x[grp]
+                p_vec = (w[:, None] * v_grp).sum(axis=0)          # Σ w·v (3成分)
+                e_tot = float((w * np.sum(v_grp * v_grp, axis=1)).sum())  # Σ w·|v|²
+                v_bar = p_vec / w_sum
+                x_bar = (w[:, None] * x_grp).sum(axis=0) / w_sum
+                delta2 = max(e_tot / w_sum - float(v_bar @ v_bar), 0.0)
+                delta = math.sqrt(delta2)
+                d = self._merge_rng.normal(size=3)
+                d_norm = float(np.linalg.norm(d))
+                d = d / d_norm if d_norm > 1e-300 else np.array([1.0, 0.0, 0.0])
+                new_x.append(x_bar)
+                new_x.append(x_bar)
+                new_v.append(v_bar + delta * d)
+                new_v.append(v_bar - delta * d)
+                new_w.append(w_sum * 0.5)
+                new_w.append(w_sum * 0.5)
+                new_elem.append(sp.elem[grp[0]])
+                new_elem.append(sp.elem[grp[0]])
+                remove[grp] = True
+                n_cur -= m - 2
+                self.merge_events += 1
+
+        if not new_x:
+            return 0
+
+        keep = ~remove
+        sp.x = np.concatenate([sp.x[keep], np.asarray(new_x)])
+        sp.v = np.concatenate([sp.v[keep], np.asarray(new_v)])
+        sp.w = np.concatenate([sp.w[keep], np.asarray(new_w)])
+        sp.elem = np.concatenate([sp.elem[keep], np.asarray(new_elem, dtype=sp.elem.dtype)])
+        sp.bary = None  # 位置が変わったので重心座標キャッシュは無効化 (遅延再計算)
+        sp.nidx = None
+        removed = n0 - len(sp.x)
+        self.merge_removed += removed
+        return removed
+
+    def _merge_step(self) -> None:
+        """マージのトリガー判定と実行 (種ごと、prompts/77)。
+
+        呼び出し元 (step()) が pic.merge is not None のときだけ呼ぶため、
+        ここでは every の判定のみ行う。
+        """
+        merge = self.pic.merge
+        if self.step_count % merge.every != 0:
+            return
+        for sp in self.species.values():
+            removed = self._merge_species(sp, merge.n_max)
+            if removed <= 0:
+                continue
+            # 不動種・サブサイクル中のイオンは電荷堆積ベクトルをキャッシュしているため、
+            # 粒子配列が変わったら他の粒子追加・除去箇所と同じ規約で無効化する
+            if not sp.mobile:
+                self._f_immobile.pop(sp.name, None)
+            if sp.name == "ion":
+                self._f_ion_cache = None
+
     def _walk_chunked_submit(
         self, elem: np.ndarray, x_new: np.ndarray, l_new: np.ndarray, futures: list
     ):
@@ -1558,6 +1701,15 @@ class PicSimulation:
         self.t = t + dt
         self.step_count += 1
 
+        # 7. 粒子マージ (高速化③、既定OFF、prompts/77)。every ステップごとに種の
+        # マクロ粒子数をチェックし、n_max を超えていればセル内保存的マージで削減する。
+        # merge=None ならこの呼び出し自体が無く、rng も一切引かない
+        # (= 従来の実行経路とビット単位で完全一致する)。
+        # 節点密度・時間平均フィールドの積算より前に行い、平均が反映する粒子状態を
+        # 揃える (電荷堆積は P1 形状関数が affine なのでマージ前後で厳密に不変)
+        if self.pic.merge is not None:
+            self._merge_step()
+
         # 節点密度・時間平均フィールド (enable_density_accum 以後、毎ステップ積算)
         if accumulating:
             self._accumulate_fields(phi, ex, ey, t)
@@ -1580,6 +1732,8 @@ class PicSimulation:
         h["see_events"].append(self.see_events)
         # 累計表面電荷 (全誘電体合計 [C/m])。誘電体なしなら常に 0
         h["surf_q"].append(float(self.q_surf.sum()))
+        # 粒子マージ (prompts/77) で削減した累計マクロ粒子数。無効なら常に 0
+        h["merged"].append(self.merge_removed)
         # FN 電界放出: このステップの総放出電流 [A/m] と累計放出マクロ電子数
         h["fn_i"].append(fn_i)
         h["fn_events"].append(self.fn_events)
