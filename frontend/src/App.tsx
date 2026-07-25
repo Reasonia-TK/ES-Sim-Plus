@@ -192,6 +192,19 @@ function electrodeDisplayLabel(label: string, coord: Project["coord"]): string {
   return edgeLabels[i] ?? label;
 }
 
+// DSMC「続きから実行」の無効化判定用キー (prompts/74)。project.dsmc.n_steps/avg_steps/
+// threads/smoothing_passes は prepare_continue が対応しており、変更しても保持中の粒子状態
+// (サーバー側) と非互換にならない。それ以外 (ジオメトリ・メッシュ・座標系・ガス種・境界条件・
+// 初期条件・目標粒子数・dt・シード等) が変わった場合はサーバー側の保持状態と食い違うため、
+// 「続きから実行」を無効化する必要がある。除外フィールドを落として JSON 文字列化するだけの
+// 簡潔な比較で十分 (深い等価判定ライブラリは不要)
+function dsmcContinueRelevantKey(p: Project): string {
+  if (!p.dsmc) return JSON.stringify({ ...p, dsmc: null });
+  const { n_steps: _n_steps, avg_steps: _avg_steps, threads: _threads, smoothing_passes: _smoothing_passes, ...rest } =
+    p.dsmc;
+  return JSON.stringify({ ...p, dsmc: rest });
+}
+
 // 「静電場結果」インスペクタページの解析結果サマリ (FieldPanel の solve
 // セクションと同内容だが、結果ノード単体でも確認できるようにここでも表示する)
 function ResultSummary({ result, coord }: { result: SolveResult | null; coord: Project["coord"] }) {
@@ -377,6 +390,13 @@ export default function App() {
   // 「結果表示」セレクトの選択と対数スケールチェックボックス
   const [gasResultField, setGasResultField] = useState<GasResultField>("n");
   const [gasLogScale, setGasLogScale] = useState(false);
+  // 「続きから実行」ボタンの有効条件 (PIC の picContinueReady/picProjectChangedSinceRun と同じ役割)。
+  // その1: 直前の実行が done (または stop) 済みで、現在実行中でないこと
+  const [gasContinueReady, setGasContinueReady] = useState(false);
+  // その2: 前回の DSMC 実行以降に「n_steps/avg_steps/threads/smoothing_passes 以外」が
+  // 変わっていないこと。この4つは prepare_continue が対応しており粒子状態と非互換にならない
+  // ため、これらだけの変更 (ステップ数を増やして続き実行、等) では無効化しない (commitProject 参照)
+  const [gasProjectChangedSinceRun, setGasProjectChangedSinceRun] = useState(false);
 
   // 周期アニメーション再生ループ: playing 中は fps に応じた間隔でビンを1つずつ順送りし、
   // 最後まで行ったら先頭へループする (setInterval + 関数更新で古いクロージャの影響を避ける)
@@ -443,7 +463,8 @@ export default function App() {
   // 編集操作の確定: 直前の状態を履歴へ積み、新しい状態を反映する。
   // 解析結果は state が変わったら破棄する (プロファイルパネルも連動して閉じる)。
   const commitProject = useCallback((next: Project) => {
-    history.push(projectRef.current);
+    const prev = projectRef.current;
+    history.push(prev);
     projectRef.current = next;
     setProjectState(next);
     setResult(null);
@@ -452,6 +473,11 @@ export default function App() {
     setTraceResult(null); // ジオメトリ変更で解析結果とともに trace 結果も破棄する
     setGasResult(null); // メッシュが変わりうるため DSMC 結果 (要素値) も破棄する
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
+    // DSMC続き実行の無効化は n_steps/avg_steps/threads/smoothing_passes 以外が変わったときだけ
+    // (dsmcContinueRelevantKey 参照)。ステップ数を増やして続き実行、を妨げないための例外
+    if (dsmcContinueRelevantKey(prev) !== dsmcContinueRelevantKey(next)) {
+      setGasProjectChangedSinceRun(true);
+    }
   }, [history]);
 
   // --- Undo/Redo ---
@@ -467,6 +493,7 @@ export default function App() {
     setGasResult(null);
     setSelectedRegionId((sel) => ensureSelection(prev, sel));
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
+    setGasProjectChangedSinceRun(true); // Undo は任意の過去状態へ飛びうるため常に無効化する
   }, [history, ensureSelection]);
 
   const doRedo = useCallback(() => {
@@ -481,6 +508,7 @@ export default function App() {
     setGasResult(null);
     setSelectedRegionId((sel) => ensureSelection(next, sel));
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
+    setGasProjectChangedSinceRun(true); // Redo も任意の過去状態へ飛びうるため常に無効化する
   }, [history, ensureSelection]);
 
   // キーボードショートカット: Ctrl+Z (Undo) / Ctrl+Y, Ctrl+Shift+Z (Redo)
@@ -551,6 +579,35 @@ export default function App() {
     commitProject({ ...p, dsmc: next });
   };
 
+  // DSMC実行中のコールバック生成 (start/continue で共通化。PIC の makePicCallbacks と同じ考え方だが、
+  // DSMC は history 連結のような区別が不要なので isContinue パラメータは無い)
+  const makeDsmcCallbacks = (): DsmcClientCallbacks => ({
+    onStarted: (msg) => {
+      setGasProgress({ step: 0, nSteps: msg.n_steps, nParticles: msg.n_particles });
+    },
+    onProgress: (msg) => {
+      setGasProgress({ step: msg.step, nSteps: msg.n_steps, nParticles: msg.n_particles });
+      // 未対応バックエンド (particles 省略) では null のまま (何も描画しない)
+      setGasLiveParticles(msg.particles ?? null);
+    },
+    onDone: (msg) => {
+      setGasResult(msg.result);
+      setGasRunning(false);
+      setGasLiveParticles(null); // 完了後は結果フィールド表示に切り替わるため残さない
+      setGasContinueReady(true); // done (stop 済みも含む) したので続き実行が可能になる
+    },
+    onError: (detail) => {
+      setGasError(detail);
+      setGasRunning(false);
+      setGasLiveParticles(null);
+      setGasContinueReady(false); // エラー後の状態は不定なので続き実行は無効のままにする
+    },
+    onClose: () => {
+      setGasRunning(false);
+      setGasLiveParticles(null);
+    },
+  });
+
   // DSMC ガス流れ計算実行 (WebSocket。project.dsmc を送信する。project.dsmc が null の場合は呼ばれない想定)
   const runDsmc = () => {
     setGasError(null);
@@ -558,33 +615,32 @@ export default function App() {
     setGasProgress(null);
     setGasLiveParticles(null);
     setGasRunning(true);
-    const callbacks: DsmcClientCallbacks = {
-      onStarted: (msg) => {
-        setGasProgress({ step: 0, nSteps: msg.n_steps, nParticles: msg.n_particles });
-      },
-      onProgress: (msg) => {
-        setGasProgress({ step: msg.step, nSteps: msg.n_steps, nParticles: msg.n_particles });
-        // 未対応バックエンド (particles 省略) では null のまま (何も描画しない)
-        setGasLiveParticles(msg.particles ?? null);
-      },
-      onDone: (msg) => {
-        setGasResult(msg.result);
-        setGasRunning(false);
-        setGasLiveParticles(null); // 完了後は結果フィールド表示に切り替わるため残さない
-      },
-      onError: (detail) => {
-        setGasError(detail);
-        setGasRunning(false);
-        setGasLiveParticles(null);
-      },
-      onClose: () => {
-        setGasRunning(false);
-        setGasLiveParticles(null);
-      },
-    };
-    const client = new DsmcClient(callbacks);
+    setGasContinueReady(false);
+    const client = new DsmcClient(makeDsmcCallbacks());
     dsmcClientRef.current = client;
+    // 現在のプロジェクト状態をサーバーへ送るので、続き実行の食い違いフラグをここで解消する
+    setGasProjectChangedSinceRun(false);
     client.start(project);
+  };
+
+  // DSMC続きから実行: 保持中のシミュレーション状態 (粒子・乱数・NTC端数等) を維持したまま
+  // 現在の n_steps/avg_steps で追加実行する。ジオメトリ・ガス条件などプロジェクト側の変更は
+  // サーバーへは送らないため反映されない (変更があれば gasProjectChangedSinceRun でボタンを無効化する)
+  const runDsmcContinue = () => {
+    if (!dsmcClientRef.current || !project.dsmc || gasRunning || !gasContinueReady || gasProjectChangedSinceRun) {
+      return;
+    }
+    setGasError(null);
+    setGasResult(null); // 進捗表示は新区間で0から (前回結果は継続分の done で置き換わる)
+    setGasProgress(null);
+    setGasLiveParticles(null);
+    setGasRunning(true);
+    setGasContinueReady(false);
+    dsmcClientRef.current.setCallbacks(makeDsmcCallbacks());
+    dsmcClientRef.current.continueRun({
+      n_steps: project.dsmc.n_steps,
+      avg_steps: project.dsmc.avg_steps ?? null,
+    });
   };
 
   // DSMC 計算の中断
@@ -1231,6 +1287,9 @@ export default function App() {
   // かつ前回実行以降にジオメトリが編集されていないこと (health 未接続時も不可)
   const picCanContinue = !!health && picContinueReady && !picRunning && !picProjectChangedSinceRun;
 
+  // DSMC「続きから実行」ボタンの有効条件 (PIC の picCanContinue と同じ考え方)
+  const gasCanContinue = !!health && gasContinueReady && !gasRunning && !gasProjectChangedSinceRun;
+
   // 配置済み IEDF/IADF コレクタ線分一覧 (CadCanvas への常時オーバーレイ表示用)。
   // label が未設定 (旧データ等) でも表示できるよう "C<n>" のフォールバックを与える
   const collectorsList: PicCollectorView[] = (pic.collectors ?? []).map((c, i) => ({
@@ -1699,6 +1758,9 @@ export default function App() {
                 running={gasRunning}
                 onRun={runDsmc}
                 onStop={stopDsmc}
+                canContinue={gasCanContinue}
+                onContinue={runDsmcContinue}
+                continueDisabledByProjectChange={gasProjectChangedSinceRun}
                 progress={gasProgress}
                 result={gasResult}
                 error={gasError}
@@ -1721,6 +1783,9 @@ export default function App() {
                 running={gasRunning}
                 onRun={runDsmc}
                 onStop={stopDsmc}
+                canContinue={gasCanContinue}
+                onContinue={runDsmcContinue}
+                continueDisabledByProjectChange={gasProjectChangedSinceRun}
                 progress={gasProgress}
                 result={gasResult}
                 error={gasError}

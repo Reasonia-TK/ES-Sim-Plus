@@ -185,8 +185,16 @@ def dsmc_endpoint(project: Project) -> DsmcResultModel:
     return _dsmc_result_model(sim, res)
 
 
+# 完了/停止後も状態を保持するスロット (プロセス内に1つ、PIC の _last_sim と同じ設計、
+# prompts/74)。新しい start で置き換え、continue で追加実行する
+_last_dsmc_sim: DsmcSimulation | None = None
+# start / continue の同時実行を防ぐロック (PIC 側の流儀に合わせる)
+_dsmc_lock = asyncio.Lock()
+
+
 async def _run_dsmc_session(ws: WebSocket, project_dict: dict) -> None:
-    """1回の DSMC 実行 (WS)。started → progress (100ステップごと) → done を送出する。"""
+    """1回の DSMC 実行 (start、WS)。started → progress (100ステップごと) → done を送出する。"""
+    global _last_dsmc_sim
     try:
         project = Project.model_validate(project_dict)
         if project.dsmc is None:
@@ -197,6 +205,34 @@ async def _run_dsmc_session(ws: WebSocket, project_dict: dict) -> None:
         await ws.send_json({"type": "error", "detail": str(exc)})
         return
 
+    _last_dsmc_sim = sim  # 新しい start で保持状態を置き換える
+    await _stream_dsmc(ws, sim)
+
+
+async def _continue_dsmc_session(ws: WebSocket, msg: dict) -> None:
+    """保持中の状態から追加実行 (continue、WS)。応答は start と同形。"""
+    sim = _last_dsmc_sim
+    if sim is None:
+        await ws.send_json(
+            {"type": "error", "detail": "保持中の実行状態がありません (先に start してください)"}
+        )
+        return
+    try:
+        n_steps = int(msg.get("n_steps", sim.s.n_steps))
+        if n_steps <= 0:
+            raise ValueError("n_steps は正の整数を指定してください")
+        avg_steps = msg.get("avg_steps")  # null なら前回設定を踏襲
+        sim.prepare_continue(n_steps, avg_steps)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+    await _stream_dsmc(ws, sim)
+
+
+async def _stream_dsmc(ws: WebSocket, sim: DsmcSimulation) -> None:
+    """sim.run() をワーカースレッドで実行し、started → progress → done を送出する
+    (start / continue 共通、PIC の _stream_run と同じ設計)。
+    """
     await ws.send_json(
         {
             "type": "started",
@@ -267,16 +303,33 @@ async def _run_dsmc_session(ws: WebSocket, project_dict: dict) -> None:
 
 @app.websocket("/ws/dsmc")
 async def ws_dsmc(ws: WebSocket) -> None:
-    """DSMC 実行の WebSocket (prompts/58)。start で実行、stop で中断する。"""
+    """DSMC 実行の WebSocket (prompts/58)。
+
+    start で新規実行、stop で中断、continue で保持中の状態から追加実行する
+    (prompts/74、完了/停止後も状態はサーバー側に保持され、新しい start で置き換わる)。
+    """
     await ws.accept()
     try:
         while True:
             msg = json.loads(await ws.receive_text())
-            if msg.get("cmd") == "start":
-                await _run_dsmc_session(ws, msg.get("project") or {})
+            cmd = msg.get("cmd")
+            if cmd in ("start", "continue"):
+                if _dsmc_lock.locked():
+                    # 別接続で実行中の start / continue は拒否する (PIC 側の流儀と同じ)
+                    await ws.send_json(
+                        {"type": "error", "detail": "別の DSMC 実行が進行中です"}
+                    )
+                    continue
+                async with _dsmc_lock:
+                    if cmd == "start":
+                        await _run_dsmc_session(ws, msg.get("project") or {})
+                    else:
+                        await _continue_dsmc_session(ws, msg)
+            elif cmd == "stop":
+                continue  # 実行中でなければ無視
             else:
                 await ws.send_json(
-                    {"type": "error", "detail": f"不明なコマンドです: {msg.get('cmd')}"}
+                    {"type": "error", "detail": f"不明なコマンドです: {cmd}"}
                 )
     except (WebSocketDisconnect, RuntimeError):
         pass

@@ -284,7 +284,11 @@ export interface DsmcErrorMsg {
 export type DsmcServerMessage = DsmcStartedMsg | DsmcProgressMsg | DsmcDoneMsg | DsmcErrorMsg;
 
 // client→server コマンド
-export type DsmcClientCommand = { cmd: "start"; project: Project } | { cmd: "stop" };
+export type DsmcClientCommand =
+  | { cmd: "start"; project: Project }
+  | { cmd: "stop" }
+  // 保持中の状態から追加実行 (prompts/74)。avg_steps は null なら前回設定を踏襲
+  | { cmd: "continue"; n_steps: number; avg_steps?: number | null };
 
 export interface PicSettings {
   initial_plasma: InitialPlasma | null;

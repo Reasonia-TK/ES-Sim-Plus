@@ -191,6 +191,12 @@ class DsmcSimulation:
         self.inflow = 0.0
         self.outflow = 0.0
 
+        # 通算ステップ数 (continue (prompts/74) をまたいで増え続ける)。run() 内の
+        # サンプリング区間判定はこの回の self.s.n_steps/avg_steps から独立に
+        # 求まるので物理計算には使わないが、PIC の step_count と同じく「今まで
+        # 何ステップ進めたか」を外から参照できるように保持しておく
+        self.step_count = 0
+
     # ---- VHS 断面積 -----------------------------------------------------------
 
     def _sigma(self, c_r: np.ndarray) -> np.ndarray:
@@ -697,10 +703,43 @@ class DsmcSimulation:
         idx = np.linspace(0, n - 1, MAX_CALLBACK_PARTICLES).astype(np.int64)
         return self.x[idx]
 
+    def prepare_continue(self, n_steps: int, avg_steps: int | None = None) -> None:
+        """完了/停止後の状態から追加実行の準備をする (pic.py の prepare_continue と同じ設計)。
+
+        維持するもの: 粒子状態 (x, v, elem)・rng・_coll_frac (NTC 候補数の端数)・
+        _sigcr_max・_res_edges の frac (流入端数)・通算ステップ数 (step_count)。
+        これらを一切リセットしないため、「N+M ステップ連続実行」と「N ステップ
+        完了後に continue して M ステップ」は粒子状態がビット単位で一致する。
+        run() 内の平均区間 (avg_start) はその回の self.s.n_steps/avg_steps だけから
+        決まるので、両ケースで平均区間が同じ末尾ステップ範囲を指すように
+        n_steps/avg_steps を選べば、平均結果も一致する。
+
+        リセットするもの: サンプリング蓄積 (_acc_cnt/_acc_v/_acc_v2/_samples) と
+        inflow/outflow。run() は平均区間に入った瞬間 (i == avg_start) にも同じ
+        リセットを行うが、ここで先に明示的にクリアしておかないと、新区間が
+        avg_start に到達する前に should_stop() で打ち切られた場合、前回実行分の
+        古い蓄積が「平均区間に入れた」と誤判定されて (_samples != 0 のため
+        run() 末尾のエラー検出をすり抜けて) 古い結果がそのまま返ってしまう。
+        """
+        self.s.n_steps = int(n_steps)
+        if avg_steps is not None:
+            self.s.avg_steps = int(avg_steps)
+        self._acc_cnt[:] = 0.0
+        self._acc_v[:] = 0.0
+        self._acc_v2[:] = 0.0
+        self._samples = 0
+        self.inflow = 0.0
+        self.outflow = 0.0
+
     def run(self, callback=None, should_stop=None) -> DsmcResult:
         """n_steps 進め、最終 avg_steps の時間平均から DsmcResult を作る。
 
         callback(step, n_particles, positions) を 100 ステップごとに呼ぶ (進捗表示用)。
+        step はこの run() 呼び出し内の区間相対ステップ (1..n_steps)。continue
+        (prepare_continue、prompts/74) で複数回 run() を呼んでも進捗表示は毎回
+        0 から始まる方が分かりやすく、PIC の継続実行で通算ステップとの整合を
+        取るためにフロント側で offset 計算が必要になった経緯 (prompts 直近の fix)
+        を DSMC では最初から避けられるため、あえて通算値にしない。
         n_particles は間引き前の実シミュレーション粒子数、positions は間引き後の
         粒子座標 (≤2000点、(k,2) ndarray)。should_stop() が True を返したら中断する
         (WS の stop コマンド用)。平均区間に入る前に中断された場合は結果が無いためエラーを送出する。
@@ -718,6 +757,7 @@ class DsmcSimulation:
                 self.inflow = 0.0
                 self.outflow = 0.0
             self.step()
+            self.step_count += 1
             if i >= avg_start:
                 self._sample()
             if callback is not None and (i + 1) % 100 == 0:

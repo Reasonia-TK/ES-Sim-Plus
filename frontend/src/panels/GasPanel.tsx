@@ -129,6 +129,12 @@ interface Props {
   running: boolean;
   onRun: () => void;
   onStop: () => void;
+  // 続きから実行 (prompts/74、PIC の canContinue/onContinue と同じ役割)
+  canContinue: boolean;
+  onContinue: () => void;
+  // true の場合、canContinue=false の理由が「ジオメトリ・ガス条件編集による食い違い」であることを示す
+  // (PicPanel の continueDisabledByProjectChange 参照)
+  continueDisabledByProjectChange: boolean;
   progress: GasProgress | null;
   result: DsmcResult | null;
   error: string | null;
@@ -155,6 +161,9 @@ export default function GasPanel({
   running,
   onRun,
   onStop,
+  canContinue,
+  onContinue,
+  continueDisabledByProjectChange,
   progress,
   result,
   error,
@@ -509,7 +518,26 @@ export default function GasPanel({
             <button className="secondary" onClick={onStop} disabled={!running}>
               停止
             </button>
+            <button
+              className="secondary"
+              onClick={onContinue}
+              disabled={!canContinue}
+              title={
+                continueDisabledByProjectChange
+                  ? "ジオメトリ・ガス条件が変更されたため続き実行できません (再度 ガス流れ計算 してください)"
+                  : undefined
+              }
+            >
+              続きから実行
+            </button>
           </div>
+          <p className="hint">
+            「続きから実行」は現在のステップ数・平均ステップ数で追加実行します。
+            粒子状態・乱数は前回から継続します。
+            ジオメトリやガス条件を変更した場合は再実行が必要です。
+            {continueDisabledByProjectChange &&
+              " ジオメトリ・ガス条件を編集したため、続き実行するには再度「ガス流れ計算」が必要です。"}
+          </p>
 
           {running && progress && (
             <>

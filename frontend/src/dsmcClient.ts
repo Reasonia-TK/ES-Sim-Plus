@@ -97,6 +97,18 @@ export class DsmcClient {
     });
   }
 
+  // 保持中のシミュレーション状態から追加実行する continue コマンドを送る
+  // (picClient.continueRun と同じ流儀)。直前の start/continue と同じ接続が
+  // 開いたままならそれをそのまま使い、閉じていれば新規接続してから送信する
+  continueRun(opts: { n_steps: number; avg_steps?: number | null }): void {
+    const cmd: DsmcClientCommand = { cmd: "continue", ...opts };
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(cmd));
+      return;
+    }
+    this.connect((ws) => ws.send(JSON.stringify(cmd)));
+  }
+
   // stop コマンドを送る (接続していなければ何もしない)
   stop(): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {

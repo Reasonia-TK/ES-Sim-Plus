@@ -11,6 +11,8 @@
 5. walk のチャンク並列化 (prompts/65): threads=4 が threads=1 とビット単位で一致
 6. 結果の平滑化 (prompts/67): 隣接セル拡散 (smoothing_passes) の保存性・正値性・
    ノイズ低減
+7. 続きから実行 (prepare_continue、prompts/74): 800 ステップ連続実行と
+   400 → continue(400) の粒子状態・結果がビット単位で一致、WS continue フロー
 """
 
 import math
@@ -662,3 +664,111 @@ def test_dsmc_run_callback_particles():
         assert np.all(np.isfinite(positions))
         # 間引き前の実粒子数が2000を超えていることを確認 (間引きが実際に働くケース)
         assert n_particles > positions.shape[0] or n_particles <= 2000
+
+
+# ---- 7. 続きから実行 (prepare_continue、prompts/74) --------------------------------
+
+
+def test_dsmc_continue_is_bit_identical_to_single_run():
+    """乱数 Generator・粒子状態を一切リセットしないため、800 ステップ連続実行と
+    400 ステップ → continue(400, avg_steps=100) の粒子状態・結果がビット単位で
+    一致する (avg_steps=100 を両ケースとも同じ値にすることで、平均区間が
+    どちらも通算 701..800 ステップ目という同じ末尾区間になる)。
+    """
+    kwargs = {"init_pressure_pa": 5.0, "n_particles": 4000, "seed": 7}
+
+    # A: 800 ステップ連続 (avg_start = 800-100 = 700 → 平均区間 701..800)
+    sim_a = DsmcSimulation(_project({**kwargs, "n_steps": 800, "avg_steps": 100}))
+    res_a = sim_a.run()
+
+    # B: 400 ステップ → continue(400, avg_steps=100)
+    #    (継続区間内は avg_start = 400-100 = 300 → 区間相対 301..400 = 通算 701..800)
+    sim_b = DsmcSimulation(_project({**kwargs, "n_steps": 400, "avg_steps": 100}))
+    sim_b.run()
+    sim_b.prepare_continue(400, avg_steps=100)
+    res_b = sim_b.run()
+
+    # 粒子状態 (位置・速度・所属要素) がビット単位で一致
+    assert len(sim_a.x) == len(sim_b.x) and len(sim_a.x) > 0
+    assert np.array_equal(sim_a.x, sim_b.x)
+    assert np.array_equal(sim_a.v, sim_b.v)
+    assert np.array_equal(sim_a.elem, sim_b.elem)
+    assert np.array_equal(sim_a._coll_frac, sim_b._coll_frac)
+    assert np.array_equal(sim_a._sigcr_max, sim_b._sigcr_max)
+    assert sim_a.step_count == sim_b.step_count == 800
+
+    # 結果フィールドもビット単位で一致
+    assert np.array_equal(res_a.n, res_b.n)
+    assert np.array_equal(res_a.t, res_b.t)
+    assert np.array_equal(res_a.u, res_b.u)
+    assert np.array_equal(res_a.p, res_b.p)
+    assert res_a.n_particles == res_b.n_particles
+    assert res_a.inflow == res_b.inflow
+    assert res_a.outflow == res_b.outflow
+
+
+def _recv_until_done(ws) -> dict:
+    while True:
+        msg = ws.receive_json()
+        assert msg["type"] != "error", msg.get("detail")
+        if msg["type"] == "done":
+            return msg
+
+
+def test_dsmc_ws_continue_without_state_errors_and_full_flow():
+    """/ws/dsmc: 保持状態なしの continue はエラー。start → done → continue → done
+    がエラーなく流れ、2回目の done の結果が有限で、追加区間の avg_steps が
+    反映されていること (prompts/74)。
+    """
+    from starlette.testclient import TestClient
+
+    from es_sim import server as srv
+
+    srv._last_dsmc_sim = None  # 保持スロットを空にしてから検証する
+    client = TestClient(srv.app)
+
+    project = {
+        "geometry": {
+            "domain": {"polygon": [[0, 0], [L, 0], [L, H], [0, H]]},
+            "boundaries": [],
+        },
+        "mesh": {"size": 2e-3},
+        "dsmc": {
+            "init_pressure_pa": 5.0,
+            "n_particles": 3000,
+            "n_steps": 150,
+            "avg_steps": 50,
+            "seed": 5,
+        },
+    }
+
+    with client.websocket_connect("/ws/dsmc") as ws:
+        # 保持状態なしの continue はエラー
+        ws.send_json({"cmd": "continue", "n_steps": 10})
+        msg = ws.receive_json()
+        assert msg["type"] == "error"
+        assert "保持" in msg["detail"] or "start" in msg["detail"]
+
+        # start → done
+        ws.send_json({"cmd": "start", "project": project})
+        started = ws.receive_json()
+        assert started["type"] == "started" and started["n_steps"] == 150
+        done1 = _recv_until_done(ws)
+        assert len(done1["result"]["n"]) > 0
+        assert all(np.isfinite(done1["result"]["p"]))
+
+        # continue → started (n_steps=追加分) → done
+        ws.send_json({"cmd": "continue", "n_steps": 100, "avg_steps": 40})
+        started2 = ws.receive_json()
+        assert started2["type"] == "started" and started2["n_steps"] == 100
+        done2 = _recv_until_done(ws)
+        result2 = done2["result"]
+        assert len(result2["n"]) > 0
+        assert all(np.isfinite(result2["p"]))
+        assert all(np.isfinite(v) for u in result2["u"] for v in u)
+        # 追加区間の avg_steps=40 が反映されている (サンプル数が対応する区間長)
+        assert srv._last_dsmc_sim.s.avg_steps == 40
+        assert srv._last_dsmc_sim.s.n_steps == 100
+        assert srv._last_dsmc_sim.step_count == 250
+
+    srv._last_dsmc_sim = None  # 後続テストへ状態を持ち越さない
