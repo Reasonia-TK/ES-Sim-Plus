@@ -17,6 +17,7 @@ import type {
   VoltageRf,
   VoltageWaveform,
 } from "../types";
+import VoltagePreviewChart, { voltagePreviewFreqs } from "./VoltagePreviewChart";
 
 /**
  * 静電場パネル (3カラムシェルの各種インスペクタページから共用)
@@ -413,6 +414,20 @@ export default function FieldPanel({
                     onChange={(next) => setEdgeVoltageWaveform(i, next)}
                   />
                 )}
+                {/* 電位プレビュー (prompts/80): RF・波形のどちらも無い (DCのみ) 場合は
+                    時間軸が定まらないため何も表示しない */}
+                {!isAxisEdge &&
+                  st.type === "dirichlet" &&
+                  voltagePreviewFreqs(rfList, st.voltageWaveform ?? null).length > 0 && (
+                    <>
+                      <div className="voltage-preview-heading">電位プレビュー</div>
+                      <VoltagePreviewChart
+                        voltage={st.voltage}
+                        rf={rfList}
+                        waveform={st.voltageWaveform ?? null}
+                      />
+                    </>
+                  )}
               </div>
             );
           })}
@@ -594,6 +609,19 @@ export default function FieldPanel({
                     waveform={selected.voltage_waveform ?? undefined}
                     onChange={(next) => updateRegion(selected.id, { voltage_waveform: next })}
                   />
+                  {/* 電位プレビュー (prompts/80): RF・波形のどちらも無い (DCのみ) 場合は
+                      時間軸が定まらないため何も表示しない */}
+                  {voltagePreviewFreqs(rfComponents(selected.voltage_rf), selected.voltage_waveform ?? null).length >
+                    0 && (
+                    <>
+                      <div className="voltage-preview-heading">電位プレビュー</div>
+                      <VoltagePreviewChart
+                        voltage={selected.voltage ?? 0}
+                        rf={rfComponents(selected.voltage_rf)}
+                        waveform={selected.voltage_waveform ?? null}
+                      />
+                    </>
+                  )}
                   <label>
                     二次電子放出係数 γ
                     <CommitNumberInput
