@@ -72,6 +72,23 @@ npm run tauri dev
 
 Tauri を使わずブラウザで動作確認する場合は `npm run dev` → http://localhost:1420
 
+## バッチ実行(パラメータスイープ、prompts/78)
+
+GUI は1アプリ=1計算だが、複数条件を一気に流したいときはヘッドレスのバッチモードが使える。
+複数のプロジェクトJSON(GUIの「保存」形式)を別プロセスで並列実行し、GUIの
+「読込」でそのまま開ける「結果付き保存」形式のJSONを書き出す。
+
+```bash
+cd backend
+python -m es_sim.batch run case1.json case2.json ... --parallel 2 --out out_dir
+# 配布版 (exe) でも同様に使える:
+#   es-sim-backend.exe batch case1.json case2.json ... --parallel 2
+```
+
+出力は各入力ファイル名に `_results` を付けたJSON(既定。`--suffix` で変更可)。
+合計スレッド数(`--parallel` × 各ケースの `pic.threads`)がCPUコア数を超えないよう
+`--parallel` を調整すること。
+
 ## examples/ のサンプルプロジェクト
 
 フロントの「開く」(読込ダイアログ)で `examples/*.json` を読み込むと各機能をすぐに試せる。
@@ -164,6 +181,8 @@ PIC-MCC統合ではTurnerベンチマーク(M. M. Turner et al., *Phys. Plasmas*
 - LXCat実データ(`backend/tests/data/Ar*.txt`)は再配布条件のため git 管理外。テストは同梱の
   合成フィクスチャで常時実行され、実データがあれば追加検証される
 - GPU(CuPy)化は未実装。現状は numpy/scipy のみで完結(CPU)
+- バッチ実行(`python -m es_sim.batch`)はプロセスごとに独立しているため、
+  `pic.mcc.use_dsmc_gas`(直前のDSMC結果をサーバー保持状態から参照する機能)は未対応
 
 ## ロードマップ
 
