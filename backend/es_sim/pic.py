@@ -1739,11 +1739,9 @@ class PicSimulation:
         # 融合経路のvdotはKE評価後に不要になるため、境界吸収時の重み圧縮先として
         # 再利用する。NumPyフォールバックではNoneとして従来の抽出処理を保つ。
         compact_weight_buffers: list[np.ndarray | None] = []
-        # 基本xy・軸対称経路はpushとwalkを同じ粒子ループへ融合し、中間配列の
-        # 再読込とNumbaディスパッチを減らす。磁場ありxyは独立経路を使う。
-        fuse_push_walk = _numba_kernels.HAVE_NUMBA and (
-            self.rz or self._b is None
-        )
+        # 基本xy・軸対称・一様磁場経路はpushとwalkを同じ粒子ループへ融合し、
+        # 中間配列の再読込とNumbaディスパッチを減らす。
+        fuse_push_walk = _numba_kernels.HAVE_NUMBA
         fused_walk_results: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
         for sp in self.species.values():
             if len(sp.x) == 0:
@@ -1762,12 +1760,15 @@ class PicSimulation:
             if fuse_push_walk:
                 # gather・push・walkを1つのnjitループに融合する。軸対称では
                 # 軸鏡映と角運動量補正も含め、各粒子内の演算順を従来経路と揃える。
-                fused_kernel = (
-                    _numba_kernels.gather_push_walk_rz
-                    if self.rz
-                    else _numba_kernels.gather_push_walk
-                )
-                fused_args = (self.ridx,) if self.rz else ()
+                if self.rz:
+                    fused_kernel = _numba_kernels.gather_push_walk_rz
+                    fused_args = (self.ridx,)
+                elif self._b is not None:
+                    fused_kernel = _numba_kernels.gather_push_walk_boris
+                    fused_args = (self._boris_rt[sp.name],)
+                else:
+                    fused_kernel = _numba_kernels.gather_push_walk
+                    fused_args = ()
                 (
                     v_new,
                     x_new,
@@ -1797,48 +1798,34 @@ class PicSimulation:
                 compact_weight_buffers.append(vdot)
                 fused_walk_results.append((elem_new, absorbed, b_elem, b_loc))
                 continue
-            if self._b is not None and _numba_kernels.HAVE_NUMBA:
-                # 一様磁場経路もgather・Boris回転・driftを1粒子ループへ融合し、
-                # e_atや半キック、行列積の中間配列を作らない。
-                v_new, x_new, vdot = _numba_kernels.gather_push_boris(
-                    exy,
-                    sp.elem,
-                    sp.q,
-                    sp.m,
-                    dt_sp,
-                    self._boris_rt[sp.name],
-                    sp.x,
-                    sp.v,
-                )
+            e_at = exy[sp.elem]
+            v_new = sp.v.copy()
+            ang_l = None
+            if self.rz:
+                # 軸対称プッシュ (prompts/47): 遠心力項 vθ²/r を現在位置で評価して
+                # 径方向加速度に加える (trace と同じ半陰的規約)。v[:, 2] は vθ
+                ridx = self.ridx
+                a_rz = (sp.q / sp.m) * e_at
+                r_cur = np.maximum(sp.x[:, ridx], _R_TINY)
+                ang_l = sp.x[:, ridx] * sp.v[:, 2]  # 角運動量 L = r·vθ (保存量)
+                a_rz[:, ridx] += sp.v[:, 2] ** 2 / r_cur
+                v_new[:, :2] += dt_sp * a_rz
+            elif self._b is not None:
+                # 一様磁場 (prompts/51):
+                # Boris 法 (半キック E → 回転 B → 半キック E)
+                half = (sp.q / sp.m) * (0.5 * dt_sp)
+                v_new[:, :2] += half * e_at
+                v_new = v_new @ self._boris_rt[sp.name]
+                v_new[:, :2] += half * e_at
             else:
-                e_at = exy[sp.elem]
-                v_new = sp.v.copy()
-                ang_l = None
-                if self.rz:
-                    # 軸対称プッシュ (prompts/47): 遠心力項 vθ²/r を現在位置で評価して
-                    # 径方向加速度に加える (trace と同じ半陰的規約)。v[:, 2] は vθ
-                    ridx = self.ridx
-                    a_rz = (sp.q / sp.m) * e_at
-                    r_cur = np.maximum(sp.x[:, ridx], _R_TINY)
-                    ang_l = sp.x[:, ridx] * sp.v[:, 2]  # 角運動量 L = r·vθ (保存量)
-                    a_rz[:, ridx] += sp.v[:, 2] ** 2 / r_cur
-                    v_new[:, :2] += dt_sp * a_rz
-                elif self._b is not None:
-                    # 一様磁場 (prompts/51):
-                    # Boris 法 (半キック E → 回転 B → 半キック E)
-                    half = (sp.q / sp.m) * (0.5 * dt_sp)
-                    v_new[:, :2] += half * e_at
-                    v_new = v_new @ self._boris_rt[sp.name]
-                    v_new[:, :2] += half * e_at
-                else:
-                    # 2d3v: E は vx, vy のみに作用し、vz はそのまま
-                    v_new[:, :2] += (sp.q / sp.m) * dt_sp * e_at
-                # 時刻中心化した運動エネルギー:
-                # KE(t_n) ≈ ½ m Σ w v(n-1/2)·v(n+1/2)
-                vdot = (
-                    sp.v[:, 0] * v_new[:, 0] + sp.v[:, 1] * v_new[:, 1]
-                ) + sp.v[:, 2] * v_new[:, 2]
-                x_new = sp.x + dt_sp * v_new[:, :2]
+                # 2d3v: E は vx, vy のみに作用し、vz はそのまま
+                v_new[:, :2] += (sp.q / sp.m) * dt_sp * e_at
+            # 時刻中心化した運動エネルギー:
+            # KE(t_n) ≈ ½ m Σ w v(n-1/2)·v(n+1/2)
+            vdot = (
+                sp.v[:, 0] * v_new[:, 0] + sp.v[:, 1] * v_new[:, 1]
+            ) + sp.v[:, 2] * v_new[:, 2]
+            x_new = sp.x + dt_sp * v_new[:, :2]
             # vdotの総和は従来どおりnumpyに任せ、決定的な加算順を維持する。
             ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * vdot))
             if sp.name == "ion":

@@ -242,6 +242,112 @@ if HAVE_NUMBA:
             out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * vn2
 
     @njit(cache=True, nogil=True, parallel=True)
+    def _gather_push_walk_boris_kernel(
+        exy,
+        packed,
+        adjacency,
+        elem0,
+        half,
+        dt_sp,
+        boris_rt,
+        x,
+        v,
+        tol,
+        max_iters,
+        out_vnew,
+        out_xnew,
+        out_vdot,
+        out_elem,
+        out_absorbed,
+        out_b_elem,
+        out_b_loc,
+        out_l,
+    ):
+        """一様磁場のBoris pushとwalkを1粒子ループへ融合する。"""
+        n = elem0.shape[0]
+        for p in prange(n):
+            e = elem0[p]
+            kick0 = half * exy[e, 0]
+            kick1 = half * exy[e, 1]
+            v0 = v[p, 0]
+            v1 = v[p, 1]
+            v2 = v[p, 2]
+            vm0 = v0 + kick0
+            vm1 = v1 + kick1
+            vm2 = v2
+
+            vr0 = (vm0 * boris_rt[0, 0] + vm1 * boris_rt[1, 0])
+            vr0 = vr0 + vm2 * boris_rt[2, 0]
+            vr1 = (vm0 * boris_rt[0, 1] + vm1 * boris_rt[1, 1])
+            vr1 = vr1 + vm2 * boris_rt[2, 1]
+            vr2 = (vm0 * boris_rt[0, 2] + vm1 * boris_rt[1, 2])
+            vr2 = vr2 + vm2 * boris_rt[2, 2]
+
+            vn0 = vr0 + kick0
+            vn1 = vr1 + kick1
+            vn2 = vr2
+            xp = x[p, 0] + dt_sp * vn0
+            yp = x[p, 1] + dt_sp * vn1
+            out_vnew[p, 0] = vn0
+            out_vnew[p, 1] = vn1
+            out_vnew[p, 2] = vn2
+            out_xnew[p, 0] = xp
+            out_xnew[p, 1] = yp
+            out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * vn2
+
+            absorbed = False
+            b_elem = 0
+            b_loc = 0
+            converged = False
+            l0 = 0.0
+            l1 = 0.0
+            l2 = 0.0
+            for _ in range(max_iters):
+                g9 = packed[e, 9]
+                l0 = (packed[e, 0] + packed[e, 3] * xp) + packed[e, 6] * yp
+                l0 = l0 / g9
+                l1 = (packed[e, 1] + packed[e, 4] * xp) + packed[e, 7] * yp
+                l1 = l1 / g9
+                l2 = (packed[e, 2] + packed[e, 5] * xp) + packed[e, 8] * yp
+                l2 = l2 / g9
+                if l0 >= -tol and l1 >= -tol and l2 >= -tol:
+                    converged = True
+                    break
+                mi = 0
+                mv = l0
+                if l1 < mv:
+                    mi = 1
+                    mv = l1
+                if l2 < mv:
+                    mi = 2
+                nb = adjacency[e, mi]
+                if nb == -1:
+                    absorbed = True
+                    b_elem = e
+                    b_loc = mi
+                    break
+                e = nb
+            if not converged and not absorbed:
+                # walk単体カーネルと同じ反復上限フォールバック。
+                g9 = packed[e, 9]
+                l0 = (packed[e, 0] + packed[e, 3] * xp) + packed[e, 6] * yp
+                l0 = l0 / g9
+                l1 = (packed[e, 1] + packed[e, 4] * xp) + packed[e, 7] * yp
+                l1 = l1 / g9
+                l2 = (packed[e, 2] + packed[e, 5] * xp) + packed[e, 8] * yp
+                l2 = l2 / g9
+
+            out_elem[p] = e
+            out_absorbed[p] = absorbed
+            if absorbed:
+                out_b_elem[p] = b_elem
+                out_b_loc[p] = b_loc
+            else:
+                out_l[p, 0] = l0
+                out_l[p, 1] = l1
+                out_l[p, 2] = l2
+
+    @njit(cache=True, nogil=True, parallel=True)
     def _gather_push_walk_kernel(
         exy,
         packed,
@@ -961,6 +1067,68 @@ def gather_push_boris(
         vdot,
     )
     return v_new, x_new, vdot
+
+
+def gather_push_walk_boris(
+    exy: np.ndarray,
+    packed: np.ndarray,
+    adjacency: np.ndarray,
+    elem: np.ndarray,
+    q: float,
+    m: float,
+    dt_sp: float,
+    boris_rt: np.ndarray,
+    x: np.ndarray,
+    v: np.ndarray,
+    out: tuple[np.ndarray, ...] | None = None,
+):
+    """一様磁場xy経路のBoris pushとwalkを1回で処理する。"""
+    n = len(x)
+    if out is None:
+        v_new = np.empty((n, 3), dtype=np.float64)
+        x_new = np.empty((n, 2), dtype=np.float64)
+        vdot = np.empty(n, dtype=np.float64)
+        elem_new = np.empty(n, dtype=np.int64)
+        absorbed = np.empty(n, dtype=np.bool_)
+        b_elem = np.empty(n, dtype=np.int64)
+        b_loc = np.empty(n, dtype=np.int64)
+        bary = np.empty((n, 3), dtype=np.float64)
+    else:
+        if len(out) != 8 or any(len(buf) < n for buf in out):
+            raise ValueError(
+                "gather_push_walk_boris の出力バッファ容量が不足しています"
+            )
+        v_new = out[0][:n]
+        x_new = out[1][:n]
+        vdot = out[2][:n]
+        elem_new = out[3][:n]
+        absorbed = out[4][:n]
+        b_elem = out[5][:n]
+        b_loc = out[6][:n]
+        bary = out[7][:n]
+    half = (q / m) * (0.5 * dt_sp)
+    _gather_push_walk_boris_kernel(
+        np.ascontiguousarray(exy),
+        np.ascontiguousarray(packed),
+        np.ascontiguousarray(adjacency),
+        np.ascontiguousarray(elem),
+        half,
+        dt_sp,
+        np.ascontiguousarray(boris_rt),
+        np.ascontiguousarray(x),
+        np.ascontiguousarray(v),
+        _TOL,
+        _MAX_WALK_ITERS,
+        v_new,
+        x_new,
+        vdot,
+        elem_new,
+        absorbed,
+        b_elem,
+        b_loc,
+        bary,
+    )
+    return v_new, x_new, vdot, elem_new, absorbed, b_elem, b_loc, bary
 
 
 def gather_push_walk(

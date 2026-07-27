@@ -282,6 +282,69 @@ def test_gather_push_boris_matches_numpy():
 
 
 @requires_numba
+def test_fused_boris_gather_push_walk_matches_separate_kernels():
+    """融合Boris+walkが個別JITカーネルとビット単位で一致する。"""
+    mesh = _demo_mesh()
+    coeffs = P._barycentric_coeffs(mesh.nodes, mesh.triangles)
+    adjacency = P._adjacency(mesh.triangles)
+    packed = P._pack_coeffs(coeffs)
+
+    rng = np.random.default_rng(512)
+    n = 30_000
+    x = rng.uniform([0.0, 0.0], [0.02, 0.01], size=(n, 2))
+    elem = P._locate_initial(coeffs, x)
+    v = rng.normal(0.0, 2.0e6, size=(n, 3))
+    exy = rng.normal(0.0, 1.0e3, size=(len(mesh.triangles), 2))
+    q = -P.QE
+    m = P.ME
+    dt_sp = 2.0e-10
+    boris_rt = P._boris_matrix(q, m, dt_sp, np.array([0.0, 0.0, 0.01])).T
+
+    v_sep, x_sep, vdot_sep = nk.gather_push_boris(
+        exy, elem, q, m, dt_sp, boris_rt, x, v
+    )
+    l_sep = np.empty((n, 3))
+    e_sep, a_sep, be_sep, bl_sep = nk.walk_step(
+        coeffs, adjacency, elem, x_sep, l_sep, packed
+    )
+    fused = nk.gather_push_walk_boris(
+        exy, packed, adjacency, elem, q, m, dt_sp, boris_rt, x, v
+    )
+    v_fused, x_fused, vdot_fused, e_fused, a_fused, be_fused, bl_fused, l_fused = fused
+    out = (
+        np.empty((n + 17, 3)),
+        np.empty((n + 17, 2)),
+        np.empty(n + 17),
+        np.empty(n + 17, dtype=np.int64),
+        np.empty(n + 17, dtype=np.bool_),
+        np.empty(n + 17, dtype=np.int64),
+        np.empty(n + 17, dtype=np.int64),
+        np.empty((n + 17, 3)),
+    )
+    buffered = nk.gather_push_walk_boris(
+        exy, packed, adjacency, elem, q, m, dt_sp, boris_rt, x, v, out=out
+    )
+
+    assert np.array_equal(v_sep, v_fused)
+    assert np.array_equal(x_sep, x_fused)
+    assert np.array_equal(vdot_sep, vdot_fused)
+    assert np.array_equal(e_sep, e_fused)
+    assert np.array_equal(a_sep, a_fused)
+    assert np.array_equal(be_sep[a_sep], be_fused[a_fused])
+    assert np.array_equal(bl_sep[a_sep], bl_fused[a_fused])
+    assert np.array_equal(l_sep[~a_sep], l_fused[~a_fused])
+    for expected, actual in zip(
+        (v_fused, x_fused, vdot_fused, e_fused, a_fused),
+        buffered[:5],
+    ):
+        assert np.array_equal(expected, actual)
+    assert np.array_equal(be_fused[a_fused], buffered[5][buffered[4]])
+    assert np.array_equal(bl_fused[a_fused], buffered[6][buffered[4]])
+    assert np.array_equal(l_fused[~a_fused], buffered[7][~buffered[4]])
+    assert 0 < int(a_sep.sum()) < n
+
+
+@requires_numba
 def test_fused_gather_push_walk_matches_separate_kernels():
     """融合カーネルが従来のNumba push→walkとビット単位で一致する。"""
     mesh = _demo_mesh()
