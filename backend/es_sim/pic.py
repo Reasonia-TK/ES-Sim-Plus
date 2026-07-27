@@ -1797,36 +1797,52 @@ class PicSimulation:
                 compact_weight_buffers.append(vdot)
                 fused_walk_results.append((elem_new, absorbed, b_elem, b_loc))
                 continue
-            e_at = exy[sp.elem]
-            v_new = sp.v.copy()
-            ang_l = None
-            if self.rz:
-                # 軸対称プッシュ (prompts/47): 遠心力項 vθ²/r を現在位置で評価して
-                # 径方向加速度に加える (trace と同じ半陰的規約)。v[:, 2] は vθ
-                ridx = self.ridx
-                a_rz = (sp.q / sp.m) * e_at
-                r_cur = np.maximum(sp.x[:, ridx], _R_TINY)
-                ang_l = sp.x[:, ridx] * sp.v[:, 2]  # 角運動量 L = r·vθ (保存量)
-                a_rz[:, ridx] += sp.v[:, 2] ** 2 / r_cur
-                v_new[:, :2] += dt_sp * a_rz
-            elif self._b is not None:
-                # 一様磁場 (prompts/51): Boris 法 (半キック E → 回転 B → 半キック E)
-                half = (sp.q / sp.m) * (0.5 * dt_sp)
-                v_new[:, :2] += half * e_at
-                v_new = v_new @ self._boris_rt[sp.name]
-                v_new[:, :2] += half * e_at
+            if self._b is not None and _numba_kernels.HAVE_NUMBA:
+                # 一様磁場経路もgather・Boris回転・driftを1粒子ループへ融合し、
+                # e_atや半キック、行列積の中間配列を作らない。
+                v_new, x_new, vdot = _numba_kernels.gather_push_boris(
+                    exy,
+                    sp.elem,
+                    sp.q,
+                    sp.m,
+                    dt_sp,
+                    self._boris_rt[sp.name],
+                    sp.x,
+                    sp.v,
+                )
             else:
-                # 2d3v: E は vx, vy のみに作用し、vz はそのまま
-                v_new[:, :2] += (sp.q / sp.m) * dt_sp * e_at
-            # 時刻中心化した運動エネルギー: KE(t_n) ≈ ½ m Σ w v(n-1/2)·v(n+1/2)
-            # (v·v_new は列ごとの積和で評価: axis 縮約より高速で結果はビット一致)
-            vdot = (
-                sp.v[:, 0] * v_new[:, 0] + sp.v[:, 1] * v_new[:, 1]
-            ) + sp.v[:, 2] * v_new[:, 2]
+                e_at = exy[sp.elem]
+                v_new = sp.v.copy()
+                ang_l = None
+                if self.rz:
+                    # 軸対称プッシュ (prompts/47): 遠心力項 vθ²/r を現在位置で評価して
+                    # 径方向加速度に加える (trace と同じ半陰的規約)。v[:, 2] は vθ
+                    ridx = self.ridx
+                    a_rz = (sp.q / sp.m) * e_at
+                    r_cur = np.maximum(sp.x[:, ridx], _R_TINY)
+                    ang_l = sp.x[:, ridx] * sp.v[:, 2]  # 角運動量 L = r·vθ (保存量)
+                    a_rz[:, ridx] += sp.v[:, 2] ** 2 / r_cur
+                    v_new[:, :2] += dt_sp * a_rz
+                elif self._b is not None:
+                    # 一様磁場 (prompts/51):
+                    # Boris 法 (半キック E → 回転 B → 半キック E)
+                    half = (sp.q / sp.m) * (0.5 * dt_sp)
+                    v_new[:, :2] += half * e_at
+                    v_new = v_new @ self._boris_rt[sp.name]
+                    v_new[:, :2] += half * e_at
+                else:
+                    # 2d3v: E は vx, vy のみに作用し、vz はそのまま
+                    v_new[:, :2] += (sp.q / sp.m) * dt_sp * e_at
+                # 時刻中心化した運動エネルギー:
+                # KE(t_n) ≈ ½ m Σ w v(n-1/2)·v(n+1/2)
+                vdot = (
+                    sp.v[:, 0] * v_new[:, 0] + sp.v[:, 1] * v_new[:, 1]
+                ) + sp.v[:, 2] * v_new[:, 2]
+                x_new = sp.x + dt_sp * v_new[:, :2]
+            # vdotの総和は従来どおりnumpyに任せ、決定的な加算順を維持する。
             ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * vdot))
             if sp.name == "ion":
                 self._last_ke_i = ke[sp.name]
-            x_new = sp.x + dt_sp * v_new[:, :2]
             if self.rz:
                 # 軸交差 (r < 0): 径座標・径速度・vθ (= L の符号) を鏡映してから
                 # walk する (軸 r=0 は境界メッシュエッジだが吸収させない)

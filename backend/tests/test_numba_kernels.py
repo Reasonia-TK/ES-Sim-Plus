@@ -243,6 +243,45 @@ def test_gather_push_numpy_numba_equivalence():
 
 
 @requires_numba
+def test_gather_push_boris_matches_numpy():
+    """融合Borisカーネルが従来のNumPy演算順と一致する。"""
+    rng = np.random.default_rng(511)
+    n_elements = 97
+    n = 30_000
+    exy = rng.normal(0.0, 1.0e3, size=(n_elements, 2))
+    elem = rng.integers(0, n_elements, size=n, dtype=np.int64)
+    x = rng.uniform([0.0, 0.0], [0.02, 0.01], size=(n, 2))
+    v = rng.normal(0.0, 2.0e6, size=(n, 3))
+    q = -P.QE
+    m = P.ME
+    dt_sp = 2.0e-11
+    boris_rt = P._boris_matrix(q, m, dt_sp, np.array([0.2, -0.1, 0.3])).T
+
+    e_at = exy[elem]
+    v_ref = v.copy()
+    half = (q / m) * (0.5 * dt_sp)
+    v_ref[:, :2] += half * e_at
+    v_ref = v_ref @ boris_rt
+    v_ref[:, :2] += half * e_at
+    vdot_ref = (
+        v[:, 0] * v_ref[:, 0] + v[:, 1] * v_ref[:, 1]
+    ) + v[:, 2] * v_ref[:, 2]
+    x_ref = x + dt_sp * v_ref[:, :2]
+
+    v_jit, x_jit, vdot_jit = nk.gather_push_boris(
+        exy, elem, q, m, dt_sp, boris_rt, x, v
+    )
+    # NumPy BLASの3x3行列積とJITスカラー積和には最下位ビットの丸め差がある。
+    np.testing.assert_allclose(v_ref, v_jit, rtol=5e-12, atol=2e-9)
+    np.testing.assert_allclose(x_ref, x_jit, rtol=1e-14, atol=4e-18)
+    np.testing.assert_allclose(vdot_ref, vdot_jit, rtol=1e-14, atol=2e-2)
+    w = rng.uniform(1e10, 1e14, size=n)
+    ke_ref = 0.5 * m * float(np.sum(w * vdot_ref))
+    ke_jit = 0.5 * m * float(np.sum(w * vdot_jit))
+    assert ke_jit == pytest.approx(ke_ref, rel=2e-15)
+
+
+@requires_numba
 def test_fused_gather_push_walk_matches_separate_kernels():
     """融合カーネルが従来のNumba push→walkとビット単位で一致する。"""
     mesh = _demo_mesh()

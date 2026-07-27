@@ -207,6 +207,41 @@ if HAVE_NUMBA:
             out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * vn2
 
     @njit(cache=True, nogil=True, parallel=True)
+    def _gather_push_boris_kernel(
+        exy, elem, half, dt_sp, boris_rt, x, v, out_vnew, out_xnew, out_vdot,
+    ):
+        """一様磁場のgather・半キック・Boris回転・driftを融合する。"""
+        n = elem.shape[0]
+        for p in prange(n):
+            e = elem[p]
+            kick0 = half * exy[e, 0]
+            kick1 = half * exy[e, 1]
+            v0 = v[p, 0]
+            v1 = v[p, 1]
+            v2 = v[p, 2]
+            vm0 = v0 + kick0
+            vm1 = v1 + kick1
+            vm2 = v2
+
+            # pic.py の行ベクトル v_minus @ boris_rt と同じ積和順。
+            vr0 = (vm0 * boris_rt[0, 0] + vm1 * boris_rt[1, 0])
+            vr0 = vr0 + vm2 * boris_rt[2, 0]
+            vr1 = (vm0 * boris_rt[0, 1] + vm1 * boris_rt[1, 1])
+            vr1 = vr1 + vm2 * boris_rt[2, 1]
+            vr2 = (vm0 * boris_rt[0, 2] + vm1 * boris_rt[1, 2])
+            vr2 = vr2 + vm2 * boris_rt[2, 2]
+
+            vn0 = vr0 + kick0
+            vn1 = vr1 + kick1
+            vn2 = vr2
+            out_vnew[p, 0] = vn0
+            out_vnew[p, 1] = vn1
+            out_vnew[p, 2] = vn2
+            out_xnew[p, 0] = x[p, 0] + dt_sp * vn0
+            out_xnew[p, 1] = x[p, 1] + dt_sp * vn1
+            out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * vn2
+
+    @njit(cache=True, nogil=True, parallel=True)
     def _gather_push_walk_kernel(
         exy,
         packed,
@@ -893,6 +928,37 @@ def gather_push(exy: np.ndarray, elem: np.ndarray, q: float, m: float, dt_sp: fl
     _gather_push_kernel(
         np.ascontiguousarray(exy), np.ascontiguousarray(elem), qm_dt, dt_sp,
         np.ascontiguousarray(x), np.ascontiguousarray(v), v_new, x_new, vdot,
+    )
+    return v_new, x_new, vdot
+
+
+def gather_push_boris(
+    exy: np.ndarray,
+    elem: np.ndarray,
+    q: float,
+    m: float,
+    dt_sp: float,
+    boris_rt: np.ndarray,
+    x: np.ndarray,
+    v: np.ndarray,
+):
+    """一様磁場xy経路のgather・Boris push・driftを融合する。"""
+    n = len(x)
+    v_new = np.empty((n, 3), dtype=np.float64)
+    x_new = np.empty((n, 2), dtype=np.float64)
+    vdot = np.empty(n, dtype=np.float64)
+    half = (q / m) * (0.5 * dt_sp)
+    _gather_push_boris_kernel(
+        np.ascontiguousarray(exy),
+        np.ascontiguousarray(elem),
+        half,
+        dt_sp,
+        np.ascontiguousarray(boris_rt),
+        np.ascontiguousarray(x),
+        np.ascontiguousarray(v),
+        v_new,
+        x_new,
+        vdot,
     )
     return v_new, x_new, vdot
 
