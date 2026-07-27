@@ -74,6 +74,11 @@ def test_walk_numpy_numba_equivalence():
     # absorbed 行は両実装とも「未定義」の契約なので、非 absorbed 行だけ比較する
     keep = ~abs_np
     assert np.array_equal(l_np[keep], l_nb[keep])
+    # 非連続出力は従来の一時バッファ経路へフォールバックする。
+    l_strided_storage = np.empty((n, 6))
+    l_strided = l_strided_storage[:, ::2]
+    nk.walk_step(coeffs, adjacency, elem0, x_new, l_strided, packed=packed)
+    assert np.array_equal(l_np[keep], l_strided[keep])
     # 壁吸収・反射双方の経路を実際に踏んでいることを確認 (テストの意味があることの担保)
     assert 0 < abs_np.sum() < n
 

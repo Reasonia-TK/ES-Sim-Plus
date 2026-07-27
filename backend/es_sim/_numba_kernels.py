@@ -79,14 +79,14 @@ if HAVE_NUMBA:
 
     @njit(cache=True, nogil=True, parallel=True)
     def _walk_kernel(
-        packed, adjacency, elem0, xs, ys, tol, max_iters,
+        packed, adjacency, elem0, x_new, tol, max_iters,
         out_elem, out_absorbed, out_b_elem, out_b_loc, out_l,
     ):
-        n = xs.shape[0]
+        n = x_new.shape[0]
         for p in prange(n):
             e = elem0[p]
-            xp = xs[p]
-            yp = ys[p]
+            xp = x_new[p, 0]
+            yp = x_new[p, 1]
             absorbed = False
             b_elem = 0
             b_loc = 0
@@ -781,10 +781,9 @@ if HAVE_NUMBA:
 def walk_step(coeffs, adjacency, elem0, x_new, l_out=None, packed=None):
     """particles._walk_step_numpy の numba 版。戻り値・意味は完全に同じ。
 
-    l_out 引数は numpy 版と同じ「absorbed 粒子の行は未定義のまま (書き込まない)」
-    という契約を守る (呼び出し側が absorbed 行を読まない前提のコードに
-    合わせるため。書き込んでしまうと numpy 版との等価性テストで
-    未初期化領域の違いにより np.array_equal が偽陰性になり得る)。
+    l_out の absorbed 粒子の行は numpy 版と同じく未定義。連続float64配列は
+    中間バッファと非吸収行の再コピーを避けるため直接書き込む。その他の配列は
+    従来どおり一時バッファから非吸収行だけをコピーする。
     """
     if packed is None:
         from .particles import _pack_coeffs
@@ -795,13 +794,20 @@ def walk_step(coeffs, adjacency, elem0, x_new, l_out=None, packed=None):
     absorbed = np.empty(n, dtype=np.bool_)
     b_elem = np.empty(n, dtype=np.int64)
     b_loc = np.empty(n, dtype=np.int64)
-    l_buf = np.empty((n, 3), dtype=np.float64)
+    direct_l_out = (
+        l_out is not None
+        and l_out.shape == (n, 3)
+        and l_out.dtype == np.float64
+        and l_out.flags.c_contiguous
+        and l_out.flags.writeable
+        and not np.shares_memory(l_out, x_new)
+    )
+    l_buf = l_out if direct_l_out else np.empty((n, 3), dtype=np.float64)
     _walk_kernel(
         packed,
         adjacency,
         elem0,
-        np.ascontiguousarray(x_new[:, 0]),
-        np.ascontiguousarray(x_new[:, 1]),
+        np.ascontiguousarray(x_new),
         _TOL,
         _MAX_WALK_ITERS,
         elem,
@@ -810,7 +816,7 @@ def walk_step(coeffs, adjacency, elem0, x_new, l_out=None, packed=None):
         b_loc,
         l_buf,
     )
-    if l_out is not None:
+    if l_out is not None and not direct_l_out:
         keep = ~absorbed
         l_out[keep] = l_buf[keep]
     return elem, absorbed, b_elem, b_loc
