@@ -416,9 +416,12 @@ if HAVE_NUMBA:
 
         out_elem[p] = e
         out_absorbed[p] = absorbed
-        out_b_elem[p] = b_elem
-        out_b_loc[p] = b_loc
-        if not absorbed:
+        # 境界情報は absorbed=True の行だけで定義される。通常粒子への
+        # int64 2本の書き込みを省き、融合カーネルのメモリ帯域を抑える。
+        if absorbed:
+            out_b_elem[p] = b_elem
+            out_b_loc[p] = b_loc
+        else:
             out_l[p, 0] = l0
             out_l[p, 1] = l1
             out_l[p, 2] = l2
@@ -965,7 +968,8 @@ def gather_push_walk_rz(
     """軸対称gather+push+軸鏡映+角運動量補正+walkを1回で処理する。
 
     ridx=1 は rz (x=z, y=r)、ridx=0 は rz_x0 (x=r, y=z)。返却値と
-    再利用バッファの契約は gather_push_walk と同じ。
+    再利用バッファの契約は gather_push_walk と同じ。ただし境界要素番号と
+    局所辺番号は absorbed=True の行だけで定義される。
     """
     if ridx not in (0, 1):
         raise ValueError("gather_push_walk_rz の ridx は 0 または 1 が必要です")

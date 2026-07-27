@@ -354,8 +354,9 @@ def test_fused_rz_gather_push_walk_matches_numpy(ridx):
     assert np.array_equal(vdot_ref, vdot_fused)
     assert np.array_equal(e_ref, e_fused)
     assert np.array_equal(a_ref, a_fused)
-    assert np.array_equal(be_ref, be_fused)
-    assert np.array_equal(bl_ref, bl_fused)
+    # 境界要素・局所辺は吸収粒子だけで定義される。
+    assert np.array_equal(be_ref[a_ref], be_fused[a_fused])
+    assert np.array_equal(bl_ref[a_ref], bl_fused[a_fused])
     assert np.array_equal(l_ref[~a_ref], l_fused[~a_fused])
     assert 0 < int(cross.sum()) < n
     assert 0 < int(a_ref.sum()) < n
