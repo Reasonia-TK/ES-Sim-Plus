@@ -301,8 +301,8 @@ if HAVE_NUMBA:
                 out_l[p, 1] = l1
                 out_l[p, 2] = l2
 
-    @njit(cache=True, nogil=True, parallel=True)
-    def _gather_push_walk_rz_kernel(
+    @njit(inline="always")
+    def _gather_push_walk_rz_one(
         exy,
         packed,
         adjacency,
@@ -323,106 +323,133 @@ if HAVE_NUMBA:
         out_b_elem,
         out_b_loc,
         out_l,
+        p,
     ):
-        """軸対称push・軸鏡映・角運動量補正・walkを1粒子ループへ融合する。"""
-        n = elem0.shape[0]
-        for p in prange(n):
-            e = elem0[p]
-            v0 = v[p, 0]
-            v1 = v[p, 1]
-            v2 = v[p, 2]
-            x0 = x[p, 0]
-            x1 = x[p, 1]
+        """軸対称push・軸鏡映・角運動量補正・walkを1粒子分処理する。"""
+        e = elem0[p]
+        v0 = v[p, 0]
+        v1 = v[p, 1]
+        v2 = v[p, 2]
+        x0 = x[p, 0]
+        x1 = x[p, 1]
 
-            # numpy経路と同じく q/m·E を作ってから dt を乗じる。
-            a0 = qm * exy[e, 0]
-            a1 = qm * exy[e, 1]
-            r_cur = np.maximum(x[p, ridx], r_tiny)
-            ang_l = x[p, ridx] * v2
-            centrifugal = v2 ** 2 / r_cur
-            if ridx == 0:
-                a0 += centrifugal
-            else:
-                a1 += centrifugal
-            vn0 = v0 + dt_sp * a0
-            vn1 = v1 + dt_sp * a1
+        # numpy経路と同じく q/m·E を作ってから dt を乗じる。
+        a0 = qm * exy[e, 0]
+        a1 = qm * exy[e, 1]
+        r_cur = np.maximum(x[p, ridx], r_tiny)
+        ang_l = x[p, ridx] * v2
+        centrifugal = v2 ** 2 / r_cur
+        if ridx == 0:
+            a0 += centrifugal
+        else:
+            a1 += centrifugal
+        vn0 = v0 + dt_sp * a0
+        vn1 = v1 + dt_sp * a1
 
-            # 時刻中心化KEは、移動後の角運動量補正より前のvθで評価する。
-            out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * v2
-            xp = x0 + dt_sp * vn0
-            yp = x1 + dt_sp * vn1
+        # 時刻中心化KEは、移動後の角運動量補正より前のvθで評価する。
+        out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * v2
+        xp = x0 + dt_sp * vn0
+        yp = x1 + dt_sp * vn1
 
-            # 軸は吸収境界ではないため、walkより前に径座標と速度を鏡映する。
-            if ridx == 0:
-                if xp < 0.0:
-                    xp = -xp
-                    vn0 = -vn0
-                    ang_l = -ang_l
-                r_new = np.maximum(xp, r_tiny)
-            else:
-                if yp < 0.0:
-                    yp = -yp
-                    vn1 = -vn1
-                    ang_l = -ang_l
-                r_new = np.maximum(yp, r_tiny)
-            vn2 = ang_l / r_new if ang_l != 0.0 else 0.0
+        # 軸は吸収境界ではないため、walkより前に径座標と速度を鏡映する。
+        if ridx == 0:
+            if xp < 0.0:
+                xp = -xp
+                vn0 = -vn0
+                ang_l = -ang_l
+            r_new = np.maximum(xp, r_tiny)
+        else:
+            if yp < 0.0:
+                yp = -yp
+                vn1 = -vn1
+                ang_l = -ang_l
+            r_new = np.maximum(yp, r_tiny)
+        vn2 = ang_l / r_new if ang_l != 0.0 else 0.0
 
-            out_vnew[p, 0] = vn0
-            out_vnew[p, 1] = vn1
-            out_vnew[p, 2] = vn2
-            out_xnew[p, 0] = xp
-            out_xnew[p, 1] = yp
+        out_vnew[p, 0] = vn0
+        out_vnew[p, 1] = vn1
+        out_vnew[p, 2] = vn2
+        out_xnew[p, 0] = xp
+        out_xnew[p, 1] = yp
 
-            absorbed = False
-            b_elem = 0
-            b_loc = 0
-            converged = False
-            l0 = 0.0
-            l1 = 0.0
-            l2 = 0.0
-            for _ in range(max_iters):
-                g9 = packed[e, 9]
-                l0 = (packed[e, 0] + packed[e, 3] * xp) + packed[e, 6] * yp
-                l0 = l0 / g9
-                l1 = (packed[e, 1] + packed[e, 4] * xp) + packed[e, 7] * yp
-                l1 = l1 / g9
-                l2 = (packed[e, 2] + packed[e, 5] * xp) + packed[e, 8] * yp
-                l2 = l2 / g9
-                if l0 >= -tol and l1 >= -tol and l2 >= -tol:
-                    converged = True
-                    break
-                mi = 0
-                mv = l0
-                if l1 < mv:
-                    mi = 1
-                    mv = l1
-                if l2 < mv:
-                    mi = 2
-                nb = adjacency[e, mi]
-                if nb == -1:
-                    absorbed = True
-                    b_elem = e
-                    b_loc = mi
-                    break
-                e = nb
-            if not converged and not absorbed:
-                # walk単体カーネルと同じ反復上限フォールバック。
-                g9 = packed[e, 9]
-                l0 = (packed[e, 0] + packed[e, 3] * xp) + packed[e, 6] * yp
-                l0 = l0 / g9
-                l1 = (packed[e, 1] + packed[e, 4] * xp) + packed[e, 7] * yp
-                l1 = l1 / g9
-                l2 = (packed[e, 2] + packed[e, 5] * xp) + packed[e, 8] * yp
-                l2 = l2 / g9
+        absorbed = False
+        b_elem = 0
+        b_loc = 0
+        converged = False
+        l0 = 0.0
+        l1 = 0.0
+        l2 = 0.0
+        for _ in range(max_iters):
+            g9 = packed[e, 9]
+            l0 = (packed[e, 0] + packed[e, 3] * xp) + packed[e, 6] * yp
+            l0 = l0 / g9
+            l1 = (packed[e, 1] + packed[e, 4] * xp) + packed[e, 7] * yp
+            l1 = l1 / g9
+            l2 = (packed[e, 2] + packed[e, 5] * xp) + packed[e, 8] * yp
+            l2 = l2 / g9
+            if l0 >= -tol and l1 >= -tol and l2 >= -tol:
+                converged = True
+                break
+            mi = 0
+            mv = l0
+            if l1 < mv:
+                mi = 1
+                mv = l1
+            if l2 < mv:
+                mi = 2
+            nb = adjacency[e, mi]
+            if nb == -1:
+                absorbed = True
+                b_elem = e
+                b_loc = mi
+                break
+            e = nb
+        if not converged and not absorbed:
+            # walk単体カーネルと同じ反復上限フォールバック。
+            g9 = packed[e, 9]
+            l0 = (packed[e, 0] + packed[e, 3] * xp) + packed[e, 6] * yp
+            l0 = l0 / g9
+            l1 = (packed[e, 1] + packed[e, 4] * xp) + packed[e, 7] * yp
+            l1 = l1 / g9
+            l2 = (packed[e, 2] + packed[e, 5] * xp) + packed[e, 8] * yp
+            l2 = l2 / g9
 
-            out_elem[p] = e
-            out_absorbed[p] = absorbed
-            out_b_elem[p] = b_elem
-            out_b_loc[p] = b_loc
-            if not absorbed:
-                out_l[p, 0] = l0
-                out_l[p, 1] = l1
-                out_l[p, 2] = l2
+        out_elem[p] = e
+        out_absorbed[p] = absorbed
+        out_b_elem[p] = b_elem
+        out_b_loc[p] = b_loc
+        if not absorbed:
+            out_l[p, 0] = l0
+            out_l[p, 1] = l1
+            out_l[p, 2] = l2
+
+    @njit(cache=True, nogil=True, parallel=True)
+    def _gather_push_walk_rz_x_kernel(
+        exy, packed, adjacency, elem0, qm, dt_sp, r_tiny, x, v, tol,
+        max_iters, out_vnew, out_xnew, out_vdot, out_elem, out_absorbed,
+        out_b_elem, out_b_loc, out_l,
+    ):
+        """ridx=0 (rz_x0) を定数化した軸対称融合カーネル。"""
+        for p in prange(elem0.shape[0]):
+            _gather_push_walk_rz_one(
+                exy, packed, adjacency, elem0, qm, dt_sp, 0, r_tiny, x, v,
+                tol, max_iters, out_vnew, out_xnew, out_vdot, out_elem,
+                out_absorbed, out_b_elem, out_b_loc, out_l, p,
+            )
+
+    @njit(cache=True, nogil=True, parallel=True)
+    def _gather_push_walk_rz_y_kernel(
+        exy, packed, adjacency, elem0, qm, dt_sp, r_tiny, x, v, tol,
+        max_iters, out_vnew, out_xnew, out_vdot, out_elem, out_absorbed,
+        out_b_elem, out_b_loc, out_l,
+    ):
+        """ridx=1 (rz) を定数化した軸対称融合カーネル。"""
+        for p in prange(elem0.shape[0]):
+            _gather_push_walk_rz_one(
+                exy, packed, adjacency, elem0, qm, dt_sp, 1, r_tiny, x, v,
+                tol, max_iters, out_vnew, out_xnew, out_vdot, out_elem,
+                out_absorbed, out_b_elem, out_b_loc, out_l, p,
+            )
 
     @njit(cache=True, nogil=True)
     def _interp_packed_table(x, xs, ys, n):
@@ -940,6 +967,8 @@ def gather_push_walk_rz(
     ridx=1 は rz (x=z, y=r)、ridx=0 は rz_x0 (x=r, y=z)。返却値と
     再利用バッファの契約は gather_push_walk と同じ。
     """
+    if ridx not in (0, 1):
+        raise ValueError("gather_push_walk_rz の ridx は 0 または 1 が必要です")
     n = len(x)
     if out is None:
         v_new = np.empty((n, 3), dtype=np.float64)
@@ -961,14 +990,18 @@ def gather_push_walk_rz(
         b_elem = out[5][:n]
         b_loc = out[6][:n]
         bary = out[7][:n]
-    _gather_push_walk_rz_kernel(
+    kernel = (
+        _gather_push_walk_rz_x_kernel
+        if ridx == 0
+        else _gather_push_walk_rz_y_kernel
+    )
+    kernel(
         np.ascontiguousarray(exy),
         np.ascontiguousarray(packed),
         np.ascontiguousarray(adjacency),
         np.ascontiguousarray(elem),
         q / m,
         dt_sp,
-        int(ridx),
         _R_TINY,
         np.ascontiguousarray(x),
         np.ascontiguousarray(v),
