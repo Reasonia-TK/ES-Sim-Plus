@@ -582,6 +582,71 @@ export interface ProfileResult {
   e_abs: (number | null)[];  // |E| [V/m] (領域外は null)
 }
 
+// ---- パラメータスイープ WebSocket プロトコル (server→client, /ws/sweep、prompts/79) --------
+// 1パラメータ×値リストをケースごとに別プロセスで並列実行する。continue には対応しない
+// (毎回フルの N ケースを実行し直す)。
+
+export interface SweepStartedMsg {
+  type: "started";
+  n_cases: number;
+  param_path: string;
+  values: number[];
+}
+
+// 数百ms〜数秒間隔でケースごとに届く進捗 (batch.py の間引きに準じる)
+export interface SweepProgressMsg {
+  type: "progress";
+  case: number;
+  step: number;
+  n_steps: number;
+}
+
+export interface SweepCaseDoneMsg {
+  type: "case_done";
+  case: number;
+  ok: boolean;
+  error?: string;
+}
+
+export interface SweepSummaryEntry {
+  case: number;
+  value: number;
+  ok: boolean;
+  error?: string;
+}
+
+export interface SweepDoneMsg {
+  type: "done";
+  summary: SweepSummaryEntry[];
+}
+
+export interface SweepErrorMsg {
+  type: "error";
+  detail: string;
+}
+
+export type SweepServerMessage =
+  | SweepStartedMsg
+  | SweepProgressMsg
+  | SweepCaseDoneMsg
+  | SweepDoneMsg
+  | SweepErrorMsg;
+
+// client→server コマンド
+export type SweepClientCommand =
+  | { cmd: "start"; project: Project; param_path: string; values: number[]; parallel: number }
+  | { cmd: "stop" };
+
+// フロント側でケースごとに保持する表示用状態 (SweepPanel のケース一覧、App が WS
+// コールバックで更新する)
+export interface SweepCaseState {
+  value: number;
+  status: "pending" | "running" | "done" | "error";
+  step?: number;
+  nSteps?: number;
+  error?: string;
+}
+
 // ---- 計算結果の保存・読込 (prompts/64) ----------------
 // 「結果付き保存」でプロジェクト本体に同梱する計算結果一式。
 // フロント専用フィールドであり、solve/trace/mesh/pic/dsmc 等の API へ送る project には含めない

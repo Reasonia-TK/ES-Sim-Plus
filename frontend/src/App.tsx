@@ -16,11 +16,14 @@ import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
 import type { CyclePicField, PicResultField } from "./panels/PicPanel";
 import GasPanel, { DEFAULT_BOUNDARY, DEFAULT_DSMC, GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
 import type { GasResultField } from "./panels/GasPanel";
+import SweepPanel from "./panels/SweepPanel";
 import { Toggle } from "./Toggle";
 import { PicClient } from "./picClient";
 import type { PicClientCallbacks } from "./picClient";
 import { DsmcClient } from "./dsmcClient";
 import type { DsmcClientCallbacks } from "./dsmcClient";
+import { SweepClient } from "./sweepClient";
+import type { SweepClientCallbacks } from "./sweepClient";
 import { useHistory } from "./useHistory";
 import { saveTextFile } from "./saveFile";
 import { isAxisymmetric, toDiagArray } from "./types";
@@ -51,6 +54,8 @@ import type {
   RegionType,
   ResultsBundle,
   SolveResult,
+  SweepCaseState,
+  SweepStartedMsg,
   TraceResult,
   VoltageRf,
   VoltageWaveform,
@@ -163,6 +168,7 @@ const NODE_TITLES: Record<TreeNode, string> = {
   "study-trace": "スタディ — 粒子追跡",
   "study-pic": "スタディ — PIC-MCC",
   "study-gas": "スタディ — DSMC",
+  "study-sweep": "スタディ — パラメータスイープ",
   "result-fem": "結果 — 静電場",
   "result-trace": "結果 — 粒子追跡",
   "result-pic": "結果 — PIC-MCC",
@@ -401,6 +407,17 @@ export default function App() {
   // ため、これらだけの変更 (ステップ数を増やして続き実行、等) では無効化しない (commitProject 参照)
   const [gasProjectChangedSinceRun, setGasProjectChangedSinceRun] = useState(false);
 
+  // パラメータスイープ (prompts/79)。対象パラメータ・値リスト・並列数の選択自体は
+  // SweepPanel 内のローカル state で管理し (Undo/Redo 対象外)、App 側は WS の実行状態
+  // (実行中フラグ・ケースごとの進捗・エラー) だけを持つ (PIC/DSMC の running/result 系と同じ設計)
+  const [sweepRunning, setSweepRunning] = useState(false);
+  const [sweepStarted, setSweepStarted] = useState<SweepStartedMsg | null>(null);
+  const [sweepCases, setSweepCases] = useState<SweepCaseState[]>([]);
+  const [sweepError, setSweepError] = useState<string | null>(null);
+  // ケース一覧から結果を読み込んだ行のハイライト用 (読込前/新しいスイープ開始時は null)
+  const [sweepLoadedCaseIndex, setSweepLoadedCaseIndex] = useState<number | null>(null);
+  const sweepClientRef = useRef<SweepClient | null>(null);
+
   // 周期アニメーション再生ループ: playing 中は fps に応じた間隔でビンを1つずつ順送りし、
   // 最後まで行ったら先頭へループする (setInterval + 関数更新で古いクロージャの影響を避ける)
   useEffect(() => {
@@ -417,6 +434,7 @@ export default function App() {
     return () => {
       picClientRef.current?.close();
       dsmcClientRef.current?.close();
+      sweepClientRef.current?.close();
     };
   }, []);
 
@@ -649,6 +667,59 @@ export default function App() {
   // DSMC 計算の中断
   const stopDsmc = () => {
     dsmcClientRef.current?.stop();
+  };
+
+  // パラメータスイープに渡すプロジェクト (particles/pic は独立 state のためここで合成する。
+  // saveProject/runPicStart と同じ合成方法。b_field/dsmc/pic の候補パスや現在値のプレビューは
+  // このオブジェクトを基準に組み立てるため、常に最新の pic/particles を反映させる)
+  const projectForSweep: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter) };
+
+  // スイープ実行中のコールバック生成 (PIC/DSMC の makePicCallbacks/makeDsmcCallbacks と同じ考え方)
+  const makeSweepCallbacks = (): SweepClientCallbacks => ({
+    onStarted: (msg) => {
+      setSweepStarted(msg);
+      setSweepCases(msg.values.map((v) => ({ value: v, status: "pending" as const })));
+    },
+    onProgress: (msg) => {
+      setSweepCases((prev) => {
+        const next = prev.slice();
+        const cur = next[msg.case];
+        if (cur) next[msg.case] = { ...cur, status: "running", step: msg.step, nSteps: msg.n_steps };
+        return next;
+      });
+    },
+    onCaseDone: (msg) => {
+      setSweepCases((prev) => {
+        const next = prev.slice();
+        const cur = next[msg.case];
+        if (cur) next[msg.case] = { ...cur, status: msg.ok ? "done" : "error", error: msg.error };
+        return next;
+      });
+    },
+    onDone: () => {
+      setSweepRunning(false);
+    },
+    onError: (detail) => {
+      setSweepError(detail);
+      setSweepRunning(false);
+    },
+    onClose: () => setSweepRunning(false),
+  });
+
+  // スイープ開始: SweepPanel で組み立てたパス・値リスト・並列数を送信する
+  const runSweepStart = (paramPath: string, values: number[], parallel: number) => {
+    setSweepError(null);
+    setSweepStarted(null);
+    setSweepCases([]);
+    setSweepLoadedCaseIndex(null);
+    setSweepRunning(true);
+    const client = new SweepClient(makeSweepCallbacks());
+    sweepClientRef.current = client;
+    client.start(projectForSweep, paramPath, values, parallel);
+  };
+
+  const runSweepStop = () => {
+    sweepClientRef.current?.stop();
   };
 
   // PIC実行中のコールバック生成 (start/continue で共通化)。isContinue が true のときは
@@ -1208,6 +1279,72 @@ export default function App() {
     });
   };
 
+  // 「結果付き保存」ファイル (または通常のプロジェクトファイル) の中身を state へ適用する。
+  // ファイル読込 (loadProject) とスイープのケース読込 (loadSweepCase、prompts/79) の両方から
+  // 共用する (App.tsx の関数抽出、prompts/79)。不正な形式は例外を投げるので呼び出し側で catch すること
+  const applyLoadedProject = useCallback((obj: unknown) => {
+    if (!obj || typeof obj !== "object" || !("geometry" in obj)) {
+      throw new Error("不正なプロジェクトファイルです (geometry がありません)");
+    }
+    // 「結果付き保存」ファイルは project 本体に results (ResultsBundle) を同梱している。
+    // results はフロント専用フィールドで、以後 solve 等の API へ送る project に紛れ込んではいけない
+    // ため、project 部分 (projectOnly) と分離してから従来どおりの補完処理にかける
+    const { results, ...projectOnly } = obj as Project & { results?: ResultsBundle };
+    // 省略可能フィールドを既定値で補完する。backend の pydantic スキーマは
+    // regions / boundaries 等を省略可 (既定 []) としており、手書き・サンプルの
+    // JSON では欠けていることがある (欠けたまま state に入れると .find 等で落ちる)
+    const raw = projectOnly as Project;
+    const loaded: Project = {
+      ...raw,
+      geometry: {
+        domain: raw.geometry.domain ?? { polygon: [] },
+        regions: raw.geometry.regions ?? [],
+        boundaries: raw.geometry.boundaries ?? [],
+      },
+      mesh: { ...SAMPLE.mesh, ...(raw.mesh ?? {}) },
+    };
+    commitProject(loaded);
+    // particles / pic は独立管理の state なので、読込んだファイルにあれば反映し、なければ既定値に戻す
+    const loadedParticles = raw.particles;
+    // FN 専用プロジェクト (fn_diode.json 等) は emitter を省略できる (スキーマ上
+    // fn 指定時は emitter 不要) ため、既定値をベースに合成して欠損フィールドを
+    // 補完する (emitter が無いまま state に入れると UI が .p1 等の参照で落ちる)
+    setParticles(loadedParticles ? { ...DEFAULT_PARTICLES, ...loadedParticles } : DEFAULT_PARTICLES);
+    const loadedPic = raw.pic;
+    // mcc/see_energy_ev が無い旧形式のファイルでも安全に読み込めるよう、既定値をベースに合成し、
+    // 旧形式 (単数 collector) のプロジェクトは collectors 配列へ移行する
+    setPic(loadedPic ? normalizeCollectors({ ...DEFAULT_PIC, ...loadedPic }) : DEFAULT_PIC);
+    setSelectedCollectorIndexRaw(null);
+    setSelectedRegionId(null);
+    // 結果付き保存ファイルなら計算結果も復元する (commitProject による結果クリアの後に上書きする)
+    if (results) {
+      setResult(results.solve ?? null);
+      setMeshResult(results.mesh ?? null);
+      setTraceResult(results.trace ?? null);
+      setGasResult(results.gas ?? null);
+      setPicStarted(results.pic?.started ?? null);
+      setPicFrame(results.pic?.frame ?? null);
+      setPicHistory(results.pic?.history ?? []);
+      setPicFields(results.pic?.fields ?? null);
+      setPicCycle(results.pic?.cycle ?? null);
+      setPicCollectors(results.pic?.collectors ?? []);
+      // 結果表示セレクトは既定 (ライブ/線形) へ戻す
+      setPicResultField("live");
+      setPicLogScale(false);
+      // サーバーには読込んだ状態が存在しない (このセッションで実行していない) ため、
+      // 「続きから実行」は無効にし、次の新規実行を促す
+      setPicContinueReady(false);
+      setPicProjectChangedSinceRun(true);
+      // 周期アニメーションの再生系も既定値へ戻す (フィールド選択・データ自体は復元済みの値を保つ)
+      setCyclePlaying(false);
+      setCycleBinIndex(0);
+      setCycleViewActive(false);
+    }
+    // 直接読み込んだ場合はスイープのケースとの紐付けが失われるためハイライトを解除する
+    // (loadSweepCase が読込直後に自分の index で setSweepLoadedCaseIndex を上書きする)
+    setSweepLoadedCaseIndex(null);
+  }, [commitProject]);
+
   const loadProject = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1215,65 +1352,7 @@ export default function App() {
     reader.onload = () => {
       try {
         const obj = JSON.parse(String(reader.result));
-        if (!obj || typeof obj !== "object" || !("geometry" in obj)) {
-          throw new Error("不正なプロジェクトファイルです (geometry がありません)");
-        }
-        // 「結果付き保存」ファイルは project 本体に results (ResultsBundle) を同梱している。
-        // results はフロント専用フィールドで、以後 solve 等の API へ送る project に紛れ込んではいけない
-        // ため、project 部分 (projectOnly) と分離してから従来どおりの補完処理にかける
-        const { results, ...projectOnly } = obj as Project & { results?: ResultsBundle };
-        // 省略可能フィールドを既定値で補完する。backend の pydantic スキーマは
-        // regions / boundaries 等を省略可 (既定 []) としており、手書き・サンプルの
-        // JSON では欠けていることがある (欠けたまま state に入れると .find 等で落ちる)
-        const raw = projectOnly as Project;
-        const loaded: Project = {
-          ...raw,
-          geometry: {
-            domain: raw.geometry.domain ?? { polygon: [] },
-            regions: raw.geometry.regions ?? [],
-            boundaries: raw.geometry.boundaries ?? [],
-          },
-          mesh: { ...SAMPLE.mesh, ...(raw.mesh ?? {}) },
-        };
-        commitProject(loaded);
-        // particles / pic は独立管理の state なので、読込んだファイルにあれば反映し、なければ既定値に戻す
-        const loadedParticles = raw.particles;
-        // FN 専用プロジェクト (fn_diode.json 等) は emitter を省略できる (スキーマ上
-        // fn 指定時は emitter 不要) ため、既定値をベースに合成して欠損フィールドを
-        // 補完する (emitter が無いまま state に入れると UI が .p1 等の参照で落ちる)
-        setParticles(
-          loadedParticles ? { ...DEFAULT_PARTICLES, ...loadedParticles } : DEFAULT_PARTICLES,
-        );
-        const loadedPic = raw.pic;
-        // mcc/see_energy_ev が無い旧形式のファイルでも安全に読み込めるよう、既定値をベースに合成し、
-        // 旧形式 (単数 collector) のプロジェクトは collectors 配列へ移行する
-        setPic(loadedPic ? normalizeCollectors({ ...DEFAULT_PIC, ...loadedPic }) : DEFAULT_PIC);
-        setSelectedCollectorIndexRaw(null);
-        setSelectedRegionId(null);
-        // 結果付き保存ファイルなら計算結果も復元する (commitProject による結果クリアの後に上書きする)
-        if (results) {
-          setResult(results.solve ?? null);
-          setMeshResult(results.mesh ?? null);
-          setTraceResult(results.trace ?? null);
-          setGasResult(results.gas ?? null);
-          setPicStarted(results.pic?.started ?? null);
-          setPicFrame(results.pic?.frame ?? null);
-          setPicHistory(results.pic?.history ?? []);
-          setPicFields(results.pic?.fields ?? null);
-          setPicCycle(results.pic?.cycle ?? null);
-          setPicCollectors(results.pic?.collectors ?? []);
-          // 結果表示セレクトは既定 (ライブ/線形) へ戻す
-          setPicResultField("live");
-          setPicLogScale(false);
-          // サーバーには読込んだ状態が存在しない (このセッションで実行していない) ため、
-          // 「続きから実行」は無効にし、次の新規実行を促す
-          setPicContinueReady(false);
-          setPicProjectChangedSinceRun(true);
-          // 周期アニメーションの再生系も既定値へ戻す (フィールド選択・データ自体は復元済みの値を保つ)
-          setCyclePlaying(false);
-          setCycleBinIndex(0);
-          setCycleViewActive(false);
-        }
+        applyLoadedProject(obj);
         setError(null);
       } catch (err) {
         setError(String(err));
@@ -1281,6 +1360,20 @@ export default function App() {
     };
     reader.readAsText(file);
     e.target.value = ""; // 同じファイルを連続で読み込めるようにする
+  };
+
+  // スイープのケース一覧 (SweepPanel) の行クリック: GET /sweep/result/{i} を取得し、
+  // applyLoadedProject で通常のファイル読込と同じ復元処理を行う
+  // (commitProject 経由なので Undo で元のプロジェクトに戻せる、prompts/79)
+  const loadSweepCase = async (index: number) => {
+    try {
+      const obj = await api.sweepResult(index);
+      applyLoadedProject(obj);
+      setSweepLoadedCaseIndex(index);
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    }
   };
 
   const selected = project.geometry.regions.find((r) => r.id === selectedRegionId) ?? null;
@@ -1429,6 +1522,9 @@ export default function App() {
   const showGasSetupPage = activeNode === "study-gas";
   const showGasResultsPage = activeNode === "result-gas";
   const showResultFemPage = activeNode === "result-fem";
+  // パラメータスイープ (prompts/79) は設定+実行UI+ケース一覧を1ページにまとめる
+  // (結果は既存の結果ページへ読み込んで見るため、result-* ノードは持たない)
+  const showSweepPage = activeNode === "study-sweep";
 
   // インスペクタ上部のタイトル。boundary/regions は選択中の辺/領域名を付け加える
   const edgeLabelsForTitle =
@@ -1441,8 +1537,10 @@ export default function App() {
         : NODE_TITLES[activeNode];
 
   // --- 下部ステータスバー ---
-  // エラーは error → picError → gasError の順で最初の非null を優先表示する
-  const statusError = error ?? picError ?? gasError;
+  // エラーは error → picError → gasError → sweepError の順で最初の非null を優先表示する
+  const statusError = error ?? picError ?? gasError ?? sweepError;
+  // スイープの完了ケース数 (進捗表示用。PIC/DSMC 単発実行と同列の優先度で表示する)
+  const sweepCompletedCount = sweepCases.filter((c) => c.status === "done" || c.status === "error").length;
   // 続きから実行では frame.step が通算で進むため、区間開始オフセットを引いて計算する
   // (不具合修正: 分子だけ通算になり 100% 超の表示になっていた)
   const picStepOffset = picStarted?.step_offset ?? 0;
@@ -1561,6 +1659,10 @@ export default function App() {
             gasProgress={gasProgress}
             gasError={gasError}
             gasResult={gasResult}
+            sweepRunning={sweepRunning}
+            sweepCompleted={sweepCases.filter((c) => c.status === "done" || c.status === "error").length}
+            sweepTotal={sweepStarted?.n_cases ?? 0}
+            sweepHasError={!!sweepError || sweepCases.some((c) => c.status === "error")}
           />
         </div>
 
@@ -1807,6 +1909,23 @@ export default function App() {
               />
             </div>
 
+            {/* パラメータスイープ (prompts/79): 設定+実行UI+ケース一覧を1ページにまとめた
+                単一インスタンス (setup/results の分割なし。結果は既存の結果ページに読み込んで見る) */}
+            <div style={{ display: showSweepPage ? "block" : "none" }}>
+              <SweepPanel
+                project={projectForSweep}
+                canRun={!!health}
+                running={sweepRunning}
+                onStart={runSweepStart}
+                onStop={runSweepStop}
+                started={sweepStarted}
+                cases={sweepCases}
+                error={sweepError}
+                loadedCaseIndex={sweepLoadedCaseIndex}
+                onLoadCase={loadSweepCase}
+              />
+            </div>
+
             {/* 「静電場結果」ページ: 旧・電位分布φ/電場|E|/ラインプロファイルの3ノードを統合
                 (他モジュールと同じ「1モジュール=1結果ノード」に揃える、prompts/69)。
                 result が無い場合も表示オプション等は操作可能なままにし、先頭にヒントのみ出す */}
@@ -2011,6 +2130,20 @@ export default function App() {
             <span>DSMC 実行中... {gasPct}%</span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${gasPct}%` }} />
+            </div>
+          </>
+        ) : sweepRunning ? (
+          <>
+            <span>
+              スイープ実行中... {sweepCompletedCount}/{sweepStarted?.n_cases ?? 0} ケース完了
+            </span>
+            <div className="statusbar-progress">
+              <div
+                className="statusbar-progress-bar"
+                style={{
+                  width: `${sweepStarted && sweepStarted.n_cases > 0 ? (100 * sweepCompletedCount) / sweepStarted.n_cases : 0}%`,
+                }}
+              />
             </div>
           </>
         ) : (

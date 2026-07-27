@@ -32,6 +32,7 @@ export type TreeNode =
   | "study-trace"
   | "study-pic"
   | "study-gas"
+  | "study-sweep"
   | "result-fem"
   | "result-trace"
   | "result-pic"
@@ -65,6 +66,11 @@ interface Props {
   gasProgress: { step: number; nSteps: number; nParticles: number } | null;
   gasError: string | null;
   gasResult: DsmcResult | null;
+  // パラメータスイープ (prompts/79): 実行中フラグ・完了ケース数/総ケース数・エラー有無
+  sweepRunning: boolean;
+  sweepCompleted: number;
+  sweepTotal: number;
+  sweepHasError: boolean;
 }
 
 type BadgeKind = "busy" | "done" | "error" | "idle";
@@ -102,6 +108,10 @@ export default function ProjectTree({
   gasProgress,
   gasError,
   gasResult,
+  sweepRunning,
+  sweepCompleted,
+  sweepTotal,
+  sweepHasError,
 }: Props) {
   const [search, setSearch] = useState("");
   const [openGeo, setOpenGeo] = useState(true);
@@ -158,6 +168,12 @@ export default function ProjectTree({
     }
     if (gasError) return { text: "エラー", kind: "error" };
     if (gasResult) return { text: "✓完了", kind: "done" };
+    return { text: "未実行", kind: "idle" };
+  };
+  const sweepBadge = (): { text: string; kind: BadgeKind } => {
+    if (sweepRunning) return { text: `実行中 ${sweepCompleted}/${sweepTotal}`, kind: "busy" };
+    if (sweepHasError) return { text: "エラー", kind: "error" };
+    if (sweepTotal > 0 && sweepCompleted === sweepTotal) return { text: "✓完了", kind: "done" };
     return { text: "未実行", kind: "idle" };
   };
 
@@ -309,6 +325,15 @@ export default function ProjectTree({
                 >
                   <span>DSMC</span>
                   <StatusBadge {...gasBadge()} />
+                </div>
+              )}
+              {match("スイープ") && (
+                <div
+                  className={`tree-row ${activeNode === "study-sweep" ? "active" : ""}`}
+                  onClick={() => onSelectNode("study-sweep")}
+                >
+                  <span>パラメータスイープ</span>
+                  <StatusBadge {...sweepBadge()} />
                 </div>
               )}
             </div>

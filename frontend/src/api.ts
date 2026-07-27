@@ -31,4 +31,14 @@ export const api = {
   // LXCat形式テキストを断面積プロセス列にパースする (MCC設定のインポート用)
   lxcatParse: (text: string, species: "electron" | "ion"): Promise<{ processes: XsProcess[]; warnings: string[] }> =>
     post("/lxcat/parse", { text, species }),
+  // パラメータスイープ (prompts/79): ケース i の結果付きJSONを取得する (loadProject と
+  // 同じ形式。project 本体 + results)。未完了/失敗は 404 (呼び出し側で catch すること)
+  sweepResult: async (i: number): Promise<unknown> => {
+    const res = await fetch(`${base()}/sweep/result/${i}`);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(`/sweep/result/${i} failed: ${JSON.stringify(detail)}`);
+    }
+    return res.json();
+  },
 };

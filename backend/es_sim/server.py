@@ -8,7 +8,10 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import shutil
+import tempfile
 import threading
+from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -25,6 +28,7 @@ from .pic import PicSimulation
 from .postprocess import sample_line
 from .dsmc import DsmcSimulation
 from .mcc import GasField
+from .sweep import build_sweep_cases, run_sweep
 from .schema import (
     DsmcResultModel,
     ElectrodeCharge,
@@ -560,3 +564,164 @@ async def ws_pic(ws: WebSocket) -> None:
                 await ws.send_json({"type": "error", "detail": f"不明なコマンド: {cmd}"})
     except WebSocketDisconnect:
         pass
+
+
+# ---- パラメータスイープ (GUIから1パラメータ×値リストを並列実行、prompts/79) --------------
+
+# 直近スイープの結果一時ディレクトリ (サーバープロセス生存中のみ)。ケース数×cycle で
+# 結果が巨大になり得るためメモリには持たず、GET /sweep/result/{i} がここから読む。
+# 新しい start のたびに前回の一時ディレクトリを破棄する
+_sweep_tmp_dir: str | None = None
+# スイープの同時複数実行を拒否するロック (PIC/DSMC の実行ロックとは独立)
+_sweep_lock = asyncio.Lock()
+
+
+def _cleanup_sweep_tmp_dir() -> None:
+    global _sweep_tmp_dir
+    if _sweep_tmp_dir is not None:
+        shutil.rmtree(_sweep_tmp_dir, ignore_errors=True)
+        _sweep_tmp_dir = None
+
+
+async def _run_sweep_session(ws: WebSocket, msg: dict) -> None:
+    """1回のスイープ実行 (start)。started → progress/case_done×N → done を送出する。"""
+    global _sweep_tmp_dir
+    project_dict = msg.get("project") or {}
+    param_path = msg.get("param_path")
+    values = msg.get("values")
+    parallel = msg.get("parallel", 1)
+
+    if not isinstance(param_path, str) or param_path == "":
+        await ws.send_json({"type": "error", "detail": "param_path を指定してください"})
+        return
+    if not isinstance(values, list) or len(values) == 0:
+        await ws.send_json({"type": "error", "detail": "values (値リスト) を指定してください"})
+        return
+    try:
+        parallel = max(1, int(parallel))
+        values = [float(v) for v in values]
+    except (TypeError, ValueError):
+        await ws.send_json({"type": "error", "detail": "parallel/values の型が不正です"})
+        return
+
+    # use_dsmc_gas はバッチ実行 (_worker) 同様プロセス間で DSMC 結果を共有できないため、
+    # ケースを1つも起動せず開始時点でエラーにする (batch.py の _worker と同じ制約)
+    pic = project_dict.get("pic") if isinstance(project_dict, dict) else None
+    if isinstance(pic, dict):
+        mcc = pic.get("mcc")
+        if isinstance(mcc, dict) and mcc.get("use_dsmc_gas"):
+            await ws.send_json(
+                {
+                    "type": "error",
+                    "detail": "pic.mcc.use_dsmc_gas はスイープでは未対応です "
+                    "(DSMC結果はプロセス間で共有されないため)",
+                }
+            )
+            return
+
+    try:
+        cases = build_sweep_cases(project_dict, param_path, values)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+
+    _cleanup_sweep_tmp_dir()
+    _sweep_tmp_dir = tempfile.mkdtemp(prefix="es_sim_sweep_")
+    tmp_dir = _sweep_tmp_dir  # このセッション実行中に他の start で差し替わらないようローカルへ固定
+
+    await ws.send_json(
+        {"type": "started", "n_cases": len(cases), "param_path": param_path, "values": values}
+    )
+
+    loop = asyncio.get_running_loop()
+    stop = threading.Event()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def on_event(ev: dict) -> None:
+        # ワーカースレッドからイベントループへ安全に渡す (PIC/DSMC の on_frame と同じ設計)
+        loop.call_soon_threadsafe(queue.put_nowait, ev)
+
+    run_task = asyncio.create_task(
+        asyncio.to_thread(
+            run_sweep, cases, parallel=parallel, out_dir=tmp_dir, on_event=on_event, should_stop=stop.is_set
+        )
+    )
+
+    async def watch_stop() -> None:
+        while True:
+            try:
+                m = json.loads(await ws.receive_text())
+            except (WebSocketDisconnect, RuntimeError):
+                stop.set()
+                return
+            if m.get("cmd") == "stop":
+                stop.set()
+                return
+
+    stop_task = asyncio.create_task(watch_stop())
+    summary: list[dict] = []
+    try:
+        while True:
+            if run_task.done() and queue.empty():
+                break
+            try:
+                ev = await asyncio.wait_for(queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            if ev["type"] == "case_done":
+                entry = {"case": ev["case"], "value": values[ev["case"]], "ok": ev["ok"]}
+                if not ev["ok"]:
+                    entry["error"] = ev["error"]
+                summary.append(entry)
+            await ws.send_json(ev)
+        await run_task  # 例外があれば (通常は起きない想定だが) ここで送出される
+        summary.sort(key=lambda s: s["case"])
+        await ws.send_json({"type": "done", "summary": summary})
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "detail": str(exc)})
+        except Exception:
+            pass
+    finally:
+        stop.set()
+        stop_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@app.websocket("/ws/sweep")
+async def ws_sweep(ws: WebSocket) -> None:
+    """パラメータスイープの WebSocket (prompts/79)。
+
+    start で新規スイープを開始する (同時実行は1つのみ、別接続からの start は拒否する)。
+    stop は実行中セッション内の watch_stop タスクが処理する (PIC/DSMC と同じ設計)。
+    continue には対応しない (スイープは毎回フルの N ケースを実行する)。
+    """
+    await ws.accept()
+    try:
+        while True:
+            msg = json.loads(await ws.receive_text())
+            cmd = msg.get("cmd")
+            if cmd == "start":
+                if _sweep_lock.locked():
+                    await ws.send_json({"type": "error", "detail": "別のスイープが実行中です"})
+                    continue
+                async with _sweep_lock:
+                    await _run_sweep_session(ws, msg)
+            elif cmd == "stop":
+                continue  # 実行中でなければ無視 (実行中は _run_sweep_session 内で処理される)
+            else:
+                await ws.send_json({"type": "error", "detail": f"不明なコマンド: {cmd}"})
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+
+
+@app.get("/sweep/result/{i}")
+def sweep_result_endpoint(i: int) -> dict:
+    """スイープ結果 (ケース i の結果付きJSON) をそのまま返す。未完了/失敗は404。"""
+    if _sweep_tmp_dir is None:
+        raise HTTPException(status_code=404, detail="スイープ結果がありません (先にスイープを実行してください)")
+    path = Path(_sweep_tmp_dir) / f"case_{i}_result.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"ケース {i} の結果がありません (未完了または失敗)")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
