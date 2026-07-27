@@ -1,18 +1,29 @@
-"""モンテカルロ衝突 (MCC, null-collision 法)。prompts/19 参照。
+"""モンテカルロ衝突 (MCC, null-collision 法)。prompts/19、セル別 ν_max は
+prompts/83 参照。
 
 - 前処理: 全プロセステーブルの最大エネルギー (安全率 2 倍) までの共通グリッドで
   ν_tot(E) = Σ_j n_g σ_j(E) v(E) を評価し、ν_max = max_E ν_tot を求める
   (n_g = p/(kB·T_gas))
 - 毎ステップ種ごとに: P_coll = 1 − exp(−ν_max·dt) で衝突候補を抽選し、
   候補粒子のエネルギーでの ν_j(E)/ν_max により実プロセス or null を選択する
+  (非一様ガス場ではセル別 ν_max,c で抽選する。prompts/83 ②、下記参照)
 - 断面積の評価はテーブルの np.interp (範囲外は端点値でクランプ)。
   excitation/ionization はテーブルが閾値から σ=0 で始まるので閾値未満は自然に 0
+  (log10(E) 等間隔グリッドへの前処理リサンプルも試したが、本リポジトリの
+  断面積テーブル規模 (数十〜百点程度) では JIT 内の np.log10 呼び出しコストが
+  二分探索より高くつき実測で逆効果だったため、prompts/83①は不採用・撤去した)
 - 衝突は位置を変えないので所属要素の更新は不要
 - 乱数はすべて mcc.seed からのシード付き rng (再現性)
 - Numba 利用時は候補抽出・速度/エネルギー評価・断面積補間・プロセス選択・
   散乱方向構築・速度更新を JIT 化。乱数生成は numpy Generator に残して
   フォールバック経路と乱数列・計算結果を完全一致させる
 - Numba 無しでは従来の numpy ベクトル化へフォールバック
+- 非一様ガス場 (GasField) では、セル別候補確率 P_c = ν_max,c·dt
+  (ν_max,c = ν_max·n_g(c)/n_max ≤ ν_max) で候補抽選する。希薄セルほど候補率が
+  下がり無駄な抽選を減らせるが、null-collision の上界条件 ν_max,c ≥ ν(E, c)
+  は保たれるため物理 (衝突頻度・レート) は一様 ν_max のときと不変
+  (詳細は _candidates/_choose_process のコメント)。一様ガス場 (gas_field 無し)
+  はこの分岐に入らないため、従来の実装とビット単位で一致する
 """
 
 from __future__ import annotations
@@ -39,8 +50,9 @@ _NU_GRID_MARGIN = 2.0
 class GasField:
     """非一様背景ガス場 (prompts/54)。要素ごとの値 (DSMC の定常解など)。
 
-    null-collision の ν_max は最大密度 n_max で評価し、粒子ごとの採択時に
-    局所密度比 n_g(x)/n_max を掛ける (非一様密度でも null-collision は厳密)。
+    null-collision の ν_max は最大密度 n_max で評価する。候補抽選はセル別
+    ν_max,c = ν_max·n_g(x)/n_max で行い (prompts/83 ②)、採択判定の分母にも
+    同じ局所密度比を使う (非一様密度でも null-collision は厳密)。
     t_g / u_g が None の場合は一様温度 (gas.temperature_k)・静止ガスとして扱う。
     """
 
@@ -90,8 +102,9 @@ class MccModel:
         # 換算質量 μ = m_i·m_g/(m_i+m_g) (ガス原子質量 = イオン質量なので μ = m_i/2)
         self.mu = m_ion * m_ion / (m_ion + m_ion)
 
-        # ---- 非一様背景ガス場 (prompts/54) -----------------------------------
-        # field あり: ν_max は最大密度で評価し、採択時に局所密度比 _rel[elem] を掛ける。
+        # ---- 非一様背景ガス場 (prompts/54、セル別ν_maxはprompts/83②) -----------
+        # field あり: ν_max は最大密度で評価し、候補抽選・採択判定の両方で
+        # 局所密度比 _rel[elem] を掛ける (_candidates/_choose_process 参照)。
         # 一定密度場 (rel ≡ 1.0) は一様指定と数値的に完全一致する
         self.field = gas_field
         if gas_field is not None:
@@ -210,12 +223,49 @@ class MccModel:
         idx = int(np.searchsorted(grid, e_max_ev, side="right"))
         return float(pref[min(idx, len(pref) - 1)])
 
+    def _p_coll_per_elem(self, numax: float, dt: float) -> np.ndarray:
+        """要素ごとの候補確率 P_c = 1 − exp(−ν_max·_rel[c]·dt) を計算する。
+
+        _rel[c] = 1.0 (最大密度要素、定数ガス場ならすべての要素) は従来の
+        一律 numax 経路とビット単位で一致させる必要があるため、その1点だけ
+        math.exp (スカラー) で従来と同じ式 `1.0 - math.exp(-numax*dt)` を評価し
+        全要素へブロードキャストする。それ以外の要素 (_rel < 1.0、②で新規に
+        導入した経路で従来の比較対象が無い) は np.exp のベクトル化で高速に
+        計算してよい (要素数 M は数万に達しうるため、全要素を math.exp の
+        Python ループで評価すると無視できないオーバーヘッドになる)。
+        """
+        rel = self._rel
+        out = np.empty(rel.shape, dtype=np.float64)
+        is_max = rel == 1.0
+        if np.any(is_max):
+            out[is_max] = 1.0 - math.exp(-numax * dt)
+        other = ~is_max
+        if np.any(other):
+            out[other] = 1.0 - np.exp(-numax * dt * rel[other])
+        return out
+
     # ---- 共通: 候補抽選とプロセス選択 -----------------------------------------
 
-    def _candidates(self, n: int, numax: float, dt: float) -> np.ndarray:
-        """null-collision の衝突候補インデックスを抽選する。"""
-        p_coll = 1.0 - math.exp(-numax * dt)
+    def _candidates(
+        self, n: int, numax: float, dt: float, elem: np.ndarray | None = None
+    ) -> np.ndarray:
+        """null-collision の衝突候補インデックスを抽選する。
+
+        非一様ガス場 (prompts/83 ②) では、要素ごとの ν_max,c = numax·n_g(c)/n_max
+        (= numax·_rel[c] ≤ numax) で抽選する。ν_tot(E,c) = _rel[c]·ν_tot_max密度(E)
+        ≤ _rel[c]·numax = ν_max,c が任意の E で成り立つので null-collision の
+        上界条件は保たれ、物理的な衝突レートは一様 ν_max のときと変わらない。
+        希薄セルほど ν_max,c が小さくなり、無駄な候補選定 (どうせ null になる
+        抽選) が減る。一様ガス場 (_rel is None) や elem 無しでは従来通り
+        一律の numax を使い、挙動をビット単位で変えない。
+        """
         random_u = self.rng.random(n)
+        if self._rel is not None and elem is not None:
+            p_coll_elem = self._p_coll_per_elem(numax, dt)
+            if _numba_kernels.HAVE_NUMBA:
+                return _numba_kernels.mcc_candidates_cellwise(random_u, p_coll_elem, elem)
+            return np.nonzero(random_u < p_coll_elem[elem])[0]
+        p_coll = 1.0 - math.exp(-numax * dt)
         if _numba_kernels.HAVE_NUMBA:
             return _numba_kernels.mcc_candidates(random_u, p_coll)
         return np.nonzero(random_u < p_coll)[0]
@@ -254,7 +304,11 @@ class MccModel:
         if rel is not None:
             nu *= rel[:, None]
         cum = np.cumsum(nu, axis=1)
-        u = random_u * numax
+        # 分母は候補セルの ν_max,c = numax·rel (非一様ガス場、prompts/83②、
+        # null-collision の採択判定を _candidates のセル別抽選と整合させる)。
+        # rel=None (一様ガス) では従来通り numax のみ (掛け算が no-op になり
+        # ビット単位で一致する)
+        u = random_u * (numax * rel) if rel is not None else random_u * numax
         hit = u < cum[:, -1]
         return np.where(hit, np.argmax(u[:, None] < cum, axis=1), -1)
 
@@ -272,8 +326,9 @@ class MccModel:
         戻り値: (cand, proc_idx, e_ev, speed)。cand は候補粒子のインデックス、
         proc_idx は選ばれたプロセス番号 (-1 = null 衝突)。
         elem は非一様ガス場 (prompts/54) の局所密度参照用 (一様なら不使用)。
+        候補抽選もこの elem でセル別 ν_max,c を引く (prompts/83②)。
         """
-        cand = self._candidates(len(v), numax, dt)
+        cand = self._candidates(len(v), numax, dt, elem)
         if cand.size == 0:
             return cand, None, None, None
         if _numba_kernels.HAVE_NUMBA:
@@ -513,7 +568,7 @@ class MccModel:
         numax = self._numax_upto(self._nu_i_table, e_cap)
         if numax <= 0.0:
             return 0
-        cand = self._candidates(len(v), numax, dt)
+        cand = self._candidates(len(v), numax, dt, elem)
         if cand.size == 0:
             return 0
         vi = v[cand]

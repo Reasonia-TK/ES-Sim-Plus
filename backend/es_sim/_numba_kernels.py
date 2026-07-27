@@ -598,7 +598,12 @@ if HAVE_NUMBA:
 
     @njit(cache=True, nogil=True)
     def _interp_packed_table(x, xs, ys, n):
-        """np.interp と同じ端点クランプ・右側探索で1点を線形補間する。"""
+        """np.interp と同じ端点クランプ・右側探索で1点を線形補間する。
+
+        prompts/83①でlog10(E)等間隔グリッド+O(1)参照を試したが、本リポジトリの
+        断面積テーブル規模 (数十〜百点程度) では二分探索のほうが実測で速かった
+        ため不採用・撤去し、この二分探索実装に戻した。
+        """
         if x < xs[0]:
             return ys[0]
         if x >= xs[n - 1]:
@@ -628,9 +633,11 @@ if HAVE_NUMBA:
         n_procs = lengths.shape[0]
         out = np.full(n, -1, dtype=np.int64)
         for i in range(n):
-            target = random_u[i] * numax
-            cumulative = 0.0
             density_scale = rel[i] if use_rel else 1.0
+            # 分母はセル別 ν_max,c = numax·density_scale (非一様ガス場、
+            # prompts/83②)。一様ガスは density_scale=1.0 でno-op (ビット一致)。
+            target = random_u[i] * numax * density_scale
+            cumulative = 0.0
             for j in range(n_procs):
                 sigma = _interp_packed_table(
                     e_ev[i], e_table[j], s_table[j], lengths[j]
@@ -675,9 +682,11 @@ if HAVE_NUMBA:
         out_speed[k] = speed
         out_energy[k] = e_ev
 
-        target = random_u[k] * numax
-        cumulative = 0.0
         density_scale = rel_elem[elem[i]] if use_rel else 1.0
+        # 分母はセル別 ν_max,c = numax·density_scale (prompts/83②、_candidates
+        # のセル別抽選と揃える。一様ガスは density_scale=1.0 でビット一致)。
+        target = random_u[k] * numax * density_scale
+        cumulative = 0.0
         selected = -1
         for j in range(n_procs):
             sigma = _interp_packed_table(
@@ -899,6 +908,26 @@ if HAVE_NUMBA:
         pos = 0
         for i in range(random_u.shape[0]):
             if random_u[i] < probability:
+                out[pos] = i
+                pos += 1
+        return out
+
+    @njit(cache=True, nogil=True)
+    def _mcc_candidates_cellwise_kernel(random_u, p_coll_elem, elem):
+        """要素別候補確率 (prompts/83②、非一様ガス場) で候補を選ぶ。
+
+        p_coll_elem は呼び出し側で1回だけ計算済み (numpyのexpをここで
+        再評価するとnumpy/numba等価性が崩れうるため、gather+比較のみ行う)。
+        """
+        n = random_u.shape[0]
+        count = 0
+        for i in range(n):
+            if random_u[i] < p_coll_elem[elem[i]]:
+                count += 1
+        out = np.empty(count, dtype=np.int64)
+        pos = 0
+        for i in range(n):
+            if random_u[i] < p_coll_elem[elem[i]]:
                 out[pos] = i
                 pos += 1
         return out
@@ -1342,6 +1371,21 @@ def mcc_select_velocity(
         speed,
     )
     return proc, energy, speed
+
+
+def mcc_candidates_cellwise(
+    random_u: np.ndarray, p_coll_elem: np.ndarray, elem: np.ndarray
+) -> np.ndarray:
+    """非一様ガス場でのnull-collision候補インデックスを返す (prompts/83②)。
+
+    p_coll_elem は要素ごとの候補確率 (呼び出し側でnumpyにより1回だけ計算済み)。
+    ここでは候補マスクを作らず、gather + 比較だけを行う。
+    """
+    return _mcc_candidates_cellwise_kernel(
+        np.ascontiguousarray(random_u),
+        np.ascontiguousarray(p_coll_elem),
+        np.ascontiguousarray(elem),
+    )
 
 
 def mcc_scatter_electrons(

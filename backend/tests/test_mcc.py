@@ -1,10 +1,14 @@
-"""MCC 衝突 + LXCat インポート + SEE のテスト (prompts/19)。
+"""MCC 衝突 + LXCat インポート + SEE のテスト (prompts/19、prompts/83)。
 
 - パーサー: 合成フィクスチャ (常時) と実 LXCat ファイル (あれば) の両形式
 - 衝突頻度: 一定断面積・電場なし・単色電子で ν = n_g σ v と数%以内で一致
 - 電離: 一様電場 + 電離のみで電子数が増加 / 閾値未満では電離ゼロ
 - SEE: γ=1 電極へのイオン打ち込みで吸収数 = SEE 電子生成数
 - CCP スモーク: MCC 有効でも NaN なく完走
+- セル別 ν_max (prompts/83②): 非一様 GasField で候補数が減り、レートが理論値
+  (局所密度 n_g(cell)·σ·v) と統計誤差内で一致すること
+  (断面積の log10(E) グリッド化 prompts/83① は実測で逆効果だったため撤去済み。
+  mcc.py 冒頭のモジュール docstring 参照)
 """
 
 import math
@@ -16,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from es_sim import _numba_kernels
 from es_sim.lxcat import parse_lxcat
-from es_sim.mcc import KB, MccModel
+from es_sim.mcc import KB, GasField, MccModel
 from es_sim.particles import ME, MP, QE, _locate_initial
 from es_sim.pic import PicSimulation
 from es_sim.schema import MccGas, MccSettings, Project, XsProcess
@@ -170,6 +174,100 @@ def test_collision_frequency_constant_sigma():
 
     rate = count / (n * steps * dt)
     assert abs(rate - nu) / nu < 0.05
+
+
+# ---- 3.5 セル別 ν_max (非一様ガス場、prompts/83②) --------------------------------
+
+
+def test_cellwise_numax_reduces_candidates():
+    """非一様ガス場では、同じ乱数列でセル別抽選のほうが候補数が必ず減る。
+
+    セル0 (高密度、rel=1) では候補確率が従来と一致し、セル1 (低密度、rel<1) では
+    従来より小さい確率になるため、同じ random_u に対しセル別抽選の候補は
+    従来 (全域一律 numax) の部分集合になる (数学的に必ず成り立つ)。
+    """
+    proc = XsProcess(
+        kind="elastic", label="const", mass_ratio=0.0,
+        energy_ev=[0.0, 40.0], sigma_m2=[1.0e-19, 1.0e-19],
+    )
+    settings = MccSettings(
+        gas=MccGas(name="Ar", pressure_pa=10.0, temperature_k=300.0),
+        electron_processes=[proc], ion_processes=[], seed=13,
+    )
+    n_high = 5.0e20
+    n_low = n_high / 10.0
+    gas_field = GasField(n_g=np.array([n_high, n_low]))
+    model = MccModel(settings, m_ion=40.0 * MP, gas_field=gas_field)
+    assert np.allclose(model._rel, [1.0, 0.1])
+
+    n = 40000
+    elem = np.concatenate([np.zeros(n // 2, dtype=np.int64), np.ones(n // 2, dtype=np.int64)])
+    numax = model.numax_e
+    dt = 0.01 / numax  # 高密度セルの候補率が0.01程度になるように選ぶ
+
+    state = model.rng.bit_generator.state
+    cand_cellwise = model._candidates(n, numax, dt, elem)
+    model.rng.bit_generator.state = state  # 同じrandom_uで公平に比較する
+    cand_legacy = model._candidates(n, numax, dt, None)
+
+    assert len(cand_cellwise) <= len(cand_legacy)
+    assert len(cand_cellwise) < len(cand_legacy)  # 低密度セル分は必ず減る
+    assert set(cand_cellwise.tolist()) <= set(cand_legacy.tolist())
+
+
+def test_cellwise_numax_matches_local_rate():
+    """非一様ガス場 (2領域, n_g比10倍) のセル別ν_max抽選で、各領域の衝突レートが
+    局所密度を使った理論値 ν=n_g(cell)·σ·v と統計誤差内で一致する。
+
+    従来実装 (全域一律 ν_max) でも物理レートは同じ理論値に一致するはずなので、
+    この理論値との一致確認がそのまま従来実装との等価性確認を兼ねる
+    (詳細は prompts/83②、_candidates/_choose_process のコメント参照)。
+    """
+    sigma0 = 1.0e-19
+    e0 = 10.0
+    n_high = 5.0e20
+    n_low = n_high / 10.0
+    pressure = 10.0
+    temperature = 300.0
+    v0 = math.sqrt(2.0 * e0 * QE / ME)
+    proc = XsProcess(
+        kind="elastic", label="const", mass_ratio=0.0,  # ΔE=0 → 速さ一定 → ν一定
+        energy_ev=[0.0, 40.0], sigma_m2=[sigma0, sigma0],
+    )
+    settings = MccSettings(
+        gas=MccGas(name="Ar", pressure_pa=pressure, temperature_k=temperature),
+        electron_processes=[proc], ion_processes=[], seed=17,
+    )
+    gas_field = GasField(n_g=np.array([n_high, n_low]))
+    model = MccModel(settings, m_ion=40.0 * MP, gas_field=gas_field)
+
+    nu_high = n_high * sigma0 * v0
+    nu_low = n_low * sigma0 * v0
+    dt = 0.01 / nu_high
+
+    n_per_region = 40000
+    steps = 60
+
+    def _run(n_g_index: int) -> int:
+        rng = np.random.default_rng(100 + n_g_index)
+        th = rng.random(n_per_region) * 2.0 * np.pi
+        v = v0 * np.stack([np.cos(th), np.sin(th), np.zeros(n_per_region)], axis=1)
+        x = np.zeros((n_per_region, 2))
+        w = np.ones(n_per_region)
+        elem = np.full(n_per_region, n_g_index, dtype=np.int64)
+        count = 0
+        for _ in range(steps):
+            res = model.collide_electrons(x, v, w, elem, dt)
+            count += res.n_coll
+        return count
+
+    count_high = _run(0)
+    count_low = _run(1)
+    rate_high = count_high / (n_per_region * steps * dt)
+    rate_low = count_low / (n_per_region * steps * dt)
+
+    assert abs(rate_high - nu_high) / nu_high < 0.10
+    assert abs(rate_low - nu_low) / nu_low < 0.15
 
 
 # ---- 4. 電離 -------------------------------------------------------------------
