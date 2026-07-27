@@ -1,6 +1,6 @@
 """numba カーネル (prompts/76) の等価性・フォールバックのテスト。
 
-- walk / deposit / gather+push / MCCプロセス選択について、numpy 実装と numba 実装が
+- walk / deposit / gather+push / MCC候補・選択・散乱について、numpy 実装と numba 実装が
   ランダム入力に対して完全に一致すること (np.array_equal、ビット単位) を確認する。
   実行環境に numba が無ければこのファイルの等価性テストはスキップする
   (フォールバック自体は下の test_numba_fallback_smoke で monkeypatch を使って
@@ -16,7 +16,7 @@ import pytest
 
 from es_sim import _numba_kernels as nk
 from es_sim import particles as P
-from es_sim.mcc import MccModel
+from es_sim.mcc import GasField, MccModel
 from es_sim.meshing import generate_mesh
 from es_sim.schema import MccSettings, Project
 
@@ -126,6 +126,51 @@ def test_gather_push_numpy_numba_equivalence():
     assert ke_np == ke_nb
 
 
+@requires_numba
+def test_fused_gather_push_walk_matches_separate_kernels():
+    """融合カーネルが従来のNumba push→walkとビット単位で一致する。"""
+    mesh = _demo_mesh()
+    coeffs = P._barycentric_coeffs(mesh.nodes, mesh.triangles)
+    adjacency = P._adjacency(mesh.triangles)
+    packed = P._pack_coeffs(coeffs)
+
+    rng = np.random.default_rng(2026)
+    n = 30_000
+    x = rng.uniform([0.0, 0.0], [0.02, 0.01], size=(n, 2))
+    elem = P._locate_initial(coeffs, x)
+    v = rng.normal(0.0, 2.0e6, size=(n, 3))
+    exy = rng.normal(0.0, 1.0e3, size=(len(mesh.triangles), 2))
+    q = -P.QE
+    m = P.ME
+    dt_sp = 2.0e-10
+
+    v_sep, x_sep, vdot_sep = nk.gather_push(exy, elem, q, m, dt_sp, x, v)
+    l_sep = np.empty((n, 3))
+    e_sep, a_sep, be_sep, bl_sep = nk.walk_step(
+        coeffs, adjacency, elem, x_sep, l_sep, packed
+    )
+    (
+        v_fused,
+        x_fused,
+        vdot_fused,
+        e_fused,
+        a_fused,
+        be_fused,
+        bl_fused,
+        l_fused,
+    ) = nk.gather_push_walk(exy, packed, adjacency, elem, q, m, dt_sp, x, v)
+
+    assert np.array_equal(v_sep, v_fused)
+    assert np.array_equal(x_sep, x_fused)
+    assert np.array_equal(vdot_sep, vdot_fused)
+    assert np.array_equal(e_sep, e_fused)
+    assert np.array_equal(a_sep, a_fused)
+    assert np.array_equal(be_sep, be_fused)
+    assert np.array_equal(bl_sep, bl_fused)
+    assert np.array_equal(l_sep[~a_sep], l_fused[~a_fused])
+    assert 0 < int(a_sep.sum()) < n
+
+
 def _mcc_settings() -> MccSettings:
     return MccSettings.model_validate(
         {
@@ -153,7 +198,20 @@ def _mcc_settings() -> MccSettings:
                     "sigma_m2": [0.0, 3.0e-20, 2.0e-20],
                 },
             ],
-            "ion_processes": [],
+            "ion_processes": [
+                {
+                    "kind": "isotropic",
+                    "label": "ion elastic",
+                    "energy_ev": [0.0, 1.0, 1000.0],
+                    "sigma_m2": [8.0e-19, 6.0e-19, 2.0e-19],
+                },
+                {
+                    "kind": "backscat",
+                    "label": "charge exchange",
+                    "energy_ev": [0.0, 1.0, 1000.0],
+                    "sigma_m2": [5.0e-19, 4.0e-19, 1.0e-19],
+                },
+            ],
             "seed": 91,
         }
     )
@@ -169,14 +227,21 @@ def test_mcc_numpy_numba_equivalence(monkeypatch):
     v = rng.normal(0.0, 2.0e6, size=(n, 3))
     w = rng.uniform(1.0e7, 1.0e9, size=n)
     elem = rng.integers(0, 100, size=n, dtype=np.int64)
+    gas_field = GasField(
+        n_g=np.linspace(2.0e21, 1.2e22, 100),
+        t_g=np.linspace(300.0, 600.0, 100),
+        u_g=np.column_stack(
+            [np.linspace(-20.0, 20.0, 100), np.linspace(10.0, -10.0, 100)]
+        ),
+    )
 
-    model_nb = MccModel(_mcc_settings(), 40.0 * P.MP)
+    model_nb = MccModel(_mcc_settings(), 40.0 * P.MP, gas_field)
     v_nb = v.copy()
     result_nb = model_nb.collide_electrons(x, v_nb, w, elem, 1.0e-10)
     next_nb = model_nb.rng.random(16)
 
     monkeypatch.setattr(nk, "HAVE_NUMBA", False)
-    model_np = MccModel(_mcc_settings(), 40.0 * P.MP)
+    model_np = MccModel(_mcc_settings(), 40.0 * P.MP, gas_field)
     v_np = v.copy()
     result_np = model_np.collide_electrons(x, v_np, w, elem, 1.0e-10)
     next_np = model_np.rng.random(16)
@@ -186,6 +251,31 @@ def test_mcc_numpy_numba_equivalence(monkeypatch):
     assert result_nb.n_ionization == result_np.n_ionization
     for name in ("new_x", "new_elem", "new_w", "new_v_e", "new_v_i"):
         assert np.array_equal(getattr(result_nb, name), getattr(result_np, name)), name
+    assert np.array_equal(next_nb, next_np)
+
+
+@requires_numba
+def test_mcc_ion_numpy_numba_equivalence(monkeypatch):
+    """イオン散乱も速度・衝突数・後続RNG状態がNumPy経路と完全一致する。"""
+    rng = np.random.default_rng(456)
+    n = 30_000
+    v = rng.normal(0.0, 1.5e3, size=(n, 3))
+    m_ion = 40.0 * P.MP
+
+    model_nb = MccModel(_mcc_settings(), m_ion)
+    v_nb = v.copy()
+    n_nb = model_nb.collide_ions(v_nb, 1.0e-8)
+    next_nb = model_nb.rng.random(16)
+
+    monkeypatch.setattr(nk, "HAVE_NUMBA", False)
+    model_np = MccModel(_mcc_settings(), m_ion)
+    v_np = v.copy()
+    n_np = model_np.collide_ions(v_np, 1.0e-8)
+    next_np = model_np.rng.random(16)
+
+    assert n_nb == n_np
+    assert n_nb > 0
+    assert np.array_equal(v_nb, v_np)
     assert np.array_equal(next_nb, next_np)
 
 

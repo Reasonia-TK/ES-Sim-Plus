@@ -1,6 +1,6 @@
 """Optional Numba JIT カーネル (prompts/76、粒子カーネルの高速化②)。
 
-粒子ループ (walk・電荷デポジット・gather+push・MCCプロセス選択) を Numba の njit で書き直し、
+粒子ループ (walk・電荷デポジット・gather+push・MCC候補/選択/散乱) を Numba の njit で書き直し、
 numpy ベクトル化実装より高速化する。numba は **optional 依存**: import に
 失敗する環境 (未インストール) や環境変数 ES_SIM_NO_NUMBA=1 (計測・テスト用の
 強制フォールバック) では HAVE_NUMBA=False のままとなり、呼び出し側
@@ -165,6 +165,101 @@ if HAVE_NUMBA:
             out_xnew[p, 1] = x[p, 1] + dt_sp * vn1
             out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * vn2
 
+    @njit(cache=True, nogil=True, parallel=True)
+    def _gather_push_walk_kernel(
+        exy,
+        packed,
+        adjacency,
+        elem0,
+        qm_dt,
+        dt_sp,
+        x,
+        v,
+        tol,
+        max_iters,
+        out_vnew,
+        out_xnew,
+        out_vdot,
+        out_elem,
+        out_absorbed,
+        out_b_elem,
+        out_b_loc,
+        out_l,
+    ):
+        """基本xy経路のpushとwalkを1粒子ループへ融合する。"""
+        n = elem0.shape[0]
+        for p in prange(n):
+            e = elem0[p]
+            ax = qm_dt * exy[e, 0]
+            ay = qm_dt * exy[e, 1]
+            v0 = v[p, 0]
+            v1 = v[p, 1]
+            v2 = v[p, 2]
+            vn0 = v0 + ax
+            vn1 = v1 + ay
+            vn2 = v2
+            xp = x[p, 0] + dt_sp * vn0
+            yp = x[p, 1] + dt_sp * vn1
+
+            out_vnew[p, 0] = vn0
+            out_vnew[p, 1] = vn1
+            out_vnew[p, 2] = vn2
+            out_xnew[p, 0] = xp
+            out_xnew[p, 1] = yp
+            out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * vn2
+
+            absorbed = False
+            b_elem = 0
+            b_loc = 0
+            converged = False
+            l0 = 0.0
+            l1 = 0.0
+            l2 = 0.0
+            for _ in range(max_iters):
+                g9 = packed[e, 9]
+                l0 = (packed[e, 0] + packed[e, 3] * xp) + packed[e, 6] * yp
+                l0 = l0 / g9
+                l1 = (packed[e, 1] + packed[e, 4] * xp) + packed[e, 7] * yp
+                l1 = l1 / g9
+                l2 = (packed[e, 2] + packed[e, 5] * xp) + packed[e, 8] * yp
+                l2 = l2 / g9
+                if l0 >= -tol and l1 >= -tol and l2 >= -tol:
+                    converged = True
+                    break
+                mi = 0
+                mv = l0
+                if l1 < mv:
+                    mi = 1
+                    mv = l1
+                if l2 < mv:
+                    mi = 2
+                nb = adjacency[e, mi]
+                if nb == -1:
+                    absorbed = True
+                    b_elem = e
+                    b_loc = mi
+                    break
+                e = nb
+            if not converged and not absorbed:
+                # walk単体カーネルと同じ反復上限フォールバック。
+                g9 = packed[e, 9]
+                l0 = (packed[e, 0] + packed[e, 3] * xp) + packed[e, 6] * yp
+                l0 = l0 / g9
+                l1 = (packed[e, 1] + packed[e, 4] * xp) + packed[e, 7] * yp
+                l1 = l1 / g9
+                l2 = (packed[e, 2] + packed[e, 5] * xp) + packed[e, 8] * yp
+                l2 = l2 / g9
+
+            out_elem[p] = e
+            out_absorbed[p] = absorbed
+            out_b_elem[p] = b_elem
+            out_b_loc[p] = b_loc
+            # absorbed行は従来どおり未定義のままにする。
+            if not absorbed:
+                out_l[p, 0] = l0
+                out_l[p, 1] = l1
+                out_l[p, 2] = l2
+
     @njit(cache=True, nogil=True)
     def _interp_packed_table(x, xs, ys, n):
         """np.interp と同じ端点クランプ・右側探索で1点を線形補間する。"""
@@ -210,6 +305,141 @@ if HAVE_NUMBA:
                 if target < cumulative:
                     out[i] = j
                     break
+        return out
+
+    @njit(cache=True, nogil=True)
+    def _mcc_select_velocity_kernel(
+        v,
+        cand,
+        energy_scale,
+        charge_ev,
+        numax,
+        n_ref,
+        rel_elem,
+        elem,
+        use_rel,
+        e_table,
+        s_table,
+        lengths,
+        random_u,
+        out_proc,
+        out_energy,
+        out_speed,
+    ):
+        """候補電子の速度→エネルギー→プロセス選択を1ループで処理する。"""
+        n = cand.shape[0]
+        n_procs = lengths.shape[0]
+        for k in range(n):
+            i = cand[k]
+            v0 = v[i, 0]
+            v1 = v[i, 1]
+            v2 = v[i, 2]
+            speed2 = (v0 * v0 + v1 * v1) + v2 * v2
+            speed = np.sqrt(speed2)
+            e_ev = (energy_scale * speed * speed) / charge_ev
+            out_speed[k] = speed
+            out_energy[k] = e_ev
+
+            target = random_u[k] * numax
+            cumulative = 0.0
+            density_scale = rel_elem[elem[i]] if use_rel else 1.0
+            selected = -1
+            for j in range(n_procs):
+                sigma = _interp_packed_table(
+                    e_ev, e_table[j], s_table[j], lengths[j]
+                )
+                cumulative += (n_ref * sigma * speed) * density_scale
+                if target < cumulative:
+                    selected = j
+                    break
+            out_proc[k] = selected
+
+    @njit(cache=True, nogil=True)
+    def _mcc_scatter_electrons_kernel(
+        v,
+        sub,
+        e_ev,
+        speed,
+        direction,
+        kind,
+        threshold_ev,
+        mass_ratio,
+        scatter_energy,
+        charge_ev,
+        electron_mass,
+    ):
+        """選択済み電子衝突の速度更新をin-placeで行う。"""
+        n = sub.shape[0]
+        for k in range(n):
+            i = sub[k]
+            d0 = direction[k, 0]
+            d1 = direction[k, 1]
+            d2 = direction[k, 2]
+            if kind == 0:  # elastic
+                cos_chi = (
+                    (v[i, 0] / speed[k]) * d0
+                    + (v[i, 1] / speed[k]) * d1
+                ) + (v[i, 2] / speed[k]) * d2
+                e_new = e_ev[k] * (
+                    1.0 - 2.0 * mass_ratio * (1.0 - cos_chi)
+                )
+                if e_new < 0.0:
+                    e_new = 0.0
+            elif kind == 1:  # excitation
+                e_new = e_ev[k] - threshold_ev
+            else:  # ionization
+                e_new = scatter_energy[k]
+            speed_new = np.sqrt(2.0 * e_new * charge_ev / electron_mass)
+            v[i, 0] = speed_new * d0
+            v[i, 1] = speed_new * d1
+            v[i, 2] = speed_new * d2
+
+    @njit(cache=True, nogil=True)
+    def _mcc_scatter_ions_kernel(
+        v, sub, vi, vg, g_mag, direction, backscat
+    ):
+        """選択済みイオン衝突の速度更新をin-placeで行う。"""
+        n = sub.shape[0]
+        for k in range(n):
+            i = sub[k]
+            if backscat:
+                v[i, 0] = vg[k, 0]
+                v[i, 1] = vg[k, 1]
+                v[i, 2] = vg[k, 2]
+            else:
+                half_g = 0.5 * g_mag[k]
+                v[i, 0] = 0.5 * (vi[k, 0] + vg[k, 0]) + half_g * direction[k, 0]
+                v[i, 1] = 0.5 * (vi[k, 1] + vg[k, 1]) + half_g * direction[k, 1]
+                v[i, 2] = 0.5 * (vi[k, 2] + vg[k, 2]) + half_g * direction[k, 2]
+
+    @njit(cache=True, nogil=True)
+    def _mcc_iso_dir_kernel(random_cos, random_phi, out):
+        """NumPy版と同じ演算順で3D等方方向を構築する。"""
+        n = random_cos.shape[0]
+        for i in range(n):
+            cos_t = 1.0 - 2.0 * random_cos[i]
+            sin2 = 1.0 - cos_t * cos_t
+            if sin2 < 0.0:
+                sin2 = 0.0
+            sin_t = np.sqrt(sin2)
+            phi = random_phi[i] * (2.0 * np.pi)
+            out[i, 0] = sin_t * np.cos(phi)
+            out[i, 1] = sin_t * np.sin(phi)
+            out[i, 2] = cos_t
+
+    @njit(cache=True, nogil=True)
+    def _mcc_candidates_kernel(random_u, probability):
+        """候補マスクを作らず、採択インデックスを連続配列へ詰める。"""
+        count = 0
+        for i in range(random_u.shape[0]):
+            if random_u[i] < probability:
+                count += 1
+        out = np.empty(count, dtype=np.int64)
+        pos = 0
+        for i in range(random_u.shape[0]):
+            if random_u[i] < probability:
+                out[pos] = i
+                pos += 1
         return out
 
 
@@ -276,6 +506,55 @@ def gather_push(exy: np.ndarray, elem: np.ndarray, q: float, m: float, dt_sp: fl
     return v_new, x_new, vdot
 
 
+def gather_push_walk(
+    exy: np.ndarray,
+    packed: np.ndarray,
+    adjacency: np.ndarray,
+    elem: np.ndarray,
+    q: float,
+    m: float,
+    dt_sp: float,
+    x: np.ndarray,
+    v: np.ndarray,
+):
+    """基本xy経路のgather+push+walkを1回のNumba呼び出しで処理する。
+
+    中間のx_newを別カーネルへ渡す処理とwalk用の重複バッファをなくす。返却値は
+    gather_push と walk_step の結果を連結した
+    (v_new, x_new, vdot, elem, absorbed, b_elem, b_loc, bary)。
+    """
+    n = len(x)
+    v_new = np.empty((n, 3), dtype=np.float64)
+    x_new = np.empty((n, 2), dtype=np.float64)
+    vdot = np.empty(n, dtype=np.float64)
+    elem_new = np.empty(n, dtype=np.int64)
+    absorbed = np.empty(n, dtype=np.bool_)
+    b_elem = np.empty(n, dtype=np.int64)
+    b_loc = np.empty(n, dtype=np.int64)
+    bary = np.empty((n, 3), dtype=np.float64)
+    _gather_push_walk_kernel(
+        np.ascontiguousarray(exy),
+        np.ascontiguousarray(packed),
+        np.ascontiguousarray(adjacency),
+        np.ascontiguousarray(elem),
+        (q / m) * dt_sp,
+        dt_sp,
+        np.ascontiguousarray(x),
+        np.ascontiguousarray(v),
+        _TOL,
+        _MAX_WALK_ITERS,
+        v_new,
+        x_new,
+        vdot,
+        elem_new,
+        absorbed,
+        b_elem,
+        b_loc,
+        bary,
+    )
+    return v_new, x_new, vdot, elem_new, absorbed, b_elem, b_loc, bary
+
+
 def mcc_choose_process(
     e_ev: np.ndarray,
     speed: np.ndarray,
@@ -304,4 +583,126 @@ def mcc_choose_process(
         np.ascontiguousarray(s_table),
         np.ascontiguousarray(lengths),
         np.ascontiguousarray(random_u),
+    )
+
+
+def mcc_select_velocity(
+    v: np.ndarray,
+    cand: np.ndarray,
+    m: float,
+    charge_ev: float,
+    numax: float,
+    n_ref: float,
+    rel_elem: np.ndarray | None,
+    elem: np.ndarray | None,
+    e_table: np.ndarray,
+    s_table: np.ndarray,
+    lengths: np.ndarray,
+    random_u: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """候補粒子の速度からプロセス・エネルギー・速さを一括算出する。"""
+    n = len(cand)
+    proc = np.empty(n, dtype=np.int64)
+    energy = np.empty(n, dtype=np.float64)
+    speed = np.empty(n, dtype=np.float64)
+    use_rel = rel_elem is not None and elem is not None
+    rel_arr = np.empty(0, dtype=np.float64) if rel_elem is None else rel_elem
+    elem_arr = np.empty(0, dtype=np.int64) if elem is None else elem
+    _mcc_select_velocity_kernel(
+        np.ascontiguousarray(v),
+        np.ascontiguousarray(cand),
+        0.5 * float(m),
+        float(charge_ev),
+        float(numax),
+        float(n_ref),
+        np.ascontiguousarray(rel_arr),
+        np.ascontiguousarray(elem_arr),
+        use_rel,
+        np.ascontiguousarray(e_table),
+        np.ascontiguousarray(s_table),
+        np.ascontiguousarray(lengths),
+        np.ascontiguousarray(random_u),
+        proc,
+        energy,
+        speed,
+    )
+    return proc, energy, speed
+
+
+def mcc_scatter_electrons(
+    v: np.ndarray,
+    sub: np.ndarray,
+    e_ev: np.ndarray,
+    speed: np.ndarray,
+    direction: np.ndarray,
+    kind: int,
+    threshold_ev: float,
+    mass_ratio: float,
+    scatter_energy: np.ndarray | None,
+    charge_ev: float,
+    electron_mass: float,
+) -> None:
+    """選択・乱数生成後の電子散乱計算をJITでin-place更新する。"""
+    scatter_arr = (
+        np.empty(0, dtype=np.float64)
+        if scatter_energy is None
+        else np.ascontiguousarray(scatter_energy)
+    )
+    _mcc_scatter_electrons_kernel(
+        v,
+        np.ascontiguousarray(sub),
+        np.ascontiguousarray(e_ev),
+        np.ascontiguousarray(speed),
+        np.ascontiguousarray(direction),
+        int(kind),
+        float(threshold_ev),
+        float(mass_ratio),
+        scatter_arr,
+        float(charge_ev),
+        float(electron_mass),
+    )
+
+
+def mcc_scatter_ions(
+    v: np.ndarray,
+    sub: np.ndarray,
+    vi: np.ndarray,
+    vg: np.ndarray,
+    g_mag: np.ndarray,
+    direction: np.ndarray | None,
+    backscat: bool,
+) -> None:
+    """選択・乱数生成後のイオン散乱計算をJITでin-place更新する。"""
+    direction_arr = (
+        np.empty((0, 3), dtype=np.float64)
+        if direction is None
+        else np.ascontiguousarray(direction)
+    )
+    _mcc_scatter_ions_kernel(
+        v,
+        np.ascontiguousarray(sub),
+        np.ascontiguousarray(vi),
+        np.ascontiguousarray(vg),
+        np.ascontiguousarray(g_mag),
+        direction_arr,
+        bool(backscat),
+    )
+
+
+def mcc_iso_dir(random_cos: np.ndarray, random_phi: np.ndarray) -> np.ndarray:
+    """一様乱数2列から3D等方単位方向を構築する。"""
+    out = np.empty((len(random_cos), 3), dtype=np.float64)
+    _mcc_iso_dir_kernel(
+        np.ascontiguousarray(random_cos),
+        np.ascontiguousarray(random_phi),
+        out,
+    )
+    return out
+
+
+def mcc_candidates(random_u: np.ndarray, probability: float) -> np.ndarray:
+    """null-collision候補インデックスを一時bool配列なしで返す。"""
+    return _mcc_candidates_kernel(
+        np.ascontiguousarray(random_u),
+        float(probability),
     )

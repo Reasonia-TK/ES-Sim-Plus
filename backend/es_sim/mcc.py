@@ -9,8 +9,10 @@
   excitation/ionization はテーブルが閾値から σ=0 で始まるので閾値未満は自然に 0
 - 衝突は位置を変えないので所属要素の更新は不要
 - 乱数はすべて mcc.seed からのシード付き rng (再現性)
-- ホットループは numpy ベクトル化 (粒子 for ループなし。プロセス数分の
-  小さなループのみ)
+- Numba 利用時は候補抽出・速度/エネルギー評価・断面積補間・プロセス選択・
+  散乱方向構築・速度更新を JIT 化。乱数生成は numpy Generator に残して
+  フォールバック経路と乱数列・計算結果を完全一致させる
+- Numba 無しでは従来の numpy ベクトル化へフォールバック
 """
 
 from __future__ import annotations
@@ -202,7 +204,10 @@ class MccModel:
     def _candidates(self, n: int, numax: float, dt: float) -> np.ndarray:
         """null-collision の衝突候補インデックスを抽選する。"""
         p_coll = 1.0 - math.exp(-numax * dt)
-        return np.nonzero(self.rng.random(n) < p_coll)[0]
+        random_u = self.rng.random(n)
+        if _numba_kernels.HAVE_NUMBA:
+            return _numba_kernels.mcc_candidates(random_u, p_coll)
+        return np.nonzero(random_u < p_coll)[0]
 
     def _choose_process(
         self,
@@ -260,6 +265,26 @@ class MccModel:
         cand = self._candidates(len(v), numax, dt)
         if cand.size == 0:
             return cand, None, None, None
+        if _numba_kernels.HAVE_NUMBA:
+            packed = self._e_xs_pack if procs is self.e_procs else self._i_xs_pack
+            if packed is not None:
+                # 候補速度のgather、エネルギー算出、局所密度参照、断面積補間、
+                # プロセス選択を1つのJITループへまとめる。選択乱数は従来と同じ
+                # タイミング・本数でNumPy Generatorから生成する。
+                random_u = self.rng.random(cand.size)
+                proc_idx, e_ev, speed = _numba_kernels.mcc_select_velocity(
+                    v,
+                    cand,
+                    m,
+                    QE,
+                    numax,
+                    self._n_ref,
+                    self._rel,
+                    elem,
+                    *packed,
+                    random_u,
+                )
+                return cand, proc_idx, e_ev, speed
         vv = v[cand]
         speed = np.sqrt(np.sum(vv * vv, axis=1))
         e_ev = 0.5 * m * speed * speed / QE
@@ -269,9 +294,13 @@ class MccModel:
 
     def _iso_dir(self, k: int) -> np.ndarray:
         """3D 等方な単位方向ベクトルを k 個サンプルする (cosχ 一様・方位角一様)。"""
-        cos_t = 1.0 - 2.0 * self.rng.random(k)
+        random_cos = self.rng.random(k)
+        random_phi = self.rng.random(k)
+        if _numba_kernels.HAVE_NUMBA:
+            return _numba_kernels.mcc_iso_dir(random_cos, random_phi)
+        cos_t = 1.0 - 2.0 * random_cos
         sin_t = np.sqrt(np.maximum(1.0 - cos_t * cos_t, 0.0))
-        phi = self.rng.random(k) * (2.0 * np.pi)
+        phi = random_phi * (2.0 * np.pi)
         return np.stack([sin_t * np.cos(phi), sin_t * np.sin(phi), cos_t], axis=1)
 
     # ---- 電子衝突 -------------------------------------------------------------
@@ -320,16 +349,47 @@ class MccModel:
             d_new = self._iso_dir(k)  # 3D 等方散乱: cosχ 一様・方位角一様
             if p.kind == "elastic":
                 # 散乱角 χ = 旧方向と新方向のなす角。ΔE = 2(m/M)(1−cosχ)E
-                d_old = v[sub] / speed[mask][:, None]
-                cos_chi = np.sum(d_old * d_new, axis=1)
-                e_new = np.maximum(
-                    e_ev[mask] * (1.0 - 2.0 * p.mass_ratio * (1.0 - cos_chi)), 0.0
-                )
-                v[sub] = np.sqrt(2.0 * e_new * QE / ME)[:, None] * d_new
+                if _numba_kernels.HAVE_NUMBA:
+                    _numba_kernels.mcc_scatter_electrons(
+                        v,
+                        sub,
+                        e_ev[mask],
+                        speed[mask],
+                        d_new,
+                        0,
+                        p.threshold_ev,
+                        p.mass_ratio,
+                        None,
+                        QE,
+                        ME,
+                    )
+                else:
+                    d_old = v[sub] / speed[mask][:, None]
+                    cos_chi = np.sum(d_old * d_new, axis=1)
+                    e_new = np.maximum(
+                        e_ev[mask] * (1.0 - 2.0 * p.mass_ratio * (1.0 - cos_chi)),
+                        0.0,
+                    )
+                    v[sub] = np.sqrt(2.0 * e_new * QE / ME)[:, None] * d_new
             elif p.kind == "excitation":
                 # E − 閾値 に減速して等方散乱
-                e_new = e_ev[mask] - p.threshold_ev
-                v[sub] = np.sqrt(2.0 * e_new * QE / ME)[:, None] * d_new
+                if _numba_kernels.HAVE_NUMBA:
+                    _numba_kernels.mcc_scatter_electrons(
+                        v,
+                        sub,
+                        e_ev[mask],
+                        speed[mask],
+                        d_new,
+                        1,
+                        p.threshold_ev,
+                        p.mass_ratio,
+                        None,
+                        QE,
+                        ME,
+                    )
+                else:
+                    e_new = e_ev[mask] - p.threshold_ev
+                    v[sub] = np.sqrt(2.0 * e_new * QE / ME)[:, None] * d_new
             else:  # ionization
                 # 余剰 E − 閾値 を散乱電子/放出電子に分配 (両者 3D 等方)。
                 # "half": 等分 (Turner ベンチマーク互換、既定) / "random": 一様乱数比
@@ -339,7 +399,22 @@ class MccModel:
                 else:
                     e_scat = self.rng.random(k) * excess
                 e_eject = excess - e_scat
-                v[sub] = np.sqrt(2.0 * e_scat * QE / ME)[:, None] * d_new
+                if _numba_kernels.HAVE_NUMBA:
+                    _numba_kernels.mcc_scatter_electrons(
+                        v,
+                        sub,
+                        e_ev[mask],
+                        speed[mask],
+                        d_new,
+                        2,
+                        p.threshold_ev,
+                        p.mass_ratio,
+                        e_scat,
+                        QE,
+                        ME,
+                    )
+                else:
+                    v[sub] = np.sqrt(2.0 * e_scat * QE / ME)[:, None] * d_new
                 new_ve.append(np.sqrt(2.0 * e_eject * QE / ME)[:, None] * self._iso_dir(k))
                 # 新イオンはガス温度の Maxwell 速度 (3成分)。非一様ガス場では
                 # 局所温度・局所流速を使う (一様時は従来と完全一致)
@@ -431,9 +506,32 @@ class MccModel:
             sub = cand[mask]
             if p.kind == "backscat":
                 # 電荷交換: イオン速度をガス原子の速度で置き換える
-                v[sub] = vg[mask]
+                if _numba_kernels.HAVE_NUMBA:
+                    _numba_kernels.mcc_scatter_ions(
+                        v,
+                        sub,
+                        vi[mask],
+                        vg[mask],
+                        g_mag[mask],
+                        None,
+                        True,
+                    )
+                else:
+                    v[sub] = vg[mask]
             else:  # isotropic: 等質量弾性衝突、COM 系 3D 等方散乱 (|g| 保存)
-                v_com = 0.5 * (vi[mask] + vg[mask])
-                v[sub] = v_com + 0.5 * g_mag[mask][:, None] * self._iso_dir(k)
+                direction = self._iso_dir(k)
+                if _numba_kernels.HAVE_NUMBA:
+                    _numba_kernels.mcc_scatter_ions(
+                        v,
+                        sub,
+                        vi[mask],
+                        vg[mask],
+                        g_mag[mask],
+                        direction,
+                        False,
+                    )
+                else:
+                    v_com = 0.5 * (vi[mask] + vg[mask])
+                    v[sub] = v_com + 0.5 * g_mag[mask][:, None] * direction
             n_coll += k
         return n_coll

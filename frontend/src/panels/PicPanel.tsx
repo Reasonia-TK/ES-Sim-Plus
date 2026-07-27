@@ -1043,7 +1043,7 @@ export default function PicPanel({
 // (total はここに含めず、フェーズ一覧の下に別枠で表示する)
 const TIMING_PHASE_LABELS: Record<string, string> = {
   solve: "場ソルブ",
-  gather_push: "粒子押し出し",
+  gather_push: "粒子押し出し（融合時はwalk含む）",
   walk: "walk探索",
   deposit: "電荷デポジット",
   mcc: "MCC衝突",

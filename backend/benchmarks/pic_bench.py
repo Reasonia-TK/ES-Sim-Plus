@@ -29,7 +29,7 @@ from es_sim.schema import Project  # noqa: E402
 # 表示順・日本語ラベル (PicPanel の表示と揃える)
 PHASE_LABELS = [
     ("solve", "場ソルブ"),
-    ("gather_push", "粒子押し出し"),
+    ("gather_push", "押出し(+融合walk)"),
     ("walk", "walk探索"),
     ("deposit", "電荷デポジット"),
     ("mcc", "MCC衝突"),

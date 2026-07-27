@@ -1604,6 +1604,10 @@ class PicSimulation:
         push_ions = self._sub == 1 or (self.step_count % self._sub == 0)
         ke: dict[str, float] = {}
         pushed: list[tuple[PicSpecies, np.ndarray, np.ndarray, np.ndarray]] = []
+        # 基本xy経路はpushとwalkを同じ粒子ループへ融合し、中間配列の再読込と
+        # Numbaディスパッチを減らす。軸対称・磁場ありは従来の独立経路を使う。
+        fuse_push_walk = _numba_kernels.HAVE_NUMBA and not self.rz and self._b is None
+        fused_walk_results: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
         for sp in self.species.values():
             if len(sp.x) == 0:
                 ke[sp.name] = 0.0
@@ -1618,18 +1622,34 @@ class PicSimulation:
                 ke[sp.name] = self._last_ke_i
                 continue
             dt_sp = dt * self._sub if (sp.name == "ion" and self._sub > 1) else dt
-            if _numba_kernels.HAVE_NUMBA and not self.rz and self._b is None:
-                # 基本経路 (軸対称・一様磁場なし、prompts/76): gather (E補間) と
-                # push を1つの njit ループに融合する。運動エネルギーのリダクション
-                # だけは numpy の np.sum に残す (下の numpy 経路と同じ和の取り方に
-                # して決定性・等価性を保つため。_numba_kernels.py 参照)
-                v_new, x_new, vdot = _numba_kernels.gather_push(
-                    exy, sp.elem, sp.q, sp.m, dt_sp, sp.x, sp.v
+            if fuse_push_walk:
+                # 基本経路 (軸対称・一様磁場なし): gather・push・walkを1つの
+                # njitループに融合する。各粒子内の演算順は従来カーネルと同じ。
+                (
+                    v_new,
+                    x_new,
+                    vdot,
+                    elem_new,
+                    absorbed,
+                    b_elem,
+                    b_loc,
+                    l_new,
+                ) = _numba_kernels.gather_push_walk(
+                    exy,
+                    self._coeffs_packed,
+                    self.adjacency,
+                    sp.elem,
+                    sp.q,
+                    sp.m,
+                    dt_sp,
+                    sp.x,
+                    sp.v,
                 )
                 ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * vdot))
                 if sp.name == "ion":
                     self._last_ke_i = ke[sp.name]
-                pushed.append((sp, v_new, x_new, np.empty((len(x_new), 3))))
+                pushed.append((sp, v_new, x_new, l_new))
+                fused_walk_results.append((elem_new, absorbed, b_elem, b_loc))
                 continue
             e_at = exy[sp.elem]
             v_new = sp.v.copy()
@@ -1674,13 +1694,15 @@ class PicSimulation:
                 v_new[:, 2] = np.where(ang_l != 0.0, ang_l / r_new, 0.0)
             pushed.append((sp, v_new, x_new, np.empty((len(x_new), 3))))
         t_push1 = time.perf_counter()
+        # 融合経路ではカーネル内walkもここへ含まれる。分離計測のために再走査すると
+        # 高速化効果を失うため、gather_pushを「融合カーネル時間」として扱う。
         self.timing["gather_push"] += t_push1 - t_solve1
 
-        # 5. walk 更新 (種ごとに独立・決定的なので、2種のときは並列に実行して
-        #    2コアを使う。numpy の大きな ufunc は GIL を解放するため実効的)
+        # 5. walk 更新。融合経路では結果を既に得ているため、ここは境界処理だけになる。
+        # 分離経路は種ごとに独立・決定的なので、2種のときは並列に実行する。
         # 位相別計測 (prompts/75): スレッド並列時も submit〜完了待ちの壁時計時間を
         # そのまま計測する (_run_walks 内部で完了待ちまで行うため)
-        walk_results = self._run_walks(pushed)
+        walk_results = fused_walk_results if fuse_push_walk else self._run_walks(pushed)
         t_walk1 = time.perf_counter()
         self.timing["walk"] += t_walk1 - t_push1
 
