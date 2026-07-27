@@ -159,6 +159,30 @@ if HAVE_NUMBA:
             f[tris[e, 2]] += c * bary[p, 2]
         return f
 
+    @njit(cache=True, nogil=True)
+    def _compact_particle_state_kernel(
+        x, v, w, elem, bary, removed, out_w,
+    ):
+        """吸収されなかった粒子を順序を保って各配列の先頭へ詰める。"""
+        write = 0
+        for read in range(removed.shape[0]):
+            if removed[read]:
+                continue
+            if write != read:
+                x[write, 0] = x[read, 0]
+                x[write, 1] = x[read, 1]
+                v[write, 0] = v[read, 0]
+                v[write, 1] = v[read, 1]
+                v[write, 2] = v[read, 2]
+                elem[write] = elem[read]
+                bary[write, 0] = bary[read, 0]
+                bary[write, 1] = bary[read, 1]
+                bary[write, 2] = bary[read, 2]
+            # wは更新前状態として境界処理まで保持するため、別バッファへ書く。
+            out_w[write] = w[read]
+            write += 1
+        return write
+
     @njit(cache=True, nogil=True, parallel=True)
     def _gather_push_kernel(exy, elem, qm_dt, dt_sp, x, v, out_vnew, out_xnew, out_vdot):
         n = elem.shape[0]
@@ -639,6 +663,37 @@ def deposit_from_elements(
         float(q),
         np.ascontiguousarray(w),
         int(n_nodes),
+    )
+
+
+def compact_particle_state(
+    x: np.ndarray,
+    v: np.ndarray,
+    w: np.ndarray,
+    elem: np.ndarray,
+    bary: np.ndarray,
+    removed: np.ndarray,
+    out_w: np.ndarray,
+) -> int:
+    """非removed粒子を安定順序で先頭へ詰め、残存粒子数を返す。
+
+    x/v/elem/bary はpush+walk出力バッファ内でin-place圧縮する。wは境界処理が
+    更新前状態を参照し終えるまで変更できないため、KE計算後のvdotバッファを
+    out_wとして再利用する。
+    """
+    n = len(removed)
+    if any(len(buf) < n for buf in (x, v, w, elem, bary, out_w)):
+        raise ValueError("compact_particle_state のバッファ容量が不足しています")
+    return int(
+        _compact_particle_state_kernel(
+            x,
+            v,
+            w,
+            elem,
+            bary,
+            removed,
+            out_w,
+        )
     )
 
 

@@ -1587,6 +1587,7 @@ class PicSimulation:
             return (
                 np.shares_memory(buf[0], sp.v)
                 or np.shares_memory(buf[1], sp.x)
+                or np.shares_memory(buf[2], sp.w)
                 or np.shares_memory(buf[3], sp.elem)
                 or (sp.bary is not None and np.shares_memory(buf[7], sp.bary))
             )
@@ -1632,6 +1633,7 @@ class PicSimulation:
                 if (
                     np.shares_memory(buf[0], sp.v)
                     or np.shares_memory(buf[1], sp.x)
+                    or np.shares_memory(buf[2], sp.w)
                     or np.shares_memory(buf[3], sp.elem)
                     or (
                         sp.bary is not None
@@ -1682,6 +1684,9 @@ class PicSimulation:
         push_ions = self._sub == 1 or (self.step_count % self._sub == 0)
         ke: dict[str, float] = {}
         pushed: list[tuple[PicSpecies, np.ndarray, np.ndarray, np.ndarray]] = []
+        # 融合経路のvdotはKE評価後に不要になるため、境界吸収時の重み圧縮先として
+        # 再利用する。NumPyフォールバックではNoneとして従来の抽出処理を保つ。
+        compact_weight_buffers: list[np.ndarray | None] = []
         # 基本xy・軸対称経路はpushとwalkを同じ粒子ループへ融合し、中間配列の
         # 再読込とNumbaディスパッチを減らす。磁場ありxyは独立経路を使う。
         fuse_push_walk = _numba_kernels.HAVE_NUMBA and (
@@ -1737,6 +1742,7 @@ class PicSimulation:
                 if sp.name == "ion":
                     self._last_ke_i = ke[sp.name]
                 pushed.append((sp, v_new, x_new, l_new))
+                compact_weight_buffers.append(vdot)
                 fused_walk_results.append((elem_new, absorbed, b_elem, b_loc))
                 continue
             e_at = exy[sp.elem]
@@ -1781,6 +1787,7 @@ class PicSimulation:
                 r_new = np.maximum(x_new[:, self.ridx], _R_TINY)
                 v_new[:, 2] = np.where(ang_l != 0.0, ang_l / r_new, 0.0)
             pushed.append((sp, v_new, x_new, np.empty((len(x_new), 3))))
+            compact_weight_buffers.append(None)
         t_push1 = time.perf_counter()
         # 融合経路ではカーネル内walkもここへ含まれる。分離計測のために再走査すると
         # 高速化効果を失うため、gather_pushを「融合カーネル時間」として扱う。
@@ -1795,7 +1802,9 @@ class PicSimulation:
         self.timing["walk"] += t_walk1 - t_push1
 
         # 5.1. 境界吸収・鏡面反射・SEE (種の順序は従来どおり electron → ion)
-        for (sp, v_new, x_new, l_new), res_walk in zip(pushed, walk_results):
+        for (sp, v_new, x_new, l_new), res_walk, weight_out in zip(
+            pushed, walk_results, compact_weight_buffers
+        ):
             elem_new, absorbed, b_elem, b_loc = res_walk
             # 鏡面反射エッジに達した粒子は吸収せず折り返し、周期エッジに達した
             # 粒子は反対側へラップする (いずれも壁カウンタに含めない)
@@ -1837,12 +1846,30 @@ class PicSimulation:
                 # SEE: γ>0 電極へのイオン吸収で二次電子を生成 (sp.x は更新前の位置)
                 if sp.name == "ion" and self._edge_gamma is not None and np.any(absorbed):
                     self._emit_see(sp, x_new, b_elem, b_loc, absorbed)
-                keep = ~removed
-                sp.x = x_new[keep]
-                sp.v = v_new[keep]
-                sp.w = sp.w[keep]
-                sp.elem = elem_new[keep]
-                sp.bary = l_new[keep]
+                if weight_out is not None:
+                    # push+walk出力を安定順序でin-place圧縮し、KE計算済みの
+                    # vdotバッファを重み出力へ転用して5つの再確保を避ける。
+                    n_keep = _numba_kernels.compact_particle_state(
+                        x_new,
+                        v_new,
+                        sp.w,
+                        elem_new,
+                        l_new,
+                        removed,
+                        weight_out,
+                    )
+                    sp.x = x_new[:n_keep]
+                    sp.v = v_new[:n_keep]
+                    sp.w = weight_out[:n_keep]
+                    sp.elem = elem_new[:n_keep]
+                    sp.bary = l_new[:n_keep]
+                else:
+                    keep = ~removed
+                    sp.x = x_new[keep]
+                    sp.v = v_new[keep]
+                    sp.w = sp.w[keep]
+                    sp.elem = elem_new[keep]
+                    sp.bary = l_new[keep]
             else:
                 sp.x = x_new
                 sp.v = v_new

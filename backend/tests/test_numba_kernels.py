@@ -101,6 +101,112 @@ def test_deposit_numpy_numba_equivalence():
 
 
 @requires_numba
+@pytest.mark.parametrize(
+    "removed",
+    [
+        np.zeros(31, dtype=np.bool_),
+        np.array([(i % 3) == 1 for i in range(31)], dtype=np.bool_),
+        np.ones(31, dtype=np.bool_),
+    ],
+)
+def test_compact_particle_state_matches_boolean_indexing(removed):
+    """JIT圧縮が粒子順を保ち、従来のブール抽出と完全一致する。"""
+    rng = np.random.default_rng(761)
+    n = len(removed)
+    x = rng.normal(size=(n, 2))
+    v = rng.normal(size=(n, 3))
+    w = rng.uniform(1e5, 1e9, size=n)
+    elem = rng.integers(0, 100, size=n, dtype=np.int64)
+    bary = rng.normal(size=(n, 3))
+    keep = ~removed
+    expected = tuple(arr[keep] for arr in (x, v, w, elem, bary))
+
+    x_out = x.copy()
+    v_out = v.copy()
+    elem_out = elem.copy()
+    bary_out = bary.copy()
+    w_out = np.empty(n + 7)
+    n_keep = nk.compact_particle_state(
+        x_out, v_out, w, elem_out, bary_out, removed, w_out
+    )
+    actual = (
+        x_out[:n_keep],
+        v_out[:n_keep],
+        w_out[:n_keep],
+        elem_out[:n_keep],
+        bary_out[:n_keep],
+    )
+
+    assert n_keep == int(keep.sum())
+    for expected_array, actual_array in zip(expected, actual):
+        assert np.array_equal(expected_array, actual_array)
+
+
+@requires_numba
+def test_rz_pic_jit_compaction_matches_numpy_fallback(monkeypatch):
+    """軸対称PICのJIT圧縮後状態が従来フォールバックと完全一致する。"""
+    project = Project.model_validate(
+        {
+            "coord": "rz",
+            "geometry": {
+                "domain": {
+                    "polygon": [[0, 0], [0.02, 0], [0.02, 0.01], [0, 0.01]]
+                },
+                "boundaries": [
+                    {
+                        "edges": [1, 2, 3],
+                        "type": "dirichlet",
+                        "voltage": 0.0,
+                    }
+                ],
+            },
+            "mesh": {"size": 8e-4},
+            "pic": {
+                "initial_plasma": {
+                    "density": 1e14,
+                    "te_ev": 10.0,
+                    "ti_ev": 0.1,
+                    "ion_mass_amu": 40.0,
+                    "seed": 19,
+                },
+                "n_macro": 1000,
+                "dt": 2e-10,
+                "n_steps": 20,
+                "frame_every": 1000,
+                "threads": 1,
+            },
+        }
+    )
+
+    from es_sim.pic import PicSimulation
+
+    sim_jit = PicSimulation(project)
+    for _ in range(20):
+        sim_jit.step()
+
+    monkeypatch.setattr(nk, "HAVE_NUMBA", False)
+    sim_numpy = PicSimulation(project)
+    for _ in range(20):
+        sim_numpy.step()
+
+    assert sim_jit.species["electron"].wall_absorbed > 0
+    for name in sim_jit.species:
+        actual = sim_jit.species[name]
+        expected = sim_numpy.species[name]
+        assert actual.wall_absorbed == expected.wall_absorbed
+        for attr in ("x", "v", "w", "elem", "bary"):
+            assert np.array_equal(getattr(actual, attr), getattr(expected, attr)), (
+                name,
+                attr,
+            )
+    for key in sim_jit.history:
+        assert np.array_equal(
+            np.asarray(sim_jit.history[key]),
+            np.asarray(sim_numpy.history[key]),
+        ), key
+
+
+@requires_numba
 def test_gather_push_numpy_numba_equivalence():
     """gather (E補間) + リープフロッグ push の融合カーネルが numpy 経路と完全一致する。"""
     rng = np.random.default_rng(2)
