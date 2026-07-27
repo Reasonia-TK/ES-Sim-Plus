@@ -1,6 +1,6 @@
 """Optional Numba JIT カーネル (prompts/76、粒子カーネルの高速化②)。
 
-粒子ループ (walk・電荷デポジット・gather+push) を Numba の njit で書き直し、
+粒子ループ (walk・電荷デポジット・gather+push・MCCプロセス選択) を Numba の njit で書き直し、
 numpy ベクトル化実装より高速化する。numba は **optional 依存**: import に
 失敗する環境 (未インストール) や環境変数 ES_SIM_NO_NUMBA=1 (計測・テスト用の
 強制フォールバック) では HAVE_NUMBA=False のままとなり、呼び出し側
@@ -165,6 +165,53 @@ if HAVE_NUMBA:
             out_xnew[p, 1] = x[p, 1] + dt_sp * vn1
             out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * vn2
 
+    @njit(cache=True, nogil=True)
+    def _interp_packed_table(x, xs, ys, n):
+        """np.interp と同じ端点クランプ・右側探索で1点を線形補間する。"""
+        if x < xs[0]:
+            return ys[0]
+        if x >= xs[n - 1]:
+            return ys[n - 1]
+        # searchsorted(..., side="right") 相当。重複xがある場合も右側を選ぶ。
+        lo = 0
+        hi = n
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if x < xs[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        right = lo
+        left = right - 1
+        dx = xs[right] - xs[left]
+        if dx == 0.0:
+            return ys[right]
+        return ys[left] + (x - xs[left]) * (ys[right] - ys[left]) / dx
+
+    @njit(cache=True, nogil=True)
+    def _mcc_choose_process_kernel(
+        e_ev, speed, numax, n_ref, rel, use_rel, e_table, s_table, lengths, random_u
+    ):
+        """候補ごとの断面積補間と累積頻度選択を一時2D配列なしで行う。"""
+        n = e_ev.shape[0]
+        n_procs = lengths.shape[0]
+        out = np.full(n, -1, dtype=np.int64)
+        for i in range(n):
+            target = random_u[i] * numax
+            cumulative = 0.0
+            density_scale = rel[i] if use_rel else 1.0
+            for j in range(n_procs):
+                sigma = _interp_packed_table(
+                    e_ev[i], e_table[j], s_table[j], lengths[j]
+                )
+                # numpy経路の (n_ref * sigma * speed) * rel と演算順を揃える。
+                nu_j = (n_ref * sigma * speed[i]) * density_scale
+                cumulative += nu_j
+                if target < cumulative:
+                    out[i] = j
+                    break
+        return out
+
 
 def walk_step(coeffs, adjacency, elem0, x_new, l_out=None, packed=None):
     """particles._walk_step_numpy の numba 版。戻り値・意味は完全に同じ。
@@ -227,3 +274,34 @@ def gather_push(exy: np.ndarray, elem: np.ndarray, q: float, m: float, dt_sp: fl
         np.ascontiguousarray(x), np.ascontiguousarray(v), v_new, x_new, vdot,
     )
     return v_new, x_new, vdot
+
+
+def mcc_choose_process(
+    e_ev: np.ndarray,
+    speed: np.ndarray,
+    numax: float,
+    n_ref: float,
+    rel: np.ndarray | None,
+    e_table: np.ndarray,
+    s_table: np.ndarray,
+    lengths: np.ndarray,
+    random_u: np.ndarray,
+) -> np.ndarray:
+    """MCC候補の実プロセス番号を返す (-1=null)。
+
+    乱数は呼び出し側のnumpy Generatorで従来と同じ順に生成して渡す。ここでは
+    候補×プロセスのnu/cumsum行列を作らず、候補ごとの小さな逐次ループで選ぶ。
+    """
+    rel_arr = np.empty(0, dtype=np.float64) if rel is None else np.ascontiguousarray(rel)
+    return _mcc_choose_process_kernel(
+        np.ascontiguousarray(e_ev),
+        np.ascontiguousarray(speed),
+        float(numax),
+        float(n_ref),
+        rel_arr,
+        rel is not None,
+        np.ascontiguousarray(e_table),
+        np.ascontiguousarray(s_table),
+        np.ascontiguousarray(lengths),
+        np.ascontiguousarray(random_u),
+    )

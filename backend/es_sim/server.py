@@ -425,13 +425,16 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
     """run_batch をワーカースレッドで実行し、started → frame → done を送出する。"""
     loop = asyncio.get_running_loop()
     stop = threading.Event()
-    queue: asyncio.Queue = asyncio.Queue()
+    # ライブ表示は途中フレームを全て再生する用途ではない。計算がJSON送信より速い場合に
+    # 古いフレームを溜めるとメモリが増え、画面も過去へ遅延するため最新1件だけ保持する。
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
 
     await ws.send_json(
         {
             "type": "started",
             "dt": sim.dt,
             "n_steps": sim.pic.n_steps,
+            "effective_threads": sim.effective_threads,
             # 区間開始時の通算ステップ数。frame.step は start からの通算で進むため、
             # continue の進捗率はフロント側で (step - step_offset)/n_steps として計算する
             "step_offset": sim.step_count,
@@ -444,11 +447,20 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
     )
 
     def on_frame(frame: dict) -> None:
-        # ワーカースレッドからイベントループへ安全に渡す (ブロックしない)
-        loop.call_soon_threadsafe(queue.put_nowait, frame)
+        # ワーカースレッドからイベントループへ安全に渡す。満杯なら古い表示フレームを
+        # 捨てて最新へ置換する (物理計算・history・完了結果には影響しない)。
+        def offer_latest() -> None:
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(frame)
+
+        loop.call_soon_threadsafe(offer_latest)
 
     run_task = asyncio.create_task(
-        asyncio.to_thread(sim.run_batch, on_frame, stop.is_set)
+        asyncio.to_thread(sim.run_batch, on_frame, stop.is_set, False)
     )
 
     async def watch_stop() -> None:

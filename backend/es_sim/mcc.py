@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import _numba_kernels
 from .particles import ME, QE
 from .schema import MccSettings, XsProcess
 
@@ -121,6 +122,10 @@ class MccModel:
         self.i_procs = [
             self._conv(p, ("isotropic", "backscat")) for p in settings.ion_processes
         ]
+        # Numbaのプロセス選択カーネルは可変長断面積表を直接扱えないため、初期化時に
+        # 右側ゼロ詰めの2D配列へまとめる。lengthsまで渡すので補間範囲は元表と同じ。
+        self._e_xs_pack = self._pack_proc_tables(self.e_procs)
+        self._i_xs_pack = self._pack_proc_tables(self.i_procs)
         self._nu_e_table = self._nu_table(self.e_procs, ME)
         # com 系ではテーブルの E は重心系エネルギーなので、相対速度 g = √(2E/μ) で ν を評価
         m_ref = self.mu if self.ion_energy_frame == "com" else m_ion
@@ -141,6 +146,22 @@ class MccModel:
         if np.any(np.diff(e) < 0.0):
             raise ValueError(f"エネルギー列が昇順ではありません: {p.label}")
         return _Proc(p.kind, p.threshold_ev, p.mass_ratio, e, s)
+
+    @staticmethod
+    def _pack_proc_tables(
+        procs: list[_Proc],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """可変長断面積表をNumbaへ渡せる連続2D配列にまとめる。"""
+        if not procs:
+            return None
+        lengths = np.asarray([len(p.e) for p in procs], dtype=np.int64)
+        width = int(lengths.max())
+        e_table = np.zeros((len(procs), width), dtype=np.float64)
+        s_table = np.zeros((len(procs), width), dtype=np.float64)
+        for j, p in enumerate(procs):
+            e_table[j, : len(p.e)] = p.e
+            s_table[j, : len(p.s)] = p.s
+        return e_table, s_table, lengths
 
     def _nu_table(self, procs: list[_Proc], m: float):
         """共通エネルギーグリッド上の ν_tot(E) と、その累積最大 (prefix max) を返す。
@@ -196,13 +217,28 @@ class MccModel:
         rel: 候補ごとの局所密度比 n_g(x)/n_max (非一様ガス場、prompts/54)。
         None なら一様 (従来と完全一致)。
         """
+        # 乱数は実装分岐より前に従来と同じ本数・順序で引く。Numba経路でも
+        # Generator状態と後続の散乱乱数列がNumPy経路から変わらない。
+        random_u = self.rng.random(len(e_ev))
+        if _numba_kernels.HAVE_NUMBA:
+            packed = self._e_xs_pack if procs is self.e_procs else self._i_xs_pack
+            if packed is not None:
+                return _numba_kernels.mcc_choose_process(
+                    e_ev,
+                    speed,
+                    numax,
+                    self._n_ref,
+                    rel,
+                    *packed,
+                    random_u,
+                )
         nu = np.empty((len(e_ev), len(procs)))
         for j, p in enumerate(procs):
             nu[:, j] = self._n_ref * np.interp(e_ev, p.e, p.s) * speed
         if rel is not None:
             nu *= rel[:, None]
         cum = np.cumsum(nu, axis=1)
-        u = self.rng.random(len(e_ev)) * numax
+        u = random_u * numax
         hit = u < cum[:, -1]
         return np.where(hit, np.argmax(u[:, None] < cum, axis=1), -1)
 

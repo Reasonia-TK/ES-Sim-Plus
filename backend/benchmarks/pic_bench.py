@@ -10,6 +10,7 @@ PicSimulation.timing (prompts/75 で追加) の位相別内訳を報告するた
     python backend/benchmarks/pic_bench.py --n-macro 50000 --steps 200
     python backend/benchmarks/pic_bench.py --no-mcc              # MCC 無効で比較
     python backend/benchmarks/pic_bench.py --sub 10 --threads 8  # サブサイクル/チャンク並列との組合せ確認
+    python backend/benchmarks/pic_bench.py --require-numba       # JIT 無効なら計測せず失敗
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from es_sim import _numba_kernels  # noqa: E402
 from es_sim.pic import PicSimulation  # noqa: E402
 from es_sim.schema import Project  # noqa: E402
 
@@ -31,6 +33,7 @@ PHASE_LABELS = [
     ("walk", "walk探索"),
     ("deposit", "電荷デポジット"),
     ("mcc", "MCC衝突"),
+    ("frame", "フレーム構築"),
     ("other", "その他"),
 ]
 
@@ -95,11 +98,20 @@ def main() -> None:
     ap.add_argument("--n-macro", type=int, default=20000)
     ap.add_argument("--steps", type=int, default=500)
     ap.add_argument("--sub", type=int, default=1)
-    ap.add_argument("--threads", type=int, default=1)
+    ap.add_argument("--threads", type=int, default=0, help="0=自動選択、1以上=明示スレッド数")
     ap.add_argument("--no-mcc", action="store_true", help="MCC を無効にして比較する")
     ap.add_argument("--warmup", type=int, default=5, help="計測から除外するウォームアップステップ数")
+    ap.add_argument(
+        "--require-numba",
+        action="store_true",
+        help="numba JIT が無効ならフォールバックを計測せず終了コード2で失敗する",
+    )
     args = ap.parse_args()
     use_mcc = not args.no_mcc
+    if args.require_numba and not _numba_kernels.HAVE_NUMBA:
+        ap.error(
+            "numba JIT が無効です。依存環境を同期し、/health の numba=true を確認してください"
+        )
 
     sim = PicSimulation(
         build_project(args.n_macro, args.steps, args.sub, args.threads, use_mcc)
@@ -117,8 +129,10 @@ def main() -> None:
 
     total = sum(sim.timing.values())
     print(
-        f"n_macro={args.n_macro} particles≈{n0} steps={args.steps} "
-        f"sub={args.sub} threads={args.threads} mcc={'on' if use_mcc else 'off'}"
+        f"n_macro={args.n_macro} particles~{n0} steps={args.steps} "
+        f"sub={args.sub} threads={args.threads}(effective={sim.effective_threads}) "
+        f"mcc={'on' if use_mcc else 'off'} "
+        f"numba={'on' if _numba_kernels.HAVE_NUMBA else 'off'}"
     )
     print(f"wall = {wall:.3f} s ({wall / args.steps * 1e3:.3f} ms/step)")
     print(f"{'phase':14s} {'label':12s} {'sec':>10s} {'%':>7s} {'ms/step':>10s}")

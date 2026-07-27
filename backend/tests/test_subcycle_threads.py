@@ -10,7 +10,7 @@
 
 import numpy as np
 
-from es_sim.pic import PicSimulation
+from es_sim.pic import PicSimulation, _effective_thread_count
 from es_sim.schema import Project
 
 L = 0.02
@@ -115,6 +115,55 @@ def test_threads_bit_identical():
         assert np.array_equal(sa.elem, sb.elem)
     for key in a.history:
         assert a.history[key] == b.history[key], f"history[{key}] が不一致"
+
+
+def test_auto_threads_uses_particle_threshold_and_cpu_cap():
+    """threads=0 は小規模で逐次、大規模でCPU数と上限2を考慮して選ぶ。"""
+    assert _effective_thread_count(0, 20_000, cpu_count=16) == 1
+    assert _effective_thread_count(0, 100_000, cpu_count=2) == 2
+    assert _effective_thread_count(0, 100_000, cpu_count=16) == 2
+    # 明示指定は自動選択の閾値・上限に関係なく尊重する
+    assert _effective_thread_count(8, 20_000, cpu_count=16) == 8
+
+
+def test_auto_threads_is_exposed_on_simulation():
+    sim = PicSimulation(_ccp_project({"threads": 0}))
+    assert sim.effective_threads == 1
+
+
+def test_subcycle_warns_when_estimated_ion_step_crosses_half_cell():
+    sim = PicSimulation(_ccp_project({"ion_subcycle": 1000}))
+    assert any("推定移動量" in w and "ion_subcycle=1000" in w for w in sim.warnings)
+
+
+def test_subcycle_collision_warning_uses_effective_ion_dt():
+    sim = PicSimulation(
+        _ccp_project(
+            {
+                "ion_subcycle": 20,
+                "mcc": {
+                    "gas": {
+                        "name": "synthetic",
+                        "pressure_pa": 100.0,
+                        "temperature_k": 300.0,
+                    },
+                    "electron_processes": [],
+                    "ion_processes": [
+                        {
+                            "kind": "backscat",
+                            "label": "synthetic charge exchange",
+                            "energy_ev": [0.0, 1000.0],
+                            "sigma_m2": [1.0e-18, 1.0e-18],
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    assert any(
+        "イオンの1回の更新衝突候補率" in w and "ion_subcycle=20" in w
+        for w in sim.warnings
+    )
 
 
 def test_subcycle_ccp_sanity():

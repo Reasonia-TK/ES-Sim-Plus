@@ -312,3 +312,19 @@ def test_frame_density_fields():
             f"{name}: Σn·V_elem={total_from_density:.6e} vs Σw={total_w:.6e} "
             f"(rel_err={rel_err:.3e})"
         )
+
+
+def test_run_batch_can_stream_without_retaining_frames():
+    """WebSocket経路はcallbackへ送ったフレームを戻り値に蓄積しない。"""
+    project = _oscillation_project(n_steps=3)
+    project.pic.frame_every = 1
+    sim = PicSimulation(project)
+    streamed: list[dict] = []
+
+    _history, frames = sim.run_batch(
+        callback=streamed.append,
+        store_frames=False,
+    )
+
+    assert frames == []
+    assert [frame["step"] for frame in streamed] == [1, 2, 3]

@@ -80,6 +80,7 @@ def _build_results_bundle(sim: PicSimulation, step_offset: int) -> dict:
         "type": "started",
         "dt": sim.dt,
         "n_steps": sim.pic.n_steps,
+        "effective_threads": sim.effective_threads,
         "step_offset": step_offset,
         "warnings": sim.warnings,
         "mesh": {
@@ -182,7 +183,8 @@ def _worker(case_path: str, out_path: str, case_name: str, progress_q: "mp.Queue
                     {"case": case_name, "kind": "progress", "step": frame["step"], "n_steps": n_steps}
                 )
 
-        sim.run_batch(on_frame, lambda: False)
+        # 進捗通知にはcallbackだけを使い、巨大なライブフレーム列は結果へ保存しない。
+        sim.run_batch(on_frame, lambda: False, False)
         bundle = _build_results_bundle(sim, step_offset)
         out_obj = {**project_dict, "results": bundle}
         # cycle の粒子スナップショット等でサイズが大きくなり得るため整形なし (compact) で書く

@@ -1,6 +1,6 @@
 """numba カーネル (prompts/76) の等価性・フォールバックのテスト。
 
-- walk / deposit / gather+push それぞれについて、numpy 実装と numba 実装が
+- walk / deposit / gather+push / MCCプロセス選択について、numpy 実装と numba 実装が
   ランダム入力に対して完全に一致すること (np.array_equal、ビット単位) を確認する。
   実行環境に numba が無ければこのファイルの等価性テストはスキップする
   (フォールバック自体は下の test_numba_fallback_smoke で monkeypatch を使って
@@ -16,10 +16,11 @@ import pytest
 
 from es_sim import _numba_kernels as nk
 from es_sim import particles as P
+from es_sim.mcc import MccModel
 from es_sim.meshing import generate_mesh
-from es_sim.schema import Project
+from es_sim.schema import MccSettings, Project
 
-pytestmark = pytest.mark.skipif(
+requires_numba = pytest.mark.skipif(
     not nk.HAVE_NUMBA, reason="numba がインストールされていない環境ではスキップ"
 )
 
@@ -40,6 +41,7 @@ def _demo_mesh():
     return generate_mesh(proj)
 
 
+@requires_numba
 def test_walk_numpy_numba_equivalence():
     """ランダムな粒子位置・移動で numpy 版と numba 版の walk が完全一致する。
 
@@ -76,6 +78,7 @@ def test_walk_numpy_numba_equivalence():
     assert 0 < abs_np.sum() < n
 
 
+@requires_numba
 def test_deposit_numpy_numba_equivalence():
     """電荷デポジット (P1 重み散布) が np.bincount 版と完全一致する。"""
     rng = np.random.default_rng(1)
@@ -92,6 +95,7 @@ def test_deposit_numpy_numba_equivalence():
     assert np.array_equal(f_np, f_nb)
 
 
+@requires_numba
 def test_gather_push_numpy_numba_equivalence():
     """gather (E補間) + リープフロッグ push の融合カーネルが numpy 経路と完全一致する。"""
     rng = np.random.default_rng(2)
@@ -120,6 +124,69 @@ def test_gather_push_numpy_numba_equivalence():
     ke_np = 0.5 * m * float(np.sum(w * vdot))
     ke_nb = 0.5 * m * float(np.sum(w * vdot_nb))
     assert ke_np == ke_nb
+
+
+def _mcc_settings() -> MccSettings:
+    return MccSettings.model_validate(
+        {
+            "gas": {"name": "synthetic", "pressure_pa": 50.0, "temperature_k": 300.0},
+            "electron_processes": [
+                {
+                    "kind": "elastic",
+                    "label": "elastic",
+                    "mass_ratio": 1.0e-5,
+                    "energy_ev": [0.0, 1.0, 20.0, 1000.0],
+                    "sigma_m2": [1.0e-19, 2.0e-19, 8.0e-20, 5.0e-20],
+                },
+                {
+                    "kind": "excitation",
+                    "label": "excitation",
+                    "threshold_ev": 11.5,
+                    "energy_ev": [11.5, 20.0, 1000.0],
+                    "sigma_m2": [0.0, 4.0e-20, 1.0e-20],
+                },
+                {
+                    "kind": "ionization",
+                    "label": "ionization",
+                    "threshold_ev": 15.8,
+                    "energy_ev": [15.8, 30.0, 1000.0],
+                    "sigma_m2": [0.0, 3.0e-20, 2.0e-20],
+                },
+            ],
+            "ion_processes": [],
+            "seed": 91,
+        }
+    )
+
+
+@requires_numba
+def test_mcc_numpy_numba_equivalence(monkeypatch):
+    """MCC全電子衝突が速度・生成粒子・後続RNG状態まで完全一致する。"""
+    rng = np.random.default_rng(123)
+    n = 30_000
+    x = rng.uniform(0.0, 0.02, size=(n, 2))
+    # 閾値上下を十分含む電子エネルギーになる速度分布
+    v = rng.normal(0.0, 2.0e6, size=(n, 3))
+    w = rng.uniform(1.0e7, 1.0e9, size=n)
+    elem = rng.integers(0, 100, size=n, dtype=np.int64)
+
+    model_nb = MccModel(_mcc_settings(), 40.0 * P.MP)
+    v_nb = v.copy()
+    result_nb = model_nb.collide_electrons(x, v_nb, w, elem, 1.0e-10)
+    next_nb = model_nb.rng.random(16)
+
+    monkeypatch.setattr(nk, "HAVE_NUMBA", False)
+    model_np = MccModel(_mcc_settings(), 40.0 * P.MP)
+    v_np = v.copy()
+    result_np = model_np.collide_electrons(x, v_np, w, elem, 1.0e-10)
+    next_np = model_np.rng.random(16)
+
+    assert np.array_equal(v_nb, v_np)
+    assert result_nb.n_coll == result_np.n_coll
+    assert result_nb.n_ionization == result_np.n_ionization
+    for name in ("new_x", "new_elem", "new_w", "new_v_e", "new_v_i"):
+        assert np.array_equal(getattr(result_nb, name), getattr(result_np, name)), name
+    assert np.array_equal(next_nb, next_np)
 
 
 def test_numba_fallback_smoke(monkeypatch):

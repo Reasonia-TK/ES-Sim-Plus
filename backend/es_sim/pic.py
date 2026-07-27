@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -75,12 +76,37 @@ _R_TINY = 1e-30
 # 超過時はマクロ重みを引き上げて粒子数をこの上限に抑える (総電荷は保存)
 FN_MAX_MACROS_PER_STEP = 10000
 
+# 自動スレッド選択でチャンク並列を始める種ごとの粒子数。NumPyフォールバックの
+# 実測では2万粒子/種で4スレッドが逆効果、10万粒子/種で有効だったため、中間の
+# 5万を保守的な開始点にする。Numbaありでも小配列のprange起動コストを避けられる。
+AUTO_THREAD_MIN_PARTICLES = 50000
+# Windowsデスクトップ用途では、粒子カーネルに全論理コアを与えるとUI・WebSocket・
+# BLASと競合しやすい。10万〜50万粒子/種の実測で4より安定して速かった2を
+# 自動選択の上限とし、明示指定なら最大32まで許す。
+AUTO_THREAD_CAP = 2
+
 
 def _walk_pool() -> ThreadPoolExecutor:
     global _WALK_POOL
     if _WALK_POOL is None:
         _WALK_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pic-walk")
     return _WALK_POOL
+
+
+def _effective_thread_count(
+    requested: int, n_particles_per_species: int, cpu_count: int | None = None
+) -> int:
+    """pic.threads の実効値を返す。0は粒子数とCPU数に応じた自動選択。
+
+    明示指定 (1以上) は従来どおりその値を尊重する。自動時だけ、小規模計算の
+    スレッド起動コストと大規模計算の並列効果の両方を考慮する。
+    """
+    if requested > 0:
+        return int(requested)
+    cores = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
+    if n_particles_per_species < AUTO_THREAD_MIN_PARTICLES:
+        return 1
+    return min(AUTO_THREAD_CAP, cores)
 
 
 def _eval_waveform(phase, v, freq_hz: float, t):
@@ -395,12 +421,55 @@ class PicSimulation:
         self._sub = max(1, int(self.pic.ion_subcycle))
         self._f_ion_cache: np.ndarray | None = None
         self._last_ke_i = 0.0  # 休止ステップの KE 診断用 (直近プッシュ時の値を流用)
+        if self._sub > 1:
+            # サブサイクルの実効刻みでイオンがセルを大きく飛び越えると、walk自体は
+            # 複数セルを辿れても電場・軌道の時間離散化が粗くなる。初期熱速度の6σ相当と
+            # 電極電位差による加速エネルギーから保守的な移動量を見積もって警告する。
+            tri_pts = mesh.nodes[self.tris]
+            h_min = float(
+                min(
+                    np.linalg.norm(tri_pts[:, 0] - tri_pts[:, 1], axis=1).min(),
+                    np.linalg.norm(tri_pts[:, 1] - tri_pts[:, 2], axis=1).min(),
+                    np.linalg.norm(tri_pts[:, 2] - tri_pts[:, 0], axis=1).min(),
+                )
+            )
+            v_lo = self.v_dc - np.sum(np.abs(self.rf_amp), axis=1)
+            v_hi = self.v_dc + np.sum(np.abs(self.rf_amp), axis=1)
+            waveform_peak = max(
+                (
+                    float(np.max(np.abs(np.asarray(wf.v, dtype=np.float64))))
+                    for wf in self._waveforms
+                ),
+                default=0.0,
+            )
+            voltage_span = (
+                float(v_hi.max() - v_lo.min()) + 2.0 * waveform_peak
+                if len(v_lo)
+                else 2.0 * waveform_peak
+            )
+            ti_ev = float(ip.ti_ev) if ip is not None else 0.0
+            ion_energy_est_ev = max(0.0, voltage_span + 6.0 * ti_ev)
+            if ion_energy_est_ev > 0.0 and h_min > 0.0:
+                v_i_est = math.sqrt(2.0 * ion_energy_est_ev * QE / self.m_ion)
+                cell_step = v_i_est * self.dt * self._sub / h_min
+                if cell_step > 0.5:
+                    self.warnings.append(
+                        f"イオンサブサイクルの推定移動量が最小セル幅の {cell_step:.2f} 倍 "
+                        f"> 0.5 (ion_subcycle={self._sub}): イオン軌道が粗くなる恐れがあります "
+                        "(ion_subcycle を下げてください)"
+                    )
 
         # ---- 粒子チャンク並列 (prompts/50) ------------------------------------
         # walk 探索を粒子チャンクに分けてスレッド並列化する。粒子ごとの walk は
         # 独立で numpy ufunc は GIL を解放するため実効的。チャンク分割しても
         # 各粒子の演算は不変なので、結果は逐次実行とビット単位で一致する
-        self._nthreads = max(1, int(self.pic.threads))
+        n_particles_per_species = max(
+            [self.pic.n_macro, *(len(sp.x) for sp in self.species.values())]
+        )
+        self._nthreads = _effective_thread_count(
+            int(self.pic.threads), n_particles_per_species
+        )
+        self.effective_threads = self._nthreads
         self._chunk_pool = (
             ThreadPoolExecutor(max_workers=self._nthreads, thread_name_prefix="pic-chunk")
             if self._nthreads > 1
@@ -447,18 +516,24 @@ class PicSimulation:
             # 代表上限 200 eV (シース加速の典型上限) までの ν_max で評価する
             # (実行時の適応 ν_max と同じテーブル。全域 max だと keV 域の断面積で
             # 過大評価になるため)
-            for label, table in (
-                ("電子", self.mcc._nu_e_table),
-                ("イオン", self.mcc._nu_i_table),
+            for label, table, dt_eff in (
+                ("電子", self.mcc._nu_e_table, self.dt),
+                ("イオン", self.mcc._nu_i_table, self.dt * self._sub),
             ):
                 numax = MccModel._numax_upto(table, 200.0)
                 if numax > 0.0:
-                    p_coll = 1.0 - math.exp(-numax * self.dt)
+                    p_coll = 1.0 - math.exp(-numax * dt_eff)
                     if p_coll > 0.5:
+                        sub_note = (
+                            f" (ion_subcycle={self._sub} の実効刻み)"
+                            if label == "イオン" and self._sub > 1
+                            else ""
+                        )
                         self.warnings.append(
-                            f"{label}の1ステップ衝突候補率が {p_coll:.2f} > 0.5 "
-                            "(〜200 eV 域): dt が衝突頻度に対して粗すぎます "
-                            "(dt を小さくするか、ガス場の最大密度を確認してください)"
+                            f"{label}の1回の更新衝突候補率が {p_coll:.2f} > 0.5{sub_note} "
+                            "(〜200 eV 域): 実効時間刻みが衝突頻度に対して粗すぎます "
+                            "(dtまたはion_subcycleを小さくするか、ガス場の最大密度を"
+                            "確認してください)"
                         )
             if gas_field is not None:
                 n_arr = np.asarray(gas_field.n_g, dtype=np.float64)
@@ -493,7 +568,8 @@ class PicSimulation:
         self._accum_start: int | None = None
         self._accum_count = 0
         self._accum: dict[str, np.ndarray] = {}
-        # 時間平均フィールドのアキュムレータ (prompts/26、enable_density_accum で確保)
+        # 時間平均フィールドのアキュムレータ
+        # (prompts/26、平均区間の最初のステップで遅延確保)
         self._accum_phi: np.ndarray | None = None
         self._accum_e: np.ndarray | None = None
         self._accum_ke_e: np.ndarray | None = None
@@ -595,6 +671,7 @@ class PicSimulation:
             "deposit": 0.0,     # 電荷堆積 (節点荷重ベクトルへの散布)
             "mcc": 0.0,         # MCC 衝突 (電子・イオン)
             "other": 0.0,       # 注入・FN放出・時間平均積算・診断記録など
+            "frame": 0.0,       # ライブフレーム用の密度集計・リスト変換
         }
 
         # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ) --------------
@@ -1499,6 +1576,11 @@ class PicSimulation:
             self._accum_start is not None
             and self.step_count + 1 >= self._accum_start
         )
+        if accumulating:
+            # 位相分解配列は大きくなり得るため、平均区間に入るまで確保しない。
+            # MCC 電離イベントがフィールド積算より先に書き込むので、ステップ先頭で
+            # 必ず準備する。
+            self._ensure_accumulators()
 
         # 1. 電荷堆積 → 2. ポアソン求解 (RF 含む V(t) で Dirichlet 更新)
         # 位相別計測 (prompts/75): 堆積とポアソン求解を別フェーズとして計測する
@@ -1771,6 +1853,23 @@ class PicSimulation:
         """
         self._accum_start = int(start_step)
         self._accum_count = 0
+        self._accum = {}
+        self._accum_phi = None
+        self._accum_e = None
+        self._accum_ke_e = None
+        self._accum_ion = None
+        self._cycle_phi = None
+        self._cycle_ne = None
+        self._cycle_ni = None
+        self._cycle_count = None
+        self._cycle_e = None
+        self._cycle_ke = None
+        self._cycle_ion = None
+
+    def _ensure_accumulators(self) -> None:
+        """平均区間に入った時点で診断用配列を一度だけ確保する。"""
+        if self._accum_phi is not None:
+            return
         self._accum = {name: np.zeros(self.n_nodes) for name in self.species}
         self._accum_phi = np.zeros(self.n_nodes)
         self._accum_e = np.zeros((len(self.tris), 2))
@@ -2083,11 +2182,14 @@ class PicSimulation:
             "diag": diag,
         }
 
-    def run_batch(self, callback=None, should_stop=None):
+    def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
         """n_steps 回実行して (診断履歴, フレーム列) を返す (テスト用同期 API)。
 
         callback(frame) は frame_every ステップごとに呼ばれる。
         should_stop() が True を返したら中断する (WS の stop コマンド用)。
+        store_frames=False ならcallbackへは渡すが戻り値のフレーム列には保持しない。
+        WebSocket/バッチ実行は返却フレーム列を使わないため、大規模実行のメモリ増加を
+        避ける目的でFalseを指定する。既定Trueは既存テストAPIとの後方互換用。
         完了時に時間平均フィールドを self.fields へ格納する (averaged_fields()
         の結果。WS の done 送出と検証スクリプトが利用する)。
         """
@@ -2134,8 +2236,11 @@ class PicSimulation:
                 # ステップ開始時刻の位相ビンで、粒子位置 (ステップ終端) を保存する
                 self._snapshot_particles(self.t - self.dt)
             if self.step_count % self.pic.frame_every == 0:
+                t_frame0 = time.perf_counter()
                 frame = self._make_frame(phi)
-                frames.append(frame)
+                self.timing["frame"] += time.perf_counter() - t_frame0
+                if store_frames:
+                    frames.append(frame)
                 if callback is not None:
                     callback(frame)
         self.fields = self.averaged_fields()

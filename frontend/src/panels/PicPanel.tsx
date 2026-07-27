@@ -652,14 +652,17 @@ export default function PicPanel({
         イオンを N ステップに1回 N·dt で押す (1=無効)。5〜10 で高速化、結果は近似
       </p>
       <div className="field">
-        <span className="label">スレッド数</span>
+        <span className="label">スレッド数 (0=自動)</span>
         <CommitNumberInput
-          value={pic.threads ?? 1}
-          onCommit={(v) => onChange({ ...pic, threads: Math.max(1, Math.round(v)) })}
+          value={pic.threads ?? 0}
+          onCommit={(v) => onChange({ ...pic, threads: Math.max(0, Math.round(v)) })}
         />
       </div>
       <p className="hint">
-        walk 探索の並列スレッド数。結果は1と完全一致。CPUコア数程度まで
+        walk探索の並列数。0は粒子数とCPU数から自動選択
+        {started?.effective_threads !== undefined
+          ? ` (前回実行: ${started.effective_threads}スレッド)`
+          : ""}。結果は1と完全一致
       </p>
       <div className="field">
         <span className="label">平均ステップ数 (空欄=最後の25%)</span>
@@ -1045,6 +1048,7 @@ const TIMING_PHASE_LABELS: Record<string, string> = {
   deposit: "電荷デポジット",
   mcc: "MCC衝突",
   other: "その他",
+  frame: "ライブフレーム生成",
 };
 
 // PIC: 実行時間内訳。done メッセージの timing を値の大きい順に「名称 / 秒 / %」で表示する

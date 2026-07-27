@@ -32,9 +32,10 @@
 ## 必要環境
 
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (Python依存関係・仮想環境の管理)
 - Node.js 20+
 - Rust(stable。[rustup](https://rustup.rs/) で導入。Tauri のビルドに必要)
-- (GPUオプション)NVIDIA GPU + CUDA 12.x → `pip install -e ".[gpu]"`
+- (GPUオプション)NVIDIA GPU + CUDA 12.x → `uv sync --extra gpu`
 
 ## セットアップと起動
 
@@ -44,16 +45,16 @@
 
 ```powershell
 cd backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e ".[dev]"
-uvicorn es_sim.server:app --port 8317
+uv sync --extra dev
+.venv\Scripts\python -c "from es_sim import _numba_kernels as k; assert k.HAVE_NUMBA, 'Numba JIT が無効です'"
+.venv\Scripts\python -m uvicorn es_sim.server:app --port 8317
 ```
 
 テスト(解析解・ベンチマークとの比較):
 
 ```powershell
-python -m pytest tests/
+.venv\Scripts\python -m pytest tests/
+.venv\Scripts\python benchmarks\pic_bench.py --require-numba
 ```
 
 ### 2. フロントエンド(別ターミナル)
@@ -86,8 +87,9 @@ python -m es_sim.batch run case1.json case2.json ... --parallel 2 --out out_dir
 ```
 
 出力は各入力ファイル名に `_results` を付けたJSON(既定。`--suffix` で変更可)。
-合計スレッド数(`--parallel` × 各ケースの `pic.threads`)がCPUコア数を超えないよう
-`--parallel` を調整すること。
+`pic.threads: 0` は粒子数とCPU数から自動選択される。複数ケースを並列実行する場合は、
+合計実効スレッド数(`--parallel` × 各ケースの実効スレッド数)がCPUコア数を超えないよう
+`--parallel` または `pic.threads` を調整すること。
 
 ## examples/ のサンプルプロジェクト
 

@@ -23,6 +23,7 @@ body { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); co
 .toolbar .spacer { flex: 1; }
 .toolbar .status { font-size: 12px; color: var(--muted); }
 .toolbar .status.ok { color: #6fd08c; }
+.toolbar .status.warn { color: #e0b050; }
 .toolbar .status.ng { color: #e07070; }
 .toolbar .port-field { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
 .toolbar .port-input {

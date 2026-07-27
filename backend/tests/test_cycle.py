@@ -32,6 +32,35 @@ def _rf_project(pic: dict, with_rf: bool = True) -> Project:
     )
 
 
+# ---- 0. 診断配列の遅延確保 -------------------------------------------------------
+
+
+def test_accumulators_are_allocated_only_when_average_window_starts():
+    sim = PicSimulation(
+        _rf_project(
+            {
+                "dt": 1e-9,
+                "n_steps": 3,
+                "n_macro": 10,
+                "frame_every": 3,
+                "phase_bins": 8,
+            }
+        )
+    )
+    sim.enable_density_accum(start_step=3)
+
+    assert sim._accum_phi is None
+    assert sim._cycle_phi is None
+    sim.step()
+    sim.step()
+    assert sim._accum_phi is None
+    assert sim._cycle_phi is None
+
+    sim.step()
+    assert sim._accum_phi is not None
+    assert sim._cycle_phi is not None
+
+
 # ---- 1. 寸法・period_s・φ の位相依存 --------------------------------------------
 
 

@@ -320,8 +320,8 @@ export interface PicSettings {
   // イオンサブサイクリング (prompts/50)。イオンを N ステップに1回、実効刻み N·dt で押す。
   // 省略/undefined = 1 (無効、従来経路とビット単位で一致)
   ion_subcycle?: number;
-  // 粒子チャンク並列のスレッド数 (prompts/50)。walk 探索を threads 分割して並列実行する。
-  // 結果は threads の値によらずビット単位で一致。省略/undefined = 1 (逐次)
+  // 粒子チャンク並列のスレッド数 (prompts/50)。0=粒子数・CPU数から自動選択。
+  // 結果は threads の値によらずビット単位で一致。省略/undefined = backend既定の自動選択
   threads?: number;
   // 粒子マージ (高速化③、prompts/77)。null/undefined = 無効 (既定)
   merge?: PicMerge | null;
@@ -395,6 +395,8 @@ export interface PicStartedMsg {
   type: "started";
   dt: number;
   n_steps: number;
+  // backendが実際に粒子カーネルへ割り当てたスレッド数。旧backendでは省略
+  effective_threads?: number;
   // 区間開始時の通算ステップ (continue では前回までの累計)。frame.step が通算で進むため、
   // 進捗率は (step - step_offset)/n_steps で計算する。旧バックエンドには無いので optional
   step_offset?: number;

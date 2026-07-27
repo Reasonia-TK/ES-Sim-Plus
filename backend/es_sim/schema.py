@@ -423,8 +423,9 @@ class PicSettings(BaseModel):
     # 休止ステップ中はイオンの電荷堆積をキャッシュして再利用する。1 = 無効 (従来と完全一致)
     ion_subcycle: int = Field(1, ge=1)
     # 粒子処理 (walk 探索) のワーカースレッド数 (prompts/50)。粒子ごとの walk は独立な
-    # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。1 = 従来経路
-    threads: int = Field(1, ge=1, le=32)
+    # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。
+    # 0 = 粒子数・CPU数から自動選択、1 = 逐次、2以上 = 明示並列
+    threads: int = Field(0, ge=0, le=32)
     # 粒子マージ (高速化③、prompts/77)。null = 無効 (既定。マージ関連の処理・乱数消費が
     # 一切発生せず、従来経路と完全一致する)
     merge: PicMerge | None = None
