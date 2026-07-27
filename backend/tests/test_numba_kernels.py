@@ -289,14 +289,16 @@ def test_fused_gather_push_walk_matches_separate_kernels():
     assert np.array_equal(vdot_sep, vdot_fused)
     assert np.array_equal(e_sep, e_fused)
     assert np.array_equal(a_sep, a_fused)
-    assert np.array_equal(be_sep, be_fused)
-    assert np.array_equal(bl_sep, bl_fused)
+    assert np.array_equal(be_sep[a_sep], be_fused[a_fused])
+    assert np.array_equal(bl_sep[a_sep], bl_fused[a_fused])
     assert np.array_equal(l_sep[~a_sep], l_fused[~a_fused])
     for expected, actual in zip(
-        (v_fused, x_fused, vdot_fused, e_fused, a_fused, be_fused, bl_fused),
-        buffered[:7],
+        (v_fused, x_fused, vdot_fused, e_fused, a_fused),
+        buffered[:5],
     ):
         assert np.array_equal(expected, actual)
+    assert np.array_equal(be_fused[a_fused], buffered[5][buffered[4]])
+    assert np.array_equal(bl_fused[a_fused], buffered[6][buffered[4]])
     assert np.array_equal(l_fused[~a_fused], buffered[7][~buffered[4]])
     assert 0 < int(a_sep.sum()) < n
 

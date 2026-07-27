@@ -293,10 +293,11 @@ if HAVE_NUMBA:
 
             out_elem[p] = e
             out_absorbed[p] = absorbed
-            out_b_elem[p] = b_elem
-            out_b_loc[p] = b_loc
-            # absorbed行は従来どおり未定義のままにする。
-            if not absorbed:
+            # 境界情報は absorbed=True の行だけで定義される。
+            if absorbed:
+                out_b_elem[p] = b_elem
+                out_b_loc[p] = b_loc
+            else:
                 out_l[p, 0] = l0
                 out_l[p, 1] = l1
                 out_l[p, 2] = l2
@@ -906,7 +907,8 @@ def gather_push_walk(
 
     中間のx_newを別カーネルへ渡す処理とwalk用の重複バッファをなくす。返却値は
     gather_push と walk_step の結果を連結した
-    (v_new, x_new, vdot, elem, absorbed, b_elem, b_loc, bary)。
+    (v_new, x_new, vdot, elem, absorbed, b_elem, b_loc, bary)。境界要素番号と
+    局所辺番号は absorbed=True の行だけで定義される。
     """
     n = len(x)
     if out is None:
