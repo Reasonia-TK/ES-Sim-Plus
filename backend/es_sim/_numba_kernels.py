@@ -55,6 +55,9 @@ _MAX_WALK_ITERS = 64
 _TOL = 1e-9
 # pic.py の軸上ゼロ割ガードと同じ値。変更時は両方を合わせること。
 _R_TINY = 1e-30
+# MCC候補選択のprange起動コストを回収できる候補数。2万粒子級では直列版が
+# 速く、10万粒子級では並列版が有効になるため、その間を保守的な閾値とする。
+_MCC_PARALLEL_MIN_CANDIDATES = 32_768
 
 
 def set_num_threads(n: int) -> None:
@@ -468,6 +471,52 @@ if HAVE_NUMBA:
                     break
         return out
 
+    @njit(inline="always")
+    def _mcc_select_velocity_one(
+        v,
+        cand,
+        energy_scale,
+        charge_ev,
+        numax,
+        n_ref,
+        rel_elem,
+        elem,
+        use_rel,
+        e_table,
+        s_table,
+        lengths,
+        random_u,
+        out_proc,
+        out_energy,
+        out_speed,
+        k,
+    ):
+        """候補1粒子の速度・エネルギー評価とプロセス選択を行う。"""
+        n_procs = lengths.shape[0]
+        i = cand[k]
+        v0 = v[i, 0]
+        v1 = v[i, 1]
+        v2 = v[i, 2]
+        speed2 = (v0 * v0 + v1 * v1) + v2 * v2
+        speed = np.sqrt(speed2)
+        e_ev = (energy_scale * speed * speed) / charge_ev
+        out_speed[k] = speed
+        out_energy[k] = e_ev
+
+        target = random_u[k] * numax
+        cumulative = 0.0
+        density_scale = rel_elem[elem[i]] if use_rel else 1.0
+        selected = -1
+        for j in range(n_procs):
+            sigma = _interp_packed_table(
+                e_ev, e_table[j], s_table[j], lengths[j]
+            )
+            cumulative += (n_ref * sigma * speed) * density_scale
+            if target < cumulative:
+                selected = j
+                break
+        out_proc[k] = selected
+
     @njit(cache=True, nogil=True)
     def _mcc_select_velocity_kernel(
         v,
@@ -487,33 +536,69 @@ if HAVE_NUMBA:
         out_energy,
         out_speed,
     ):
-        """候補電子の速度→エネルギー→プロセス選択を1ループで処理する。"""
+        """小～中規模候補をスレッド起動なしの1ループで選択する。"""
         n = cand.shape[0]
-        n_procs = lengths.shape[0]
         for k in range(n):
-            i = cand[k]
-            v0 = v[i, 0]
-            v1 = v[i, 1]
-            v2 = v[i, 2]
-            speed2 = (v0 * v0 + v1 * v1) + v2 * v2
-            speed = np.sqrt(speed2)
-            e_ev = (energy_scale * speed * speed) / charge_ev
-            out_speed[k] = speed
-            out_energy[k] = e_ev
+            _mcc_select_velocity_one(
+                v,
+                cand,
+                energy_scale,
+                charge_ev,
+                numax,
+                n_ref,
+                rel_elem,
+                elem,
+                use_rel,
+                e_table,
+                s_table,
+                lengths,
+                random_u,
+                out_proc,
+                out_energy,
+                out_speed,
+                k,
+            )
 
-            target = random_u[k] * numax
-            cumulative = 0.0
-            density_scale = rel_elem[elem[i]] if use_rel else 1.0
-            selected = -1
-            for j in range(n_procs):
-                sigma = _interp_packed_table(
-                    e_ev, e_table[j], s_table[j], lengths[j]
-                )
-                cumulative += (n_ref * sigma * speed) * density_scale
-                if target < cumulative:
-                    selected = j
-                    break
-            out_proc[k] = selected
+    @njit(cache=True, nogil=True, parallel=True)
+    def _mcc_select_velocity_parallel_kernel(
+        v,
+        cand,
+        energy_scale,
+        charge_ev,
+        numax,
+        n_ref,
+        rel_elem,
+        elem,
+        use_rel,
+        e_table,
+        s_table,
+        lengths,
+        random_u,
+        out_proc,
+        out_energy,
+        out_speed,
+    ):
+        """大規模候補を粒子ごとに独立なprangeで選択する。"""
+        for k in prange(cand.shape[0]):
+            _mcc_select_velocity_one(
+                v,
+                cand,
+                energy_scale,
+                charge_ev,
+                numax,
+                n_ref,
+                rel_elem,
+                elem,
+                use_rel,
+                e_table,
+                s_table,
+                lengths,
+                random_u,
+                out_proc,
+                out_energy,
+                out_speed,
+                k,
+            )
 
     @njit(cache=True, nogil=True)
     def _mcc_group_process_positions_kernel(
@@ -954,7 +1039,12 @@ def mcc_select_velocity(
     use_rel = rel_elem is not None and elem is not None
     rel_arr = np.empty(0, dtype=np.float64) if rel_elem is None else rel_elem
     elem_arr = np.empty(0, dtype=np.int64) if elem is None else elem
-    _mcc_select_velocity_kernel(
+    kernel = (
+        _mcc_select_velocity_parallel_kernel
+        if n >= _MCC_PARALLEL_MIN_CANDIDATES and numba.get_num_threads() > 1
+        else _mcc_select_velocity_kernel
+    )
+    kernel(
         np.ascontiguousarray(v),
         np.ascontiguousarray(cand),
         0.5 * float(m),

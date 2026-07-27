@@ -503,6 +503,49 @@ def test_mcc_group_process_positions_matches_masks():
         assert np.array_equal(expected, actual)
 
 
+@requires_numba
+def test_mcc_select_velocity_parallel_matches_serial():
+    """大規模候補のprange経路が直列JITとビット単位で一致する。"""
+    if nk.numba.config.NUMBA_NUM_THREADS < 2:
+        pytest.skip("Numbaの利用可能スレッドが1本のみ")
+
+    rng = np.random.default_rng(764)
+    n = 50_000
+    n_cand = 40_000
+    v = rng.normal(0.0, 2.0e6, size=(n, 3))
+    cand = rng.choice(n, size=n_cand, replace=False).astype(np.int64)
+    random_u = rng.random(n_cand)
+    e_table = np.array([[0.0, 20.0, 1000.0], [15.8, 30.0, 1000.0]])
+    s_table = np.array([[1e-19, 8e-20, 5e-20], [0.0, 3e-20, 2e-20]])
+    lengths = np.array([3, 3], dtype=np.int64)
+    args = (
+        v,
+        cand,
+        P.ME,
+        P.QE,
+        4.0e10,
+        1.0e22,
+        None,
+        None,
+        e_table,
+        s_table,
+        lengths,
+        random_u,
+    )
+
+    previous_threads = nk.numba.get_num_threads()
+    try:
+        nk.set_num_threads(1)
+        serial = nk.mcc_select_velocity(*args)
+        nk.set_num_threads(min(4, nk.numba.config.NUMBA_NUM_THREADS))
+        parallel = nk.mcc_select_velocity(*args)
+    finally:
+        nk.set_num_threads(previous_threads)
+
+    for expected, actual in zip(serial, parallel):
+        assert np.array_equal(expected, actual)
+
+
 def test_numba_fallback_smoke(monkeypatch):
     """HAVE_NUMBA=False を強制すると、_walk_step が numpy 実装へフォールバックすること。
 
