@@ -707,6 +707,24 @@ export default function App() {
   });
 
   // スイープ開始: SweepPanel で組み立てたパス・値リスト・並列数を送信する
+  // スイープ対象パスの終端キーを送信前に実体化する。see_gamma のような省略可能
+  // フィールドはプロジェクト JSON にキー自体が無いことがあり、そのままだと backend の
+  // set_by_path (厳格: 不在パスはエラー) が全ケース失敗するため、親が存在する場合に
+  // 限り数値 0 で終端キーを補う (既に数値があれば何もしない)
+  const ensureSweepPath = (obj: unknown, path: string) => {
+    const toks = path.split(".");
+    let cur: unknown = obj;
+    for (const tok of toks.slice(0, -1)) {
+      if (cur == null) return;
+      cur = Array.isArray(cur) ? cur[Number(tok)] : (cur as Record<string, unknown>)[tok];
+    }
+    const last = toks[toks.length - 1];
+    if (cur != null && typeof cur === "object" && !Array.isArray(cur)) {
+      const rec = cur as Record<string, unknown>;
+      if (typeof rec[last] !== "number") rec[last] = 0;
+    }
+  };
+
   const runSweepStart = (paramPath: string, values: number[], parallel: number) => {
     setSweepError(null);
     setSweepStarted(null);
@@ -715,7 +733,10 @@ export default function App() {
     setSweepRunning(true);
     const client = new SweepClient(makeSweepCallbacks());
     sweepClientRef.current = client;
-    client.start(projectForSweep, paramPath, values, parallel);
+    // 深いコピーに対して終端キーを実体化してから送る (元の project state は汚さない)
+    const proj = JSON.parse(JSON.stringify(projectForSweep)) as typeof projectForSweep;
+    ensureSweepPath(proj, paramPath);
+    client.start(proj, paramPath, values, parallel);
   };
 
   const runSweepStop = () => {

@@ -41,6 +41,9 @@ export function buildSweepCandidates(project: Project): Candidate[] {
     if (b.type !== "dirichlet") return;
     const edgeLabel = b.edges.length > 0 ? edgeLabels[b.edges[0]] ?? `辺${b.edges[0]}` : `境界${i}`;
     candidates.push({ label: `${edgeLabel} 電圧`, path: `geometry.boundaries.${i}.voltage` });
+    // 二次電子放出係数 γ。未設定 (キー不在) でも App 側の runSweepStart が送信前に
+    // 現在値 (無ければ 0) で終端キーを実体化するため、常に候補に出して良い
+    candidates.push({ label: `${edgeLabel} 二次電子放出γ`, path: `geometry.boundaries.${i}.see_gamma` });
     const rf = b.voltage_rf;
     if (rf) {
       const isArray = Array.isArray(rf);
@@ -59,6 +62,7 @@ export function buildSweepCandidates(project: Project): Candidate[] {
   project.geometry.regions.forEach((r, i) => {
     if (r.type !== "conductor") return;
     candidates.push({ label: `領域${r.id} 電圧`, path: `geometry.regions.${i}.voltage` });
+    candidates.push({ label: `領域${r.id} 二次電子放出γ`, path: `geometry.regions.${i}.see_gamma` });
   });
 
   if (project.b_field) {
@@ -73,6 +77,7 @@ export function buildSweepCandidates(project: Project): Candidate[] {
 
   if (project.pic) {
     candidates.push({ label: "PIC マクロ粒子数", path: "pic.n_macro" });
+    candidates.push({ label: "SEE初期エネルギー [eV]", path: "pic.see_energy_ev" });
     // dt が null (自動推定) の間は終端が数値ではないため set_by_path が必ずエラーになる。
     // まず PIC 設定 (スタディ「PIC-MCC」) で明示的な dt を指定してもらう必要がある
     if (project.pic.dt != null) {
