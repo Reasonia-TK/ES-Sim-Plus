@@ -516,9 +516,41 @@ if HAVE_NUMBA:
             out_proc[k] = selected
 
     @njit(cache=True, nogil=True)
+    def _mcc_group_process_positions_kernel(
+        proc_idx, energy, thresholds, use_threshold,
+    ):
+        """実衝突候補位置をプロセス別・元順序の連続領域へまとめる。"""
+        n_procs = thresholds.shape[0]
+        counts = np.zeros(n_procs, dtype=np.int64)
+        for k in range(proc_idx.shape[0]):
+            j = proc_idx[k]
+            if j < 0:
+                continue
+            if use_threshold[j] and energy[k] < thresholds[j]:
+                continue
+            counts[j] += 1
+
+        offsets = np.empty(n_procs + 1, dtype=np.int64)
+        offsets[0] = 0
+        for j in range(n_procs):
+            offsets[j + 1] = offsets[j] + counts[j]
+        positions = np.empty(offsets[n_procs], dtype=np.int64)
+        cursor = offsets[:-1].copy()
+        for k in range(proc_idx.shape[0]):
+            j = proc_idx[k]
+            if j < 0:
+                continue
+            if use_threshold[j] and energy[k] < thresholds[j]:
+                continue
+            positions[cursor[j]] = k
+            cursor[j] += 1
+        return positions, offsets
+
+    @njit(cache=True, nogil=True)
     def _mcc_scatter_electrons_kernel(
         v,
-        sub,
+        cand,
+        selected,
         e_ev,
         speed,
         direction,
@@ -530,24 +562,25 @@ if HAVE_NUMBA:
         electron_mass,
     ):
         """選択済み電子衝突の速度更新をin-placeで行う。"""
-        n = sub.shape[0]
+        n = selected.shape[0]
         for k in range(n):
-            i = sub[k]
+            pos = selected[k]
+            i = cand[pos]
             d0 = direction[k, 0]
             d1 = direction[k, 1]
             d2 = direction[k, 2]
             if kind == 0:  # elastic
                 cos_chi = (
-                    (v[i, 0] / speed[k]) * d0
-                    + (v[i, 1] / speed[k]) * d1
-                ) + (v[i, 2] / speed[k]) * d2
-                e_new = e_ev[k] * (
+                    (v[i, 0] / speed[pos]) * d0
+                    + (v[i, 1] / speed[pos]) * d1
+                ) + (v[i, 2] / speed[pos]) * d2
+                e_new = e_ev[pos] * (
                     1.0 - 2.0 * mass_ratio * (1.0 - cos_chi)
                 )
                 if e_new < 0.0:
                     e_new = 0.0
             elif kind == 1:  # excitation
-                e_new = e_ev[k] - threshold_ev
+                e_new = e_ev[pos] - threshold_ev
             else:  # ionization
                 e_new = scatter_energy[k]
             speed_new = np.sqrt(2.0 * e_new * charge_ev / electron_mass)
@@ -557,21 +590,31 @@ if HAVE_NUMBA:
 
     @njit(cache=True, nogil=True)
     def _mcc_scatter_ions_kernel(
-        v, sub, vi, vg, g_mag, direction, backscat
+        v, cand, selected, vi, vg, g_mag, direction, backscat
     ):
         """選択済みイオン衝突の速度更新をin-placeで行う。"""
-        n = sub.shape[0]
+        n = selected.shape[0]
         for k in range(n):
-            i = sub[k]
+            pos = selected[k]
+            i = cand[pos]
             if backscat:
-                v[i, 0] = vg[k, 0]
-                v[i, 1] = vg[k, 1]
-                v[i, 2] = vg[k, 2]
+                v[i, 0] = vg[pos, 0]
+                v[i, 1] = vg[pos, 1]
+                v[i, 2] = vg[pos, 2]
             else:
-                half_g = 0.5 * g_mag[k]
-                v[i, 0] = 0.5 * (vi[k, 0] + vg[k, 0]) + half_g * direction[k, 0]
-                v[i, 1] = 0.5 * (vi[k, 1] + vg[k, 1]) + half_g * direction[k, 1]
-                v[i, 2] = 0.5 * (vi[k, 2] + vg[k, 2]) + half_g * direction[k, 2]
+                half_g = 0.5 * g_mag[pos]
+                v[i, 0] = (
+                    0.5 * (vi[pos, 0] + vg[pos, 0])
+                    + half_g * direction[k, 0]
+                )
+                v[i, 1] = (
+                    0.5 * (vi[pos, 1] + vg[pos, 1])
+                    + half_g * direction[k, 1]
+                )
+                v[i, 2] = (
+                    0.5 * (vi[pos, 2] + vg[pos, 2])
+                    + half_g * direction[k, 2]
+                )
 
     @njit(cache=True, nogil=True)
     def _mcc_iso_dir_kernel(random_cos, random_phi, out):
@@ -934,7 +977,8 @@ def mcc_select_velocity(
 
 def mcc_scatter_electrons(
     v: np.ndarray,
-    sub: np.ndarray,
+    cand: np.ndarray,
+    selected: np.ndarray,
     e_ev: np.ndarray,
     speed: np.ndarray,
     direction: np.ndarray,
@@ -953,7 +997,8 @@ def mcc_scatter_electrons(
     )
     _mcc_scatter_electrons_kernel(
         v,
-        np.ascontiguousarray(sub),
+        np.ascontiguousarray(cand),
+        np.ascontiguousarray(selected),
         np.ascontiguousarray(e_ev),
         np.ascontiguousarray(speed),
         np.ascontiguousarray(direction),
@@ -968,7 +1013,8 @@ def mcc_scatter_electrons(
 
 def mcc_scatter_ions(
     v: np.ndarray,
-    sub: np.ndarray,
+    cand: np.ndarray,
+    selected: np.ndarray,
     vi: np.ndarray,
     vg: np.ndarray,
     g_mag: np.ndarray,
@@ -983,7 +1029,8 @@ def mcc_scatter_ions(
     )
     _mcc_scatter_ions_kernel(
         v,
-        np.ascontiguousarray(sub),
+        np.ascontiguousarray(cand),
+        np.ascontiguousarray(selected),
         np.ascontiguousarray(vi),
         np.ascontiguousarray(vg),
         np.ascontiguousarray(g_mag),
@@ -1001,6 +1048,21 @@ def mcc_iso_dir(random_cos: np.ndarray, random_phi: np.ndarray) -> np.ndarray:
         out,
     )
     return out
+
+
+def mcc_group_process_positions(
+    proc_idx: np.ndarray,
+    energy: np.ndarray,
+    thresholds: np.ndarray,
+    use_threshold: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """実衝突候補の位置をプロセス別に安定順序でまとめる。"""
+    return _mcc_group_process_positions_kernel(
+        np.ascontiguousarray(proc_idx),
+        np.ascontiguousarray(energy),
+        np.ascontiguousarray(thresholds),
+        np.ascontiguousarray(use_threshold),
+    )
 
 
 def mcc_candidates(random_u: np.ndarray, probability: float) -> np.ndarray:

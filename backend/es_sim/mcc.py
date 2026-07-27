@@ -128,6 +128,17 @@ class MccModel:
         # 右側ゼロ詰めの2D配列へまとめる。lengthsまで渡すので補間範囲は元表と同じ。
         self._e_xs_pack = self._pack_proc_tables(self.e_procs)
         self._i_xs_pack = self._pack_proc_tables(self.i_procs)
+        self._e_thresholds = np.asarray(
+            [p.threshold_ev for p in self.e_procs], dtype=np.float64
+        )
+        self._e_use_threshold = np.asarray(
+            [p.kind in ("excitation", "ionization") for p in self.e_procs],
+            dtype=np.bool_,
+        )
+        self._i_thresholds = np.asarray(
+            [p.threshold_ev for p in self.i_procs], dtype=np.float64
+        )
+        self._i_use_threshold = np.zeros(len(self.i_procs), dtype=np.bool_)
         self._nu_e_table = self._nu_table(self.e_procs, ME)
         # com 系ではテーブルの E は重心系エネルギーなので、相対速度 g = √(2E/μ) で ν を評価
         m_ref = self.mu if self.ion_energy_frame == "com" else m_ion
@@ -342,23 +353,35 @@ class MccModel:
         new_ve: list[np.ndarray] = []
         new_vi: list[np.ndarray] = []
 
+        if _numba_kernels.HAVE_NUMBA:
+            grouped, offsets = _numba_kernels.mcc_group_process_positions(
+                proc_idx,
+                e_ev,
+                self._e_thresholds,
+                self._e_use_threshold,
+            )
         for j, p in enumerate(self.e_procs):
-            mask = proc_idx == j
-            if p.kind in ("excitation", "ionization"):
-                mask &= e_ev >= p.threshold_ev  # 閾値未満は null 扱い (通常 σ=0 で選ばれない)
-            k = int(mask.sum())
+            if _numba_kernels.HAVE_NUMBA:
+                selected = grouped[offsets[j] : offsets[j + 1]]
+                k = len(selected)
+            else:
+                mask = proc_idx == j
+                if p.kind in ("excitation", "ionization"):
+                    # 閾値未満はnull扱い (通常はσ=0なので選ばれない)。
+                    mask &= e_ev >= p.threshold_ev
+                k = int(mask.sum())
             if k == 0:
                 continue
-            sub = cand[mask]
             d_new = self._iso_dir(k)  # 3D 等方散乱: cosχ 一様・方位角一様
             if p.kind == "elastic":
                 # 散乱角 χ = 旧方向と新方向のなす角。ΔE = 2(m/M)(1−cosχ)E
                 if _numba_kernels.HAVE_NUMBA:
                     _numba_kernels.mcc_scatter_electrons(
                         v,
-                        sub,
-                        e_ev[mask],
-                        speed[mask],
+                        cand,
+                        selected,
+                        e_ev,
+                        speed,
                         d_new,
                         0,
                         p.threshold_ev,
@@ -368,6 +391,7 @@ class MccModel:
                         ME,
                     )
                 else:
+                    sub = cand[mask]
                     d_old = v[sub] / speed[mask][:, None]
                     cos_chi = np.sum(d_old * d_new, axis=1)
                     e_new = np.maximum(
@@ -380,9 +404,10 @@ class MccModel:
                 if _numba_kernels.HAVE_NUMBA:
                     _numba_kernels.mcc_scatter_electrons(
                         v,
-                        sub,
-                        e_ev[mask],
-                        speed[mask],
+                        cand,
+                        selected,
+                        e_ev,
+                        speed,
                         d_new,
                         1,
                         p.threshold_ev,
@@ -392,12 +417,19 @@ class MccModel:
                         ME,
                     )
                 else:
+                    sub = cand[mask]
                     e_new = e_ev[mask] - p.threshold_ev
                     v[sub] = np.sqrt(2.0 * e_new * QE / ME)[:, None] * d_new
             else:  # ionization
                 # 余剰 E − 閾値 を散乱電子/放出電子に分配 (両者 3D 等方)。
                 # "half": 等分 (Turner ベンチマーク互換、既定) / "random": 一様乱数比
-                excess = e_ev[mask] - p.threshold_ev
+                if _numba_kernels.HAVE_NUMBA:
+                    selected_energy = e_ev[selected]
+                    sub = cand[selected]
+                else:
+                    selected_energy = e_ev[mask]
+                    sub = cand[mask]
+                excess = selected_energy - p.threshold_ev
                 if self.ionization_split == "half":
                     e_scat = 0.5 * excess
                 else:
@@ -406,9 +438,10 @@ class MccModel:
                 if _numba_kernels.HAVE_NUMBA:
                     _numba_kernels.mcc_scatter_electrons(
                         v,
-                        sub,
-                        e_ev[mask],
-                        speed[mask],
+                        cand,
+                        selected,
+                        e_ev,
+                        speed,
                         d_new,
                         2,
                         p.threshold_ev,
@@ -506,39 +539,53 @@ class MccModel:
         rel = self._rel[elem[cand]] if (self._rel is not None and elem is not None) else None
         proc_idx = self._choose_process(e_ref, s_ref, numax, self.i_procs, rel)
         n_coll = 0
+        if _numba_kernels.HAVE_NUMBA:
+            grouped, offsets = _numba_kernels.mcc_group_process_positions(
+                proc_idx,
+                e_ref,
+                self._i_thresholds,
+                self._i_use_threshold,
+            )
         for j, p in enumerate(self.i_procs):
-            mask = proc_idx == j
-            k = int(mask.sum())
+            if _numba_kernels.HAVE_NUMBA:
+                selected = grouped[offsets[j] : offsets[j + 1]]
+                k = len(selected)
+            else:
+                mask = proc_idx == j
+                k = int(mask.sum())
             if k == 0:
                 continue
-            sub = cand[mask]
             if p.kind == "backscat":
                 # 電荷交換: イオン速度をガス原子の速度で置き換える
                 if _numba_kernels.HAVE_NUMBA:
                     _numba_kernels.mcc_scatter_ions(
                         v,
-                        sub,
-                        vi[mask],
-                        vg[mask],
-                        g_mag[mask],
+                        cand,
+                        selected,
+                        vi,
+                        vg,
+                        g_mag,
                         None,
                         True,
                     )
                 else:
+                    sub = cand[mask]
                     v[sub] = vg[mask]
             else:  # isotropic: 等質量弾性衝突、COM 系 3D 等方散乱 (|g| 保存)
                 direction = self._iso_dir(k)
                 if _numba_kernels.HAVE_NUMBA:
                     _numba_kernels.mcc_scatter_ions(
                         v,
-                        sub,
-                        vi[mask],
-                        vg[mask],
-                        g_mag[mask],
+                        cand,
+                        selected,
+                        vi,
+                        vg,
+                        g_mag,
                         direction,
                         False,
                     )
                 else:
+                    sub = cand[mask]
                     v_com = 0.5 * (vi[mask] + vg[mask])
                     v[sub] = v_com + 0.5 * g_mag[mask][:, None] * direction
             n_coll += k

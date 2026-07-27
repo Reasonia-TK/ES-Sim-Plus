@@ -482,6 +482,27 @@ def test_mcc_max_speed_squared_matches_numpy():
     assert np.isnan(nk.mcc_max_speed_squared(v))
 
 
+@requires_numba
+def test_mcc_group_process_positions_matches_masks():
+    """プロセス別JIT選別が閾値付きブールマスクの順序・件数と一致する。"""
+    rng = np.random.default_rng(763)
+    proc_idx = rng.integers(-1, 4, size=30_000, dtype=np.int64)
+    energy = rng.uniform(0.0, 40.0, size=len(proc_idx))
+    thresholds = np.array([0.0, 11.5, 15.8, 0.0])
+    use_threshold = np.array([False, True, True, False])
+
+    grouped, offsets = nk.mcc_group_process_positions(
+        proc_idx, energy, thresholds, use_threshold
+    )
+    for j in range(len(thresholds)):
+        mask = proc_idx == j
+        if use_threshold[j]:
+            mask &= energy >= thresholds[j]
+        expected = np.nonzero(mask)[0]
+        actual = grouped[offsets[j] : offsets[j + 1]]
+        assert np.array_equal(expected, actual)
+
+
 def test_numba_fallback_smoke(monkeypatch):
     """HAVE_NUMBA=False を強制すると、_walk_step が numpy 実装へフォールバックすること。
 
