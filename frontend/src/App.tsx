@@ -293,6 +293,10 @@ export default function App() {
   // Mesh ボタン (解析なしでメッシュ生成のみ) の結果。Solve 結果とは独立に保持する
   const [meshResult, setMeshResult] = useState<MeshResult | null>(null);
   const [showMesh, setShowMesh] = useState(false);
+  // キャンバスオーバーレイの表示切替 (ツールバーの表示トグル群)。コレクタ・ガス境界は
+  // 配置済みでも常時表示だと混み合うため、個別に消せるようにする (既定は表示)
+  const [showCollectors, setShowCollectors] = useState(true);
+  const [showGasBoundaries, setShowGasBoundaries] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -2109,6 +2113,14 @@ export default function App() {
             </label>
             {/* 表示 (電位V/|E|)・等電位線・ベクトルの切替は「静電場結果」インスペクタページへ
                 集約済みのため、ツールバーからは撤去した (二重配置の解消、prompts/69 の続き) */}
+            <div className="sep" />
+            {/* キャンバスオーバーレイの表示切替群。メッシュ/エミッタは既存 state
+                (FieldPanel の solve セクション・ParticlePanel のトグルと共有) */}
+            <span className="field-view-label">表示</span>
+            <Toggle label="メッシュ" checked={showMesh} onChange={setShowMesh} />
+            <Toggle label="エミッタ" checked={showEmitter} onChange={setShowEmitter} />
+            <Toggle label="コレクタ" checked={showCollectors} onChange={setShowCollectors} />
+            <Toggle label="ガス境界" checked={showGasBoundaries} onChange={setShowGasBoundaries} />
           </div>
 
           <CadCanvas
@@ -2125,7 +2137,7 @@ export default function App() {
             showIsolines={showIsolines}
             showVectors={showVectors}
             profileLine={profileLine}
-            collectors={collectorsList}
+            collectors={showCollectors ? collectorsList : []}
             selectedCollectorIndex={selectedCollectorIndex}
             emitter={showEmitter ? particles.emitter : null}
             traceResult={traceResult}
@@ -2133,7 +2145,7 @@ export default function App() {
             picFrame={onGasNode ? null : picLiveFrame}
             picFieldView={finalPicFieldView}
             gasParticles={gasRunning && gasShowParticles ? gasLiveParticles : null}
-            gasBoundaries={gasBoundariesList}
+            gasBoundaries={showGasBoundaries ? gasBoundariesList : []}
             onSelectRegion={selectRegionFromCanvas}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}
