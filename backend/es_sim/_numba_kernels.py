@@ -603,6 +603,21 @@ if HAVE_NUMBA:
                 pos += 1
         return out
 
+    @njit(cache=True, nogil=True)
+    def _mcc_max_speed_squared_kernel(v):
+        """3速度成分の二乗和の最大値を一時配列なしで求める。"""
+        maximum = 0.0
+        for i in range(v.shape[0]):
+            speed2 = (
+                v[i, 0] * v[i, 0] + v[i, 1] * v[i, 1]
+            ) + v[i, 2] * v[i, 2]
+            # np.maxと同じく、入力にNaNがあればNaNを返す。
+            if np.isnan(speed2):
+                return speed2
+            if speed2 > maximum:
+                maximum = speed2
+        return maximum
+
 
 def walk_step(coeffs, adjacency, elem0, x_new, l_out=None, packed=None):
     """particles._walk_step_numpy の numba 版。戻り値・意味は完全に同じ。
@@ -994,3 +1009,8 @@ def mcc_candidates(random_u: np.ndarray, probability: float) -> np.ndarray:
         np.ascontiguousarray(random_u),
         float(probability),
     )
+
+
+def mcc_max_speed_squared(v: np.ndarray) -> float:
+    """粒子群の max(vx²+vy²+vz²) を一時配列なしで返す。"""
+    return float(_mcc_max_speed_squared_kernel(np.ascontiguousarray(v)))

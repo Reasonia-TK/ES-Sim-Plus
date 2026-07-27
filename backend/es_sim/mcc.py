@@ -322,7 +322,11 @@ class MccModel:
         # 適応 ν_max (prompts/57): 現在の粒子最大エネルギーまでに絞る。
         # テーブルが keV 域まで伸びていても実在しないエネルギーで候補率を
         # 過大評価しない (ν_max ≥ 全粒子の ν(E) は保たれるので厳密なまま)
-        e_max = 0.5 * ME * float(np.max(np.sum(v * v, axis=1))) / QE
+        if _numba_kernels.HAVE_NUMBA:
+            max_speed2 = _numba_kernels.mcc_max_speed_squared(v)
+        else:
+            max_speed2 = float(np.max(np.sum(v * v, axis=1)))
+        e_max = 0.5 * ME * max_speed2 / QE
         numax = self._numax_upto(self._nu_e_table, e_max)
         if numax <= 0.0:
             return res
@@ -459,7 +463,11 @@ class MccModel:
             raise ValueError("非一様ガス場には所属要素 (elem) が必要です")
         # 適応 ν_max (prompts/57): 参照エネルギーの上限を粒子の最大速さから見積もる。
         # com 系はガス原子速度が乗るため 6σ (+流速) のマージンを取る
-        v_max = math.sqrt(float(np.max(np.sum(v * v, axis=1))))
+        if _numba_kernels.HAVE_NUMBA:
+            max_speed2 = _numba_kernels.mcc_max_speed_squared(v)
+        else:
+            max_speed2 = float(np.max(np.sum(v * v, axis=1)))
+        v_max = math.sqrt(max_speed2)
         if self.ion_energy_frame == "com":
             vth_m = (
                 float(self._vth_elem.max()) if self._vth_elem is not None else self.vth_gas

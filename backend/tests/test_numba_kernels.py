@@ -469,6 +469,19 @@ def test_mcc_ion_numpy_numba_equivalence(monkeypatch):
     assert np.array_equal(next_nb, next_np)
 
 
+@requires_numba
+def test_mcc_max_speed_squared_matches_numpy():
+    """最大速度二乗の1パスJITがNumPyの積和・最大値とビット一致する。"""
+    rng = np.random.default_rng(762)
+    v = rng.normal(0.0, 2.0e6, size=(30_000, 3))
+    expected = float(np.max(np.sum(v * v, axis=1)))
+    actual = nk.mcc_max_speed_squared(v)
+    assert actual == expected
+
+    v[123, 1] = np.nan
+    assert np.isnan(nk.mcc_max_speed_squared(v))
+
+
 def test_numba_fallback_smoke(monkeypatch):
     """HAVE_NUMBA=False を強制すると、_walk_step が numpy 実装へフォールバックすること。
 
