@@ -289,10 +289,27 @@ class PicSimulation:
                 else max(1, self.pic.n_steps // 4)
             )
             avg = min(avg, self.pic.n_steps)
+            # 1周期あたりのステップ数。推奨値の算出に使う (ユーザーが具体的に
+            # どの値へ変えれば良いか分かるよう、警告に数値で含める)
+            steps_per_period = self._cycle_period / self.dt
             if avg * self.dt < self._cycle_period:
+                # 平均区間が1周期未満だと、ビン数をいくら減らしても訪れない位相帯が
+                # 残る。対処は平均ステップ数を増やす一択なので、必要数を明示する
+                need = int(math.ceil(steps_per_period))
                 self.warnings.append(
-                    f"位相分解平均の区間 {avg * self.dt:.3g} s が RF 1周期 "
-                    f"{self._cycle_period:.3g} s より短いため、空の位相ビンが生じます"
+                    f"位相分解平均の区間 {avg * self.dt:.3g} s (avg_steps={avg}) が "
+                    f"RF 1周期 {self._cycle_period:.3g} s (≈{need} ステップ) より短いため、"
+                    f"空の位相ビンが生じます。平均ステップ数を {need} 以上 "
+                    f"(推奨: 統計をならすため {3 * need} = 3周期分以上) にしてください"
+                )
+            elif self._cycle_bins > steps_per_period:
+                # ビン幅が1ステップの時間刻みより細かいと、dt が周期と整合的
+                # (例: dt = T/N) な場合にサンプルの入らないビンが固定的に生じる。
+                # 多周期平均で dt と周期が非整合なら埋まることもあるため「可能性」表現
+                self.warnings.append(
+                    f"位相ビン数 {self._cycle_bins} が RF 1周期あたりのステップ数 "
+                    f"(≈{steps_per_period:.1f}) より多いため、サンプルの入らない位相ビンが"
+                    f"生じる可能性があります。ビン数 {int(steps_per_period)} 以下を推奨します"
                 )
 
         # ---- 初期プラズマ装荷 -------------------------------------------------

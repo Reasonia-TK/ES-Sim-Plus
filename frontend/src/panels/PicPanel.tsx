@@ -658,6 +658,23 @@ export default function PicPanel({
           onCommit={(v) => onChange({ ...pic, phase_bins: Math.max(0, Math.round(v)) })}
         />
       </div>
+      {/* 位相ビン数の推奨値 (prompts/81 相当の改善): 位相分解の基本周波数は最小周波数
+          (backend の _find_rf_freq と同じ)。1周期のステップ数を超えるビン数は
+          サンプルの入らないビンを生みうるため、具体的な上限目安を出す */}
+      {rfFrequencies.length > 0 && effectiveDt !== null && (pic.phase_bins ?? 40) > 0 && (() => {
+        const basePeriod = 1 / rfFrequencies[0]; // 昇順収集なので先頭が最小周波数 = 基本波
+        const stepsPerCycle = basePeriod / effectiveDt;
+        const maxBins = Math.max(1, Math.floor(stepsPerCycle));
+        const over = (pic.phase_bins ?? 40) > maxBins;
+        return (
+          <p className="hint" style={over ? { color: "#e0b050" } : undefined}>
+            目安: 基本波1周期 ≈ {stepsPerCycle.toFixed(1)} ステップのため、ビン数は {maxBins} 以下を推奨
+            {over && " (現在の設定では空のビンが生じる可能性があります)"}。
+            また平均ステップ数は1周期分 ({Math.ceil(stepsPerCycle)}) 以上、推奨は3周期分 ({3 * Math.ceil(stepsPerCycle)}) 以上。
+            {dtFromStarted && " (前回実行の dt で換算)"}
+          </p>
+        );
+      })()}
 
       <Toggle
         label="粒子マージ"
