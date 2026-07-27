@@ -72,7 +72,8 @@ export function evalVoltage(voltage: number, rf: VoltageRf[], waveform: VoltageW
 }
 
 // 時間軸の自動スケール (ns/µs/ms/s)。窓の最大時刻 tMax [s] の桁から単位を選ぶ
-function pickTimeUnit(tMax: number): { label: string; scale: number } {
+// RfPhaseMonitor (prompts/82) でも同じ基準で時間軸をスケールしたいため export して共用する
+export function pickTimeUnit(tMax: number): { label: string; scale: number } {
   if (tMax >= 1) return { label: "s", scale: 1 };
   if (tMax >= 1e-3) return { label: "ms", scale: 1e3 };
   if (tMax >= 1e-6) return { label: "µs", scale: 1e6 };

@@ -7,6 +7,7 @@ import { getPort, initPort, setPort } from "./backendPort";
 import CadCanvas from "./canvas/CadCanvas";
 import type { FieldView, GasBoundaryView, PicCollectorView, PicFieldView, Tool } from "./canvas/CadCanvas";
 import ProfilePanel from "./panels/ProfilePanel";
+import RfPhaseMonitor from "./panels/RfPhaseMonitor";
 import FieldPanel, { EDGE_LABELS_RZ, EDGE_LABELS_RZ_X0, EDGE_LABELS_XY } from "./panels/FieldPanel";
 import type { FieldSection } from "./panels/FieldPanel";
 import ProjectTree from "./ProjectTree";
@@ -361,6 +362,8 @@ export default function App() {
   // ユーザーが選んだ表示方法は次の実行にも引き継いで良い)
   const [picLiveField, setPicLiveField] = useState<PicLiveField>("phi");
   const [picLiveLogScale, setPicLiveLogScale] = useState(false);
+  // RF位相モニタ (prompts/82) の表示トグル。既定で表示し、ユーザーが不要なら消せるようにする
+  const [showRfMonitor, setShowRfMonitor] = useState(true);
   const picClientRef = useRef<PicClient | null>(null);
   // 「続きから実行」ボタンの有効条件その1: 直前の実行が done (または stop) 済みで、
   // 現在実行中でないこと。start/continue 開始時に false、done 受信時に true にする
@@ -1545,6 +1548,12 @@ export default function App() {
   const onTraceResultNode = activeNode === "result-trace";
   const finalPicFieldView = onGasNode ? gasFieldView : (picCycleView ?? picFieldView);
 
+  // RF位相モニタ (prompts/82) の表示条件。CadCanvas 上でライブフレームが実際に描画されている
+  // 間だけ出す: 周期アニメ/結果フィールド表示 (finalPicFieldView) やガス関連ノード選択中
+  // (CadCanvas への picFrame prop 自体を onGasNode で止めている) は「ライブが見えていない」
+  // 状態なので合わせて非表示にする (描画優先ロジックの派生値をそのまま流用)
+  const showRfMonitorPanel = showRfMonitor && picFrame != null && !onGasNode && !finalPicFieldView;
+
   // --- インスペクタ (中カラム) の表示制御 ---
   // FieldPanel は1インスタンスのみ mount し、選択ノードに応じて sections/edgeFilter を切替える
   const fieldSections: FieldSection[] =
@@ -1831,6 +1840,8 @@ export default function App() {
                 onPicLiveFieldChange={setPicLiveField}
                 picLiveLogScale={picLiveLogScale}
                 onPicLiveLogScaleChange={setPicLiveLogScale}
+                showRfMonitor={showRfMonitor}
+                onShowRfMonitorChange={setShowRfMonitor}
                 cycle={picCycle}
                 cycleField={cycleField}
                 onCycleFieldChange={(v) => { setCycleField(v); setCycleViewActive(true); }}
@@ -1885,6 +1896,8 @@ export default function App() {
                 onPicLiveFieldChange={setPicLiveField}
                 picLiveLogScale={picLiveLogScale}
                 onPicLiveLogScaleChange={setPicLiveLogScale}
+                showRfMonitor={showRfMonitor}
+                onShowRfMonitorChange={setShowRfMonitor}
                 cycle={picCycle}
                 cycleField={cycleField}
                 onCycleFieldChange={(v) => { setCycleField(v); setCycleViewActive(true); }}
@@ -2157,6 +2170,7 @@ export default function App() {
             onSetCollector={setCollectorPoints}
             onSetGasBoundary={setGasBoundaryPoints}
           />
+          {showRfMonitorPanel && <RfPhaseMonitor project={project} t={picFrame!.t} />}
           {profileLine && (
             <ProfilePanel
               project={project}

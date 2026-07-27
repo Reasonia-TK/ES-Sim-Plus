@@ -120,6 +120,9 @@ interface Props {
   onPicLiveFieldChange: (v: PicLiveField) => void;
   picLiveLogScale: boolean;
   onPicLiveLogScaleChange: (v: boolean) => void;
+  // RF位相モニタ (画面下部の波形グラフ、prompts/82) の表示トグル。ライブ表示の並びに置く
+  showRfMonitor: boolean;
+  onShowRfMonitorChange: (v: boolean) => void;
 
   // done で受信した RF 1周期の位相分解データ (RFなし/phase_bins=0 では null)。
   // 新しい実行開始時に App 側で null にリセットされる
@@ -251,6 +254,8 @@ export default function PicPanel({
   onPicLiveFieldChange,
   picLiveLogScale,
   onPicLiveLogScaleChange,
+  showRfMonitor,
+  onShowRfMonitorChange,
   cycle,
   cycleField,
   onCycleFieldChange,
@@ -924,6 +929,9 @@ export default function PicPanel({
           {picLiveField !== "phi" && (
             <Toggle label="対数スケール" checked={picLiveLogScale} onChange={onPicLiveLogScaleChange} />
           )}
+          {/* RF位相モニタ (prompts/82): キャンバス下部の波形グラフ+現在位相マーカーの表示切替。
+              ライブ表示の切替と関連が深いのでこの並びに置く */}
+          <Toggle label="RF波形モニタ" checked={showRfMonitor} onChange={onShowRfMonitorChange} />
           <p className="hint">実行中のキャンバス表示を切り替えます (超粒子は常に重畳)</p>
         </>
       )}

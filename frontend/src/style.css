@@ -256,6 +256,28 @@ button.danger:hover { background: #b34747; }
   font-variant-numeric: tabular-nums;
 }
 
+/* RF位相モニタ (prompts/82)。canvas-col 直下に ProfilePanel と並べて置く帯状パネルなので
+   見た目 (ヘッダ+キャンバス2段) を profile-panel に揃える。高さは仕様の「100px程度」に
+   ヘッダ分を足した固定値にする (リサイズ不要、ProfilePanel と違い常時この高さでよいため) */
+.rf-phase-monitor {
+  flex: none; height: 128px; display: flex; flex-direction: column;
+  background: var(--panel); border-top: 1px solid var(--border);
+}
+.rf-phase-monitor-header {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.rf-phase-monitor-title { font-weight: 600; }
+.rf-phase-monitor-phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+.rf-phase-monitor-legend {
+  display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-left: auto;
+}
+.rf-phase-monitor-legend .swatch {
+  display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 3px; vertical-align: middle;
+}
+.rf-phase-monitor-body { flex: 1; position: relative; min-height: 0; padding: 4px 8px; }
+.rf-phase-monitor-canvas { display: block; width: 100%; height: 100%; }
+
 /* PICパネル: MCC(衝突)プロセス一覧 */
 .mcc-process-list {
   display: flex; flex-direction: column; gap: 2px; max-height: 110px; overflow-y: auto;
