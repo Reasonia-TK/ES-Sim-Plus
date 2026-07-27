@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from es_sim import _numba_kernels
 from es_sim.lxcat import parse_lxcat
 from es_sim.mcc import KB, MccModel
 from es_sim.particles import ME, MP, QE, _locate_initial
@@ -227,6 +228,107 @@ def test_ionization_growth_in_uniform_field():
     assert history["n_i"][-1] > n0                # 新イオンも生成 (イオンは不動で壁吸収なし)
     for key in ("ke_e", "ke_i", "fe", "phi_min", "phi_max"):
         assert np.all(np.isfinite(history[key]))
+
+
+@pytest.mark.skipif(
+    not _numba_kernels.HAVE_NUMBA,
+    reason="push+walk再利用バッファはNumba有効時のみ作成される",
+)
+def test_mcc_buffered_append_matches_concatenate(monkeypatch):
+    """MCC電離のバッファ追記が従来concatenateと最終状態・乱数まで一致する。"""
+    project = Project.model_validate(
+        {
+            "coord": "rz",
+            "geometry": {
+                "domain": {
+                    "polygon": [[0, 0], [0.01, 0], [0.01, 0.005], [0, 0.005]]
+                },
+                "boundaries": [
+                    {"edges": [3], "voltage": 0.0},
+                    {"edges": [1], "voltage": 300.0},
+                ],
+            },
+            "mesh": {"size": 5e-4},
+            "pic": {
+                "initial_plasma": {
+                    "density": 1e10,
+                    "te_ev": 0.5,
+                    "ti_ev": 0.03,
+                    "ion_mass_amu": 40.0,
+                    "immobile_ions": True,
+                    "seed": 3,
+                },
+                "n_macro": 1200,
+                "dt": 2e-11,
+                "n_steps": 80,
+                "frame_every": 1000,
+                "threads": 1,
+                "mcc": {
+                    "gas": {
+                        "name": "Ar",
+                        "pressure_pa": 100.0,
+                        "temperature_k": 300.0,
+                    },
+                    "electron_processes": [_IONIZATION_PROC],
+                    "ion_processes": [],
+                    "seed": 5,
+                },
+            },
+        }
+    )
+
+    sim_buffered = PicSimulation(project)
+    for _ in range(80):
+        sim_buffered.step()
+    assert sim_buffered.ion_events > 0
+    assert any(
+        np.shares_memory(buf[1], sim_buffered.species["electron"].x)
+        for buf in sim_buffered._push_walk_buffers["electron"]
+    )
+
+    def reference_append(
+        self, sp, x_new, v_new, w_new, elem_new, bary_new
+    ) -> None:
+        """変更前と同じく、追加のたびに全配列を連結する参照経路。"""
+        n_old = len(sp.x)
+        bary_old = sp.bary
+        sp.x = np.concatenate([sp.x, x_new])
+        sp.v = np.concatenate([sp.v, v_new])
+        sp.w = np.concatenate([sp.w, w_new])
+        sp.elem = np.concatenate([sp.elem, elem_new])
+        if bary_old is not None and len(bary_old) == n_old:
+            sp.bary = np.concatenate([bary_old, bary_new])
+        else:
+            sp.bary = None
+        sp.nidx = None
+
+    monkeypatch.setattr(
+        PicSimulation, "_append_species_buffered", reference_append
+    )
+    sim_reference = PicSimulation(project)
+    for _ in range(80):
+        sim_reference.step()
+
+    assert sim_buffered.coll_e == sim_reference.coll_e
+    assert sim_buffered.ion_events == sim_reference.ion_events
+    for name in sim_buffered.species:
+        actual = sim_buffered.species[name]
+        expected = sim_reference.species[name]
+        assert actual.wall_absorbed == expected.wall_absorbed
+        for attr in ("x", "v", "w", "elem", "bary"):
+            assert np.array_equal(getattr(actual, attr), getattr(expected, attr)), (
+                name,
+                attr,
+            )
+    for key in sim_buffered.history:
+        assert np.array_equal(
+            np.asarray(sim_buffered.history[key]),
+            np.asarray(sim_reference.history[key]),
+        ), key
+    assert np.array_equal(
+        sim_buffered.mcc.rng.random(16),
+        sim_reference.mcc.rng.random(16),
+    )
 
 
 def test_no_ionization_below_threshold():

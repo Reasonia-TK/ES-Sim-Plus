@@ -1146,6 +1146,58 @@ class PicSimulation:
         else:
             sp.bary = None
 
+    def _append_species_buffered(
+        self,
+        sp: PicSpecies,
+        x_new: np.ndarray,
+        v_new: np.ndarray,
+        w_new: np.ndarray,
+        elem_new: np.ndarray,
+        bary_new: np.ndarray,
+    ) -> None:
+        """粒子をpush+walkバッファの余剰容量へ追記する。
+
+        MCC電離では毎ステップ少数の粒子を追加するため、np.concatenateで既存粒子
+        全体を毎回コピーすると粒子数に比例したコストになる。現在状態の背後にある
+        バッファに空きがあれば末尾だけを書き、無ければ同じ種の予備バッファへ移す。
+        どちらも使えない場合だけ従来のconcatenateへフォールバックする。
+        """
+        n_add = len(x_new)
+        if n_add == 0:
+            return
+        n_old = len(sp.x)
+        n_total = n_old + n_add
+        pool = self._push_walk_buffers.get(sp.name, [])
+
+        def append_array(
+            current: np.ndarray, addition: np.ndarray, buffer_index: int
+        ) -> np.ndarray:
+            # 現在状態の基底バッファに余裕があれば既存部分をコピーしない。
+            for buf in pool:
+                target = buf[buffer_index]
+                if np.shares_memory(target, current) and len(target) >= n_total:
+                    target[n_old:n_total] = addition
+                    return target[:n_total]
+            # 予備バッファへ移す場合も新規確保はせず、既存容量を再利用する。
+            for buf in pool:
+                target = buf[buffer_index]
+                if len(target) >= n_total:
+                    target[:n_old] = current
+                    target[n_old:n_total] = addition
+                    return target[:n_total]
+            return np.concatenate([current, addition])
+
+        bary_old = sp.bary
+        sp.x = append_array(sp.x, x_new, 1)
+        sp.v = append_array(sp.v, v_new, 0)
+        sp.w = append_array(sp.w, w_new, 2)
+        sp.elem = append_array(sp.elem, elem_new, 3)
+        if bary_old is not None and len(bary_old) == n_old:
+            sp.bary = append_array(bary_old, bary_new, 7)
+        else:
+            sp.bary = None
+        sp.nidx = None
+
     def _nidx_cached(self, sp: PicSpecies) -> np.ndarray:
         """種の所属要素節点番号 tris_dep[elem] を返す (キャッシュが無効なら再計算)。
 
@@ -1904,16 +1956,22 @@ class PicSimulation:
                         if self._cycle_ion is not None:
                             # 位相分解の電離レート (prompts/52)。t はステップ開始時刻
                             self._cycle_ion[self._phase_bin(t)] += ion_vec
-                    el.x = np.concatenate([el.x, res.new_x])
-                    el.v = np.concatenate([el.v, res.new_v_e])
-                    el.w = np.concatenate([el.w, res.new_w])
-                    el.elem = np.concatenate([el.elem, res.new_elem])
-                    self._bary_append(el, new_l)
-                    io.x = np.concatenate([io.x, res.new_x.copy()])
-                    io.v = np.concatenate([io.v, res.new_v_i])
-                    io.w = np.concatenate([io.w, res.new_w.copy()])
-                    io.elem = np.concatenate([io.elem, res.new_elem.copy()])
-                    self._bary_append(io, new_l)
+                    self._append_species_buffered(
+                        el,
+                        res.new_x,
+                        res.new_v_e,
+                        res.new_w,
+                        res.new_elem,
+                        new_l,
+                    )
+                    self._append_species_buffered(
+                        io,
+                        res.new_x,
+                        res.new_v_i,
+                        res.new_w,
+                        res.new_elem,
+                        new_l,
+                    )
                     # 不動イオン・サブサイクル中のイオンの堆積キャッシュを無効化
                     self._f_immobile.pop("ion", None)
                     self._f_ion_cache = None
