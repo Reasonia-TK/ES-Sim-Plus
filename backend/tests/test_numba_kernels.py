@@ -195,6 +195,66 @@ def test_fused_gather_push_walk_matches_separate_kernels():
     assert 0 < int(a_sep.sum()) < n
 
 
+@requires_numba
+@pytest.mark.parametrize("ridx", [0, 1])
+def test_fused_rz_gather_push_walk_matches_numpy(ridx):
+    """軸対称融合カーネルがrz/rz_x0の従来演算順とビット単位で一致する。"""
+    mesh = _demo_mesh()
+    coeffs = P._barycentric_coeffs(mesh.nodes, mesh.triangles)
+    adjacency = P._adjacency(mesh.triangles)
+    packed = P._pack_coeffs(coeffs)
+
+    rng = np.random.default_rng(470 + ridx)
+    n = 30_000
+    x = rng.uniform([0.0, 0.0], [0.02, 0.01], size=(n, 2))
+    elem = P._locate_initial(coeffs, x)
+    v = rng.normal(0.0, 4.0e5, size=(n, 3))
+    v[:, 2] *= 0.125
+    exy = rng.normal(0.0, 1.0e3, size=(len(mesh.triangles), 2))
+    q = -P.QE
+    m = P.ME
+    dt_sp = 2.0e-10
+
+    # PicSimulation.step の従来numpy軸対称経路と演算順を揃えた参照値。
+    e_at = exy[elem]
+    v_ref = v.copy()
+    a_rz = (q / m) * e_at
+    r_cur = np.maximum(x[:, ridx], 1e-30)
+    ang_l = x[:, ridx] * v[:, 2]
+    a_rz[:, ridx] += v[:, 2] ** 2 / r_cur
+    v_ref[:, :2] += dt_sp * a_rz
+    vdot_ref = (
+        v[:, 0] * v_ref[:, 0] + v[:, 1] * v_ref[:, 1]
+    ) + v[:, 2] * v_ref[:, 2]
+    x_ref = x + dt_sp * v_ref[:, :2]
+    cross = x_ref[:, ridx] < 0.0
+    x_ref[cross, ridx] = -x_ref[cross, ridx]
+    v_ref[cross, ridx] = -v_ref[cross, ridx]
+    ang_l[cross] = -ang_l[cross]
+    r_new = np.maximum(x_ref[:, ridx], 1e-30)
+    v_ref[:, 2] = np.where(ang_l != 0.0, ang_l / r_new, 0.0)
+
+    l_ref = np.empty((n, 3))
+    e_ref, a_ref, be_ref, bl_ref = nk.walk_step(
+        coeffs, adjacency, elem, x_ref, l_ref, packed
+    )
+    fused = nk.gather_push_walk_rz(
+        exy, packed, adjacency, elem, q, m, dt_sp, ridx, x, v
+    )
+    v_fused, x_fused, vdot_fused, e_fused, a_fused, be_fused, bl_fused, l_fused = fused
+
+    assert np.array_equal(v_ref, v_fused)
+    assert np.array_equal(x_ref, x_fused)
+    assert np.array_equal(vdot_ref, vdot_fused)
+    assert np.array_equal(e_ref, e_fused)
+    assert np.array_equal(a_ref, a_fused)
+    assert np.array_equal(be_ref, be_fused)
+    assert np.array_equal(bl_ref, bl_fused)
+    assert np.array_equal(l_ref[~a_ref], l_fused[~a_fused])
+    assert 0 < int(cross.sum()) < n
+    assert 0 < int(a_ref.sum()) < n
+
+
 def _mcc_settings() -> MccSettings:
     return MccSettings.model_validate(
         {

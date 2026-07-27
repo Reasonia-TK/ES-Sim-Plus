@@ -1682,9 +1682,11 @@ class PicSimulation:
         push_ions = self._sub == 1 or (self.step_count % self._sub == 0)
         ke: dict[str, float] = {}
         pushed: list[tuple[PicSpecies, np.ndarray, np.ndarray, np.ndarray]] = []
-        # 基本xy経路はpushとwalkを同じ粒子ループへ融合し、中間配列の再読込と
-        # Numbaディスパッチを減らす。軸対称・磁場ありは従来の独立経路を使う。
-        fuse_push_walk = _numba_kernels.HAVE_NUMBA and not self.rz and self._b is None
+        # 基本xy・軸対称経路はpushとwalkを同じ粒子ループへ融合し、中間配列の
+        # 再読込とNumbaディスパッチを減らす。磁場ありxyは独立経路を使う。
+        fuse_push_walk = _numba_kernels.HAVE_NUMBA and (
+            self.rz or self._b is None
+        )
         fused_walk_results: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
         for sp in self.species.values():
             if len(sp.x) == 0:
@@ -1701,8 +1703,14 @@ class PicSimulation:
                 continue
             dt_sp = dt * self._sub if (sp.name == "ion" and self._sub > 1) else dt
             if fuse_push_walk:
-                # 基本経路 (軸対称・一様磁場なし): gather・push・walkを1つの
-                # njitループに融合する。各粒子内の演算順は従来カーネルと同じ。
+                # gather・push・walkを1つのnjitループに融合する。軸対称では
+                # 軸鏡映と角運動量補正も含め、各粒子内の演算順を従来経路と揃える。
+                fused_kernel = (
+                    _numba_kernels.gather_push_walk_rz
+                    if self.rz
+                    else _numba_kernels.gather_push_walk
+                )
+                fused_args = (self.ridx,) if self.rz else ()
                 (
                     v_new,
                     x_new,
@@ -1712,7 +1720,7 @@ class PicSimulation:
                     b_elem,
                     b_loc,
                     l_new,
-                ) = _numba_kernels.gather_push_walk(
+                ) = fused_kernel(
                     exy,
                     self._coeffs_packed,
                     self.adjacency,
@@ -1720,6 +1728,7 @@ class PicSimulation:
                     sp.q,
                     sp.m,
                     dt_sp,
+                    *fused_args,
                     sp.x,
                     sp.v,
                     out=self._push_walk_output_buffers(sp, len(sp.x)),

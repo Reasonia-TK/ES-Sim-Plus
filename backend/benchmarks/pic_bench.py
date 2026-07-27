@@ -9,6 +9,7 @@ PicSimulation.timing (prompts/75 で追加) の位相別内訳を報告するた
     python backend/benchmarks/pic_bench.py                       # 既定 (2万マクロ, 500ステップ, MCCあり)
     python backend/benchmarks/pic_bench.py --n-macro 50000 --steps 200
     python backend/benchmarks/pic_bench.py --no-mcc              # MCC 無効で比較
+    python backend/benchmarks/pic_bench.py --coord rz --no-mcc   # 軸対称JITを計測
     python backend/benchmarks/pic_bench.py --sub 10 --threads 8  # サブサイクル/チャンク並列との組合せ確認
     python backend/benchmarks/pic_bench.py --require-numba       # JIT 無効なら計測せず失敗
 """
@@ -38,7 +39,14 @@ PHASE_LABELS = [
 ]
 
 
-def build_project(n_macro: int, steps: int, sub: int, threads: int, use_mcc: bool) -> Project:
+def build_project(
+    n_macro: int,
+    steps: int,
+    sub: int,
+    threads: int,
+    use_mcc: bool,
+    coord: str = "xy",
+) -> Project:
     """CCP 類似ケース (RF 平行平板 + 初期プラズマ、任意で MCC 電離あり)。"""
     pic: dict = {
         "initial_plasma": {
@@ -77,6 +85,7 @@ def build_project(n_macro: int, steps: int, sub: int, threads: int, use_mcc: boo
         }
     return Project.model_validate(
         {
+            "coord": coord,
             "geometry": {
                 "domain": {"polygon": [[0, 0], [0.02, 0], [0.02, 0.01], [0, 0.01]]},
                 "boundaries": [
@@ -100,6 +109,12 @@ def main() -> None:
     ap.add_argument("--sub", type=int, default=1)
     ap.add_argument("--threads", type=int, default=0, help="0=自動選択、1以上=明示スレッド数")
     ap.add_argument("--no-mcc", action="store_true", help="MCC を無効にして比較する")
+    ap.add_argument(
+        "--coord",
+        choices=("xy", "rz"),
+        default="xy",
+        help="座標系。rzではy=0を対称軸として軸対称JIT経路を計測する",
+    )
     ap.add_argument("--warmup", type=int, default=5, help="計測から除外するウォームアップステップ数")
     ap.add_argument(
         "--require-numba",
@@ -114,7 +129,14 @@ def main() -> None:
         )
 
     sim = PicSimulation(
-        build_project(args.n_macro, args.steps, args.sub, args.threads, use_mcc)
+        build_project(
+            args.n_macro,
+            args.steps,
+            args.sub,
+            args.threads,
+            use_mcc,
+            args.coord,
+        )
     )
     # ウォームアップ (キャッシュ・スレッドプール初期化) 分は timing/wall のどちらからも除外する
     for _ in range(args.warmup):
@@ -129,7 +151,7 @@ def main() -> None:
 
     total = sum(sim.timing.values())
     print(
-        f"n_macro={args.n_macro} particles~{n0} steps={args.steps} "
+        f"n_macro={args.n_macro} particles~{n0} steps={args.steps} coord={args.coord} "
         f"sub={args.sub} threads={args.threads}(effective={sim.effective_threads}) "
         f"mcc={'on' if use_mcc else 'off'} "
         f"numba={'on' if _numba_kernels.HAVE_NUMBA else 'off'}"
