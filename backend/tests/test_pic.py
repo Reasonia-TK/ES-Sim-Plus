@@ -274,3 +274,41 @@ def test_timing_phases():
     sim.run_batch()
     total2 = sum(sim.timing.values())
     assert total2 > 0.0
+
+
+# ---- 5. ライブモニタの要素密度 n_e/n_i (prompts/81) -----------------------------
+
+
+def test_frame_density_fields():
+    """frame の n_e/n_i (種ごとの要素密度) が要素数長・有限・非負であること。
+
+    さらに一様初期プラズマの1フレーム目 (1ステップ実行後) で、
+    Σ n・V_elem (要素密度×要素体積の総和) がその時点のマクロ粒子総重みと
+    相対誤差 1e-10 以下で一致すること (n[elem] = Σ_p w_p / V_elem の定義から
+    厳密に成り立つはずの恒等式を、実装がその通り計算していることの確認)。
+    """
+    project = _oscillation_project(n_steps=1)
+    project.pic.frame_every = 1
+    sim = PicSimulation(project)
+    _, frames = sim.run_batch()
+    assert len(frames) == 1
+    frame = frames[0]
+
+    n_e = np.asarray(frame["n_e"])
+    n_i = np.asarray(frame["n_i"])
+    assert n_e.shape == (len(sim.tris),)
+    assert n_i.shape == (len(sim.tris),)
+    assert np.all(np.isfinite(n_e))
+    assert np.all(np.isfinite(n_i))
+    assert np.all(n_e >= 0.0)
+    assert np.all(n_i >= 0.0)
+
+    for name, n_arr in (("electron", n_e), ("ion", n_i)):
+        sp = sim.species[name]
+        total_w = float(sp.w.sum())
+        total_from_density = float(np.sum(n_arr * sim.elem_vol))
+        rel_err = abs(total_from_density - total_w) / total_w
+        assert rel_err < 1e-10, (
+            f"{name}: Σn·V_elem={total_from_density:.6e} vs Σw={total_w:.6e} "
+            f"(rel_err={rel_err:.3e})"
+        )

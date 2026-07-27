@@ -2051,7 +2051,13 @@ class PicSimulation:
         # 不動種の堆積キャッシュは維持して良い (粒子状態が変わらない限り有効)
 
     def _make_frame(self, phi: np.ndarray) -> dict:
-        """WS 送出用フレーム (JSON 化可能な dict)。粒子は種ごと最大2000点に間引く。"""
+        """WS 送出用フレーム (JSON 化可能な dict)。粒子は種ごと最大2000点に間引く。
+
+        n_e/n_i (種ごとの要素密度、prompts/81): ライブモニタで電位/密度を切り替え
+        表示できるよう、n[elem] = Σ_p w_p / V_elem を毎フレーム同梱する。
+        np.bincount は粒子数に対して軽量で、frame_every ステップごとの呼び出し
+        (通常は間引かれている) なのでコストは無視できる。
+        """
         particles = {}
         for name, sp in self.species.items():
             n = len(sp.x)
@@ -2062,11 +2068,17 @@ class PicSimulation:
                 pts = sp.x
             particles[name] = pts.tolist()
         diag = {k: v[-1] for k, v in self.history.items()}
+        m = len(self.tris)
+        el, ion = self.species["electron"], self.species["ion"]
+        n_e = np.bincount(el.elem, weights=el.w, minlength=m) / self.elem_vol
+        n_i = np.bincount(ion.elem, weights=ion.w, minlength=m) / self.elem_vol
         return {
             "type": "frame",
             "step": self.step_count,
             "t": self.t,
             "phi": phi.tolist(),
+            "n_e": n_e.tolist(),
+            "n_i": n_i.tolist(),
             "particles": particles,
             "diag": diag,
         }

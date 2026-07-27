@@ -13,7 +13,7 @@ import ProjectTree from "./ProjectTree";
 import type { TreeNode } from "./ProjectTree";
 import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
-import type { CyclePicField, PicResultField } from "./panels/PicPanel";
+import type { CyclePicField, PicLiveField, PicResultField } from "./panels/PicPanel";
 import GasPanel, { DEFAULT_BOUNDARY, DEFAULT_DSMC, GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
 import type { GasResultField } from "./panels/GasPanel";
 import SweepPanel from "./panels/SweepPanel";
@@ -352,6 +352,11 @@ export default function App() {
   // 「結果表示」セレクトの選択と対数スケールチェックボックス。新規実行開始時に既定 (ライブ/線形) へ戻す
   const [picResultField, setPicResultField] = useState<PicResultField>("live");
   const [picLogScale, setPicLogScale] = useState(false);
+  // ライブモニタの表示フィールド (電位/電子密度/イオン密度) と対数スケール (prompts/81)。
+  // 実行中でも即座に切り替えられるよう独立の state として持つ (新規実行開始時のリセットは不要:
+  // ユーザーが選んだ表示方法は次の実行にも引き継いで良い)
+  const [picLiveField, setPicLiveField] = useState<PicLiveField>("phi");
+  const [picLiveLogScale, setPicLiveLogScale] = useState(false);
   const picClientRef = useRef<PicClient | null>(null);
   // 「続きから実行」ボタンの有効条件その1: 直前の実行が done (または stop) 済みで、
   // 現在実行中でないこと。start/continue 開始時に false、done 受信時に true にする
@@ -1432,10 +1437,23 @@ export default function App() {
         ? 0
         : null;
 
-  // PICライブ描画用ビュー (started の mesh + 最新 frame)。実行中〜done後の最終フレームまで保持する
+  // PICライブ描画用ビュー (started の mesh + 最新 frame)。実行中〜done後の最終フレームまで保持する。
+  // 表示フィールド切替 (prompts/81): picLiveField が n_e/n_i でも、frame 側にその配列が無い
+  // (旧バックエンド) 場合は phi (節点値) にフォールバックする
   const picLiveFrame: PicLiveFrame | null =
     picStarted && picFrame
-      ? { mesh: picStarted.mesh, phi: picFrame.phi, particles: picFrame.particles }
+      ? (() => {
+          const density = picLiveField === "n_e" ? picFrame.n_e : picLiveField === "n_i" ? picFrame.n_i : undefined;
+          const useDensity = picLiveField !== "phi" && density !== undefined;
+          return {
+            mesh: picStarted.mesh,
+            values: useDensity ? (density as number[]) : picFrame.phi,
+            nodeBased: !useDensity, // phi=節点値、n_e/n_i=要素値
+            unit: useDensity ? "m^-3" : "V",
+            log: useDensity && picLiveLogScale,
+            particles: picFrame.particles,
+          };
+        })()
       : null;
 
   // PIC結果フィールド表示用ビュー (「結果表示」セレクトでライブ以外を選び、fields がある場合のみ)。
@@ -1805,6 +1823,10 @@ export default function App() {
                 }}
                 logScale={picLogScale}
                 onLogScaleChange={setPicLogScale}
+                picLiveField={picLiveField}
+                onPicLiveFieldChange={setPicLiveField}
+                picLiveLogScale={picLiveLogScale}
+                onPicLiveLogScaleChange={setPicLiveLogScale}
                 cycle={picCycle}
                 cycleField={cycleField}
                 onCycleFieldChange={(v) => { setCycleField(v); setCycleViewActive(true); }}
@@ -1855,6 +1877,10 @@ export default function App() {
                 }}
                 logScale={picLogScale}
                 onLogScaleChange={setPicLogScale}
+                picLiveField={picLiveField}
+                onPicLiveFieldChange={setPicLiveField}
+                picLiveLogScale={picLiveLogScale}
+                onPicLiveLogScaleChange={setPicLiveLogScale}
                 cycle={picCycle}
                 cycleField={cycleField}
                 onCycleFieldChange={(v) => { setCycleField(v); setCycleViewActive(true); }}

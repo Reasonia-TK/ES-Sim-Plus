@@ -580,23 +580,36 @@ export default function CadCanvas({
       drawColorbar(rawMin, rawMax, picFieldView.unit);
     }
 
-    // PICライブ表示: φ (節点値) を既存の電位カラーマップと同じ経路で描画し、
+    // PICライブ表示: 選択フィールド (電位/電子密度/イオン密度、prompts/81) を
+    // picFieldView と同じ節点値/要素値・対数スケール対応の経路で描画し、
     // 粒子を点描画する (電子=シアン、イオン=オレンジ)。実行中〜done後の最終フレームまで
-    // Solve/Mesh 側の表示より優先する。フレームごとに v_min/v_max を再計算する。
+    // Solve/Mesh 側の表示より優先する。フレームごとに min/max を再計算する。
     // picFieldView (結果フィールド表示) が選択されている間はこちらは描画しない
     if (!picFieldView && picFrame) {
       const { nodes, triangles } = picFrame.mesh;
-      const phi = picFrame.phi;
-      let phiMin = Infinity;
-      let phiMax = -Infinity;
-      for (const v of phi) {
-        if (v < phiMin) phiMin = v;
-        if (v > phiMax) phiMax = v;
+      const { values, nodeBased, log } = picFrame;
+
+      let rawMin = Infinity;
+      let rawMax = -Infinity;
+      let minPositive = Infinity;
+      for (const v of values) {
+        if (v < rawMin) rawMin = v;
+        if (v > rawMax) rawMax = v;
+        if (v > 0 && v < minPositive) minPositive = v;
       }
-      const range = phiMax - phiMin || 1;
+      if (!Number.isFinite(rawMin)) { rawMin = 0; rawMax = 0; }
+      const useLog = log && Number.isFinite(minPositive);
+      const transformed = useLog
+        ? values.map((v) => Math.log10(v > 0 ? v : minPositive))
+        : values;
+      const tMin = useLog ? Math.log10(minPositive) : rawMin;
+      const tMax = useLog ? Math.log10(rawMax) : rawMax;
+      const range = tMax - tMin || 1;
+
       for (let i = 0; i < triangles.length; i++) {
         const [a, b, c] = triangles[i];
-        const t = ((phi[a] + phi[b] + phi[c]) / 3 - phiMin) / range;
+        const val = nodeBased ? (transformed[a] + transformed[b] + transformed[c]) / 3 : transformed[i];
+        const t = (val - tMin) / range;
         ctx.fillStyle = colormap(t);
         ctx.beginPath();
         ctx.moveTo(sx(nodes[a][0]), sy(nodes[a][1]));
@@ -609,6 +622,8 @@ export default function CadCanvas({
       // 粒子 (共通ヘルパーで描画)
       drawSpecies(picFrame.particles.electron, "#4dd4ff"); // 電子: シアン
       drawSpecies(picFrame.particles.ion, "#ff9d4d");       // イオン: オレンジ
+
+      drawColorbar(rawMin, rawMax, picFrame.unit);
     }
 
     // Mesh ボタンで生成したメッシュのワイヤーフレーム (解析結果がない状態でも見えるようにする)。

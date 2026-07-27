@@ -62,6 +62,17 @@ export const PIC_FIELD_META: Record<Exclude<PicResultField, "live">, { unit: str
   ion_rate: { unit: "m^-3 s^-1", nodeBased: true },
 };
 
+// ライブモニタ (実行中のキャンバス表示) で切替可能なフィールド (prompts/81)。
+// n_e/n_i は frame 側で要素値として同梱される (時間平均フィールドの n_e/n_i とは異なり
+// 節点射影していない生の要素密度なので、PIC_FIELD_META とは別に nodeBased=false で持つ)
+export type PicLiveField = "phi" | "n_e" | "n_i";
+
+export const PIC_LIVE_FIELD_OPTIONS: { value: PicLiveField; label: string }[] = [
+  { value: "phi", label: "電位 φ [V]" },
+  { value: "n_e", label: "電子密度 n_e [m^-3]" },
+  { value: "n_i", label: "イオン密度 n_i [m^-3]" },
+];
+
 /**
  * PICパネル
  * - 初期プラズマ装荷 / エミッタ定常注入 / マクロ粒子数・積分設定の編集
@@ -102,6 +113,13 @@ interface Props {
   onResultFieldChange: (v: PicResultField) => void;
   logScale: boolean;
   onLogScaleChange: (v: boolean) => void;
+
+  // ライブ表示 (実行中のキャンバス色マップ) の選択フィールドと対数スケール (prompts/81)。
+  // 電位/電子密度/イオン密度を実行中でも即座に切替できる (超粒子オーバーレイは常時表示のまま)
+  picLiveField: PicLiveField;
+  onPicLiveFieldChange: (v: PicLiveField) => void;
+  picLiveLogScale: boolean;
+  onPicLiveLogScaleChange: (v: boolean) => void;
 
   // done で受信した RF 1周期の位相分解データ (RFなし/phase_bins=0 では null)。
   // 新しい実行開始時に App 側で null にリセットされる
@@ -229,6 +247,10 @@ export default function PicPanel({
   onResultFieldChange,
   logScale,
   onLogScaleChange,
+  picLiveField,
+  onPicLiveFieldChange,
+  picLiveLogScale,
+  onPicLiveLogScaleChange,
   cycle,
   cycleField,
   onCycleFieldChange,
@@ -886,6 +908,23 @@ export default function PicPanel({
               ))}
             </div>
           )}
+          {/* ライブモニタの表示フィールド切替 (prompts/81)。実行中でも即座にキャンバスの
+              色マップを切り替えられる (超粒子オーバーレイは常時表示のまま) */}
+          <div className="field">
+            <span className="label">ライブ表示</span>
+            <select
+              value={picLiveField}
+              onChange={(e) => onPicLiveFieldChange(e.target.value as PicLiveField)}
+            >
+              {PIC_LIVE_FIELD_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+          {picLiveField !== "phi" && (
+            <Toggle label="対数スケール" checked={picLiveLogScale} onChange={onPicLiveLogScaleChange} />
+          )}
+          <p className="hint">実行中のキャンバス表示を切り替えます (超粒子は常に重畳)</p>
         </>
       )}
 

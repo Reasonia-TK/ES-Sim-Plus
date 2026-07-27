@@ -407,6 +407,10 @@ export interface PicFrameMsg {
   step: number;
   t: number;
   phi: number[]; // 節点値
+  // 種ごとの要素密度 [m^-3] (prompts/81)。ライブモニタの表示切替用。
+  // 旧バックエンドには無いので optional (未対応時はフロント側で phi にフォールバックする)
+  n_e?: number[];
+  n_i?: number[];
   particles: { electron: Point[]; ion: Point[] }; // 種ごと最大2000点に間引き済み
   diag: PicDiag;
 }
@@ -481,10 +485,16 @@ export type PicClientCommand =
       phase_bins?: number | null;
     };
 
-// CadCanvas でのライブ描画用にまとめたビュー (started の mesh + 最新 frame)
+// CadCanvas でのライブ描画用にまとめたビュー (started の mesh + 最新 frame)。
+// 表示フィールド切替 (prompts/81) に対応するため、値配列・節点/要素の別・単位・対数フラグを
+// 一般化して持つ (picFieldView (PicFieldView型) と同じ形の情報を、実行中のライブ表示にも
+// 持たせる形)。phi: 節点値・単位V。n_e/n_i: 要素値・単位 m^-3 (App 側で選択・フォールバックを解決する)
 export interface PicLiveFrame {
   mesh: MeshResult;
-  phi: number[];
+  values: number[]; // nodeBased なら節点値、そうでなければ要素値
+  nodeBased: boolean;
+  unit: string;
+  log: boolean; // 対数スケール表示 (密度選択時のみ意味を持つ)
   particles: { electron: Point[]; ion: Point[] };
 }
 
