@@ -328,3 +328,19 @@ def test_run_batch_can_stream_without_retaining_frames():
 
     assert frames == []
     assert [frame["step"] for frame in streamed] == [1, 2, 3]
+
+
+def test_run_batch_releases_spare_push_walk_buffers():
+    """完了後は現在の粒子状態ではないping-pongバッファを保持しない。"""
+    sim = PicSimulation(_oscillation_project(n_steps=3))
+    sim.run_batch()
+
+    pool = sim._push_walk_buffers.get("electron", [])
+    assert len(pool) <= 1
+    if pool:
+        buf = pool[0]
+        el = sim.species["electron"]
+        assert np.shares_memory(buf[0], el.v)
+        assert np.shares_memory(buf[1], el.x)
+        assert np.shares_memory(buf[3], el.elem)
+        assert np.shares_memory(buf[7], el.bary)

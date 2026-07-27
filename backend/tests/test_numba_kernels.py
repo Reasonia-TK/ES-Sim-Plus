@@ -80,11 +80,14 @@ def test_walk_numpy_numba_equivalence():
 
 @requires_numba
 def test_deposit_numpy_numba_equivalence():
-    """電荷デポジット (P1 重み散布) が np.bincount 版と完全一致する。"""
+    """nidx版・所属要素直接版がnp.bincountと完全一致する。"""
     rng = np.random.default_rng(1)
     n_nodes = 500
+    n_elements = 900
     n = 30000
-    nidx = rng.integers(0, n_nodes, size=(n, 3)).astype(np.int64)
+    tris = rng.integers(0, n_nodes, size=(n_elements, 3), dtype=np.int64)
+    elem = rng.integers(0, n_elements, size=n, dtype=np.int64)
+    nidx = tris[elem]
     bary = rng.uniform(-0.2, 1.2, size=(n, 3))
     w = rng.uniform(1e10, 1e14, size=n)
     q = -1.602176634e-19
@@ -92,7 +95,9 @@ def test_deposit_numpy_numba_equivalence():
     contrib = (q * w)[:, None] * bary
     f_np = np.bincount(nidx.ravel(), weights=contrib.ravel(), minlength=n_nodes)
     f_nb = nk.deposit(nidx, bary, q, w, n_nodes)
+    f_direct = nk.deposit_from_elements(tris, elem, bary, q, w, n_nodes)
     assert np.array_equal(f_np, f_nb)
+    assert np.array_equal(f_np, f_direct)
 
 
 @requires_numba
@@ -159,6 +164,19 @@ def test_fused_gather_push_walk_matches_separate_kernels():
         bl_fused,
         l_fused,
     ) = nk.gather_push_walk(exy, packed, adjacency, elem, q, m, dt_sp, x, v)
+    out = (
+        np.empty((n + 17, 3)),
+        np.empty((n + 17, 2)),
+        np.empty(n + 17),
+        np.empty(n + 17, dtype=np.int64),
+        np.empty(n + 17, dtype=np.bool_),
+        np.empty(n + 17, dtype=np.int64),
+        np.empty(n + 17, dtype=np.int64),
+        np.empty((n + 17, 3)),
+    )
+    buffered = nk.gather_push_walk(
+        exy, packed, adjacency, elem, q, m, dt_sp, x, v, out=out
+    )
 
     assert np.array_equal(v_sep, v_fused)
     assert np.array_equal(x_sep, x_fused)
@@ -168,6 +186,12 @@ def test_fused_gather_push_walk_matches_separate_kernels():
     assert np.array_equal(be_sep, be_fused)
     assert np.array_equal(bl_sep, bl_fused)
     assert np.array_equal(l_sep[~a_sep], l_fused[~a_fused])
+    for expected, actual in zip(
+        (v_fused, x_fused, vdot_fused, e_fused, a_fused, be_fused, bl_fused),
+        buffered[:7],
+    ):
+        assert np.array_equal(expected, actual)
+    assert np.array_equal(l_fused[~a_fused], buffered[7][~buffered[4]])
     assert 0 < int(a_sep.sum()) < n
 
 

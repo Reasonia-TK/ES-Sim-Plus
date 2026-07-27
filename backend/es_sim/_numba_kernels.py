@@ -145,6 +145,19 @@ if HAVE_NUMBA:
             f[nidx[p, 2]] += c * bary[p, 2]
         return f
 
+    @njit(cache=True, nogil=True)
+    def _deposit_elements_kernel(tris, elem, bary, q, w, n_nodes):
+        """所属要素から節点番号を直接引き、nidx中間配列なしで堆積する。"""
+        f = np.zeros(n_nodes)
+        n = elem.shape[0]
+        for p in range(n):
+            e = elem[p]
+            c = q * w[p]
+            f[tris[e, 0]] += c * bary[p, 0]
+            f[tris[e, 1]] += c * bary[p, 1]
+            f[tris[e, 2]] += c * bary[p, 2]
+        return f
+
     @njit(cache=True, nogil=True, parallel=True)
     def _gather_push_kernel(exy, elem, qm_dt, dt_sp, x, v, out_vnew, out_xnew, out_vdot):
         n = elem.shape[0]
@@ -486,6 +499,25 @@ def deposit(nidx: np.ndarray, bary: np.ndarray, q: float, w: np.ndarray, n_nodes
     return _deposit_kernel(nidx, bary, float(q), w, int(n_nodes))
 
 
+def deposit_from_elements(
+    tris: np.ndarray,
+    elem: np.ndarray,
+    bary: np.ndarray,
+    q: float,
+    w: np.ndarray,
+    n_nodes: int,
+) -> np.ndarray:
+    """所属要素から直接P1電荷を散布し、tris[elem]の一時配列を作らない。"""
+    return _deposit_elements_kernel(
+        np.ascontiguousarray(tris),
+        np.ascontiguousarray(elem),
+        np.ascontiguousarray(bary),
+        float(q),
+        np.ascontiguousarray(w),
+        int(n_nodes),
+    )
+
+
 def gather_push(exy: np.ndarray, elem: np.ndarray, q: float, m: float, dt_sp: float,
                  x: np.ndarray, v: np.ndarray):
     """基本経路 (軸対称・一様磁場なし) の gather (E補間) + リープフロッグ push を融合する。
@@ -516,6 +548,7 @@ def gather_push_walk(
     dt_sp: float,
     x: np.ndarray,
     v: np.ndarray,
+    out: tuple[np.ndarray, ...] | None = None,
 ):
     """基本xy経路のgather+push+walkを1回のNumba呼び出しで処理する。
 
@@ -524,14 +557,26 @@ def gather_push_walk(
     (v_new, x_new, vdot, elem, absorbed, b_elem, b_loc, bary)。
     """
     n = len(x)
-    v_new = np.empty((n, 3), dtype=np.float64)
-    x_new = np.empty((n, 2), dtype=np.float64)
-    vdot = np.empty(n, dtype=np.float64)
-    elem_new = np.empty(n, dtype=np.int64)
-    absorbed = np.empty(n, dtype=np.bool_)
-    b_elem = np.empty(n, dtype=np.int64)
-    b_loc = np.empty(n, dtype=np.int64)
-    bary = np.empty((n, 3), dtype=np.float64)
+    if out is None:
+        v_new = np.empty((n, 3), dtype=np.float64)
+        x_new = np.empty((n, 2), dtype=np.float64)
+        vdot = np.empty(n, dtype=np.float64)
+        elem_new = np.empty(n, dtype=np.int64)
+        absorbed = np.empty(n, dtype=np.bool_)
+        b_elem = np.empty(n, dtype=np.int64)
+        b_loc = np.empty(n, dtype=np.int64)
+        bary = np.empty((n, 3), dtype=np.float64)
+    else:
+        if len(out) != 8 or any(len(buf) < n for buf in out):
+            raise ValueError("gather_push_walk の出力バッファ容量が不足しています")
+        v_new = out[0][:n]
+        x_new = out[1][:n]
+        vdot = out[2][:n]
+        elem_new = out[3][:n]
+        absorbed = out[4][:n]
+        b_elem = out[5][:n]
+        b_loc = out[6][:n]
+        bary = out[7][:n]
     _gather_push_walk_kernel(
         np.ascontiguousarray(exy),
         np.ascontiguousarray(packed),

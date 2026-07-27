@@ -475,6 +475,9 @@ class PicSimulation:
             if self._nthreads > 1
             else None
         )
+        # push+walk融合カーネルの出力バッファ。現在の粒子状態と共有しない方を
+        # ping-pong利用し、毎ステップの大規模np.empty確保を避ける。
+        self._push_walk_buffers: dict[str, list[tuple[np.ndarray, ...]]] = {}
         # numba の walk カーネル (prange) が使うスレッド数を pic.threads に合わせる
         # (numba 無し環境では no-op。numpy フォールバックは上の _chunk_pool で並列化する)
         _numba_kernels.set_num_threads(self._nthreads)
@@ -1165,9 +1168,18 @@ class PicSimulation:
         を参照)。重心座標は walk のキャッシュを再利用する。
         """
         l = self._bary_cached(sp)
-        nidx = self._nidx_cached(sp)
         if _numba_kernels.HAVE_NUMBA:
-            return _numba_kernels.deposit(nidx, l, sp.q, sp.w, self.n_nodes)
+            # tris_dep[elem] の (n,3) 中間配列を作らず、カーネル内で所属要素から
+            # 正準化済み節点番号を直接参照する。粒子順の加算順序は従来と同じ。
+            return _numba_kernels.deposit_from_elements(
+                self.tris_dep,
+                sp.elem,
+                l,
+                sp.q,
+                sp.w,
+                self.n_nodes,
+            )
+        nidx = self._nidx_cached(sp)
         contrib = (sp.q * sp.w)[:, None] * l
         return np.bincount(nidx.ravel(), weights=contrib.ravel(), minlength=self.n_nodes)
 
@@ -1562,6 +1574,72 @@ class PicSimulation:
         ]
         return [f.result() for f in futures] + rest
 
+    def _push_walk_output_buffers(
+        self, sp: PicSpecies, n: int
+    ) -> tuple[np.ndarray, ...]:
+        """現在の粒子状態と別領域の再利用可能なpush+walk出力を返す。
+
+        境界衝突補間やSEEはカーネル実行後も更新前のsp.x/sp.vを参照するため、
+        入出力を同じ配列にはしない。通常は2組のバッファを交互利用する。
+        """
+
+        def aliases_state(buf: tuple[np.ndarray, ...]) -> bool:
+            return (
+                np.shares_memory(buf[0], sp.v)
+                or np.shares_memory(buf[1], sp.x)
+                or np.shares_memory(buf[3], sp.elem)
+                or (sp.bary is not None and np.shares_memory(buf[7], sp.bary))
+            )
+
+        def allocate(capacity: int) -> tuple[np.ndarray, ...]:
+            return (
+                np.empty((capacity, 3), dtype=np.float64),
+                np.empty((capacity, 2), dtype=np.float64),
+                np.empty(capacity, dtype=np.float64),
+                np.empty(capacity, dtype=np.int64),
+                np.empty(capacity, dtype=np.bool_),
+                np.empty(capacity, dtype=np.int64),
+                np.empty(capacity, dtype=np.int64),
+                np.empty((capacity, 3), dtype=np.float64),
+            )
+
+        pool = self._push_walk_buffers.setdefault(sp.name, [])
+        for i, buf in enumerate(pool):
+            if aliases_state(buf):
+                continue
+            if len(buf[2]) >= n:
+                return buf
+            capacity = max(n, len(buf[2]) + max(256, len(buf[2]) // 2))
+            pool[i] = allocate(capacity)
+            return pool[i]
+
+        # 初期化直後または、唯一の既存バッファが現在状態になっている場合。
+        capacity = max(1024, n + max(256, n // 8))
+        buf = allocate(capacity)
+        pool.append(buf)
+        return buf
+
+    def _release_push_walk_spares(self) -> None:
+        """run_batch完了後、現在状態ではない予備バッファの参照を解放する。"""
+        for name, pool in self._push_walk_buffers.items():
+            sp = self.species.get(name)
+            if sp is None:
+                pool.clear()
+                continue
+            pool[:] = [
+                buf
+                for buf in pool
+                if (
+                    np.shares_memory(buf[0], sp.v)
+                    or np.shares_memory(buf[1], sp.x)
+                    or np.shares_memory(buf[3], sp.elem)
+                    or (
+                        sp.bary is not None
+                        and np.shares_memory(buf[7], sp.bary)
+                    )
+                )
+            ]
+
     # ---- 1ステップ -----------------------------------------------------------
 
     def step(self) -> np.ndarray:
@@ -1644,6 +1722,7 @@ class PicSimulation:
                     dt_sp,
                     sp.x,
                     sp.v,
+                    out=self._push_walk_output_buffers(sp, len(sp.x)),
                 )
                 ke[sp.name] = 0.5 * sp.m * float(np.sum(sp.w * vdot))
                 if sp.name == "ion":
@@ -2272,4 +2351,6 @@ class PicSimulation:
         self.collector_result = (
             self.collector_results[0] if self.collector_results else None
         )
+        # continue可能な粒子状態は維持しつつ、実行中だけ必要なping-pong側を解放する。
+        self._release_push_walk_spares()
         return self.history, frames
