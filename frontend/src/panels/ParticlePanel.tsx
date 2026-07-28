@@ -26,6 +26,9 @@ interface Props {
   canRun: boolean;
   onTrace: () => void;
   traceResult: TraceResult | null;
+  // トレース実行の計算時間 [s] (App 側で api 呼び出し前後の時刻差を計測、prompts/86)。
+  // backend 変更なしのフロント側計測のため、結果付き保存には同梱しない (再実行が数秒スケールで容易なため)
+  elapsedS: number | null;
   showTrajectories: boolean;
   onToggleTrajectories: (v: boolean) => void;
 
@@ -52,6 +55,7 @@ export default function ParticlePanel({
   canRun,
   onTrace,
   traceResult,
+  elapsedS,
   showTrajectories,
   onToggleTrajectories,
   background,
@@ -338,6 +342,9 @@ export default function ParticlePanel({
           {summary && (
             <>
               <h2>トレース結果</h2>
+              {elapsedS != null && (
+                <div className="kv"><span>計算時間</span><span>{elapsedS.toFixed(3)} s</span></div>
+              )}
               <div className="kv"><span>粒子数</span><span>{summary.n}</span></div>
               <div className="kv"><span>吸収 / 生存</span><span>{summary.absorbed} / {summary.alive}</span></div>
               <div className="kv">

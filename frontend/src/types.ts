@@ -250,6 +250,7 @@ export interface DsmcResult {
   dt: number;                  // 実際に使った dt [s]
   inflow: number;              // 平均区間の流入実分子数
   outflow: number;             // 平均区間の流出実分子数
+  elapsed_s: number;           // run() の壁時計秒 (continue は区間分のみ、prompts/86)
 }
 
 // ---- DSMC WebSocket プロトコル (server→client, /ws/dsmc、prompts/58) ------------------------
@@ -490,6 +491,8 @@ export interface PicDoneMsg {
   // 位相別プロファイル計測 (prompts/75)。キーは solve/gather_push/walk/deposit/mcc/other/total [秒]。
   // continue では区間分のみ (未対応バックエンドでは省略、optional)
   timing?: Record<string, number>;
+  // run_batch の壁時計秒 (prompts/86)。continue では区間分のみ。未対応バックエンドでは省略
+  elapsed_s?: number;
 }
 
 export interface PicErrorMsg {
@@ -701,6 +704,8 @@ export interface ResultsBundle {
     cycle: PicCycle | null;
     collectors: PicCollectorResult[];
     eedf: PicEedfResult[];
+    // run_batch の壁時計秒 (prompts/86)。旧形式の結果付き保存ファイルには無いため optional
+    elapsed_s?: number;
   } | null;
   gas?: DsmcResult | null;
 }

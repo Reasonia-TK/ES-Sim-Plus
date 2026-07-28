@@ -69,12 +69,13 @@ def _prepare_project_dict(raw: dict) -> dict:
     return project
 
 
-def _build_results_bundle(sim: PicSimulation, step_offset: int) -> dict:
+def _build_results_bundle(sim: PicSimulation, step_offset: int, elapsed_s: float) -> dict:
     """ResultsBundle.pic (frontend/src/types.ts) と同じ形の dict を組み立てる。
 
     server.py の _stream_run が started/done メッセージを組み立てる変換をそのまま流用する。
     history は pic.py が返す「列ごとの辞書」なので、frontend の toDiagArray 相当の
     変換 (列→行) をここで行う (バッチ出力は GUI の picHistory state と同じ「行の配列」形式)。
+    elapsed_s は run_batch の壁時計秒 (server.py done メッセージの elapsed_s と同じ計測対象、prompts/86)。
     """
     started = {
         "type": "started",
@@ -160,6 +161,7 @@ def _build_results_bundle(sim: PicSimulation, step_offset: int) -> dict:
             "cycle": cycle,
             "collectors": collectors,
             "eedf": eedf,
+            "elapsed_s": elapsed_s,
         },
     }
 
@@ -202,8 +204,12 @@ def _worker(case_path: str, out_path: str, case_name: str, progress_q: "mp.Queue
                 )
 
         # 進捗通知にはcallbackだけを使い、巨大なライブフレーム列は結果へ保存しない。
+        # run_batch の壁時計計測 (prompts/86)。server.py の done.elapsed_s と同じ計測対象
+        # (プロジェクト読込・メッシュ生成等は含まない) にして GUI 実行との比較を可能にする
+        t_run0 = time.perf_counter()
         sim.run_batch(on_frame, lambda: False, False)
-        bundle = _build_results_bundle(sim, step_offset)
+        elapsed_s = time.perf_counter() - t_run0
+        bundle = _build_results_bundle(sim, step_offset, elapsed_s)
         out_obj = {**project_dict, "results": bundle}
         # cycle の粒子スナップショット等でサイズが大きくなり得るため整形なし (compact) で書く
         # (frontend の saveProjectWithResults と同じ方針)

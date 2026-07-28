@@ -186,6 +186,8 @@ def test_ws_continue_without_state_errors_and_full_flow():
         assert started["type"] == "started" and started["n_steps"] == 10
         done1 = _recv_until_done(ws)
         assert len(done1["history"]["t"]) == 10
+        # 実行時間のリアルタイム表示 (prompts/86): done に run_batch の壁時計秒が載る
+        assert done1["elapsed_s"] > 0
 
         # continue → started (n_steps=追加分) → done (history は追加区間分・通算時刻)
         ws.send_text(json.dumps({"cmd": "continue", "n_steps": 5, "frame_every": 5}))
@@ -195,5 +197,6 @@ def test_ws_continue_without_state_errors_and_full_flow():
         t2 = done2["history"]["t"]
         assert len(t2) == 5
         assert t2[0] == pytest.approx(done1["history"]["t"][-1] + 1e-9, rel=1e-9)
+        assert done2["elapsed_s"] > 0
 
     server._last_sim = None  # 後続テストへ状態を持ち越さない

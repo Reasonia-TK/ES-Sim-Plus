@@ -121,6 +121,9 @@ def test_batch_run_two_cases_produces_results_bundle(tmp_path: Path):
         # コレクタ未設定なので空配列 (undefined ではない。ResultsBundle は必須配列)
         assert pic["collectors"] == []
 
+        # 実行時間のリアルタイム表示 (prompts/86): run_batch の壁時計秒が同梱される
+        assert pic["elapsed_s"] > 0
+
 
 # ---- 2. results を除いた部分が Project として再検証できること --------------------
 

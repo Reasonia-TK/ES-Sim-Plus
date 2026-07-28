@@ -590,6 +590,12 @@ export default function GasPanel({
                 <span>流出 (平均区間、実分子数)</span>
                 <span>{result.outflow.toExponential(3)}</span>
               </div>
+              <div className="kv">
+                <span>計算時間</span>
+                {/* 旧形式の結果付き保存ファイル (elapsed_s 追加前) を読み込んだ場合は
+                    値が無いことがあるため、実行時同様に安全側の表示にする (prompts/86) */}
+                <span>{result.elapsed_s != null ? `${result.elapsed_s.toFixed(3)} s` : "-"}</span>
+              </div>
 
               <div className="field">
                 <span className="label">結果表示</span>

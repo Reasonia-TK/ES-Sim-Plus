@@ -11,6 +11,7 @@ import math
 import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -181,6 +182,7 @@ def _dsmc_result_model(sim: DsmcSimulation, res) -> DsmcResultModel:
         dt=res.dt,
         inflow=res.inflow,
         outflow=res.outflow,
+        elapsed_s=res.elapsed_s,
     )
 
 
@@ -459,6 +461,9 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
 
         loop.call_soon_threadsafe(offer_latest)
 
+    # run_batch の壁時計計測 (prompts/86)。continue では sim.timing 同様この回の
+    # 区間分のみになる (通算値にはしない)
+    t_run0 = time.perf_counter()
     run_task = asyncio.create_task(
         asyncio.to_thread(sim.run_batch, on_frame, stop.is_set, False)
     )
@@ -486,7 +491,13 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
                 continue
             await ws.send_json(frame)
         history, _ = await run_task
-        done_msg: dict = {"type": "done", "history": history}
+        done_msg: dict = {
+            "type": "done",
+            "history": history,
+            # run_batch の壁時計秒 (prompts/86)。フレーム送信等のオーバーヘッドは
+            # timing.total (位相別プロファイル計測、prompts/75) との差分で見える
+            "elapsed_s": time.perf_counter() - t_run0,
+        }
         # 位相別プロファイル計測 (prompts/75)。total は表示用に別途加算しておく
         # (continue では sim.timing が区間分のみを持つので、total もその区間分になる)
         done_msg["timing"] = {**sim.timing, "total": sum(sim.timing.values())}

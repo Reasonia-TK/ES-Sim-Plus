@@ -213,6 +213,17 @@ const TOOL_LABELS: Record<Tool, string> = {
   eedfbox: "EEDF領域",
 };
 
+// 実行中の経過時間表示 (ステータスバー、prompts/86) の秒数を m:ss (1時間以上は h:mm:ss) に整形する
+function formatElapsed(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  const ss = String(sec).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
 // 電極ラベル ("edge0".."edge3" は FieldPanel の EDGE_LABELS_* で辺名に変換、
 // conductor の region id はそのまま表示する)
 function electrodeDisplayLabel(label: string, coord: Project["coord"]): string {
@@ -239,7 +250,17 @@ function dsmcContinueRelevantKey(p: Project): string {
 
 // 「静電場結果」インスペクタページの解析結果サマリ (FieldPanel の solve
 // セクションと同内容だが、結果ノード単体でも確認できるようにここでも表示する)
-function ResultSummary({ result, coord }: { result: SolveResult | null; coord: Project["coord"] }) {
+function ResultSummary({
+  result,
+  coord,
+  elapsedS,
+}: {
+  result: SolveResult | null;
+  coord: Project["coord"];
+  // Solve 実行の計算時間 [s] (App 側で api 呼び出し前後の時刻差を計測、prompts/86)。
+  // backend 変更なしのフロント側計測のため、結果付き保存には同梱しない (再実行が数秒スケールで容易なため)
+  elapsedS: number | null;
+}) {
   if (!result) {
     return <div className="muted">(まだ解析結果がありません。スタディ「静電場」で Solve を実行してください)</div>;
   }
@@ -248,6 +269,9 @@ function ResultSummary({ result, coord }: { result: SolveResult | null; coord: P
   const qUnit = isAxisym ? "C" : "C/m";
   return (
     <>
+      {elapsedS != null && (
+        <div className="kv"><span>計算時間</span><span>{elapsedS.toFixed(3)} s</span></div>
+      )}
       <div className="kv"><span>節点数</span><span>{result.mesh.nodes.length}</span></div>
       <div className="kv"><span>要素数</span><span>{result.mesh.triangles.length}</span></div>
       <div className="kv"><span>V min/max</span><span>{result.v_min.toFixed(1)} / {result.v_max.toFixed(1)} V</span></div>
@@ -316,6 +340,9 @@ export default function App() {
   const [portReady, setPortReady] = useState(false);
   const [portError, setPortError] = useState<string | null>(null);
   const [result, setResult] = useState<SolveResult | null>(null);
+  // Solve 実行の計算時間 [s] (App 側で api 呼び出し前後の時刻差を計測、backend 変更不要、prompts/86)。
+  // result と一緒にリセットする (再現が数秒スケールで容易なため結果付き保存へは同梱しない)
+  const [solveElapsedS, setSolveElapsedS] = useState<number | null>(null);
   // Mesh ボタン (解析なしでメッシュ生成のみ) の結果。Solve 結果とは独立に保持する
   const [meshResult, setMeshResult] = useState<MeshResult | null>(null);
   const [showMesh, setShowMesh] = useState(false);
@@ -326,6 +353,16 @@ export default function App() {
   const [showEedfRegions, setShowEedfRegions] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 実行経過時間のリアルタイム表示 (ステータスバー、prompts/86)。各実行開始時刻を ref に
+  // 記録しておき、実行中のみ 1秒間隔の setInterval で tick state を更新して再レンダーする
+  // (アイドル時の無駄な再レンダーを避けるため、何か実行中のときだけ setInterval を張る)。
+  // 複数同時実行 (PIC/DSMC/スイープ/busy) はそれぞれ個別の開始時刻を持つ
+  const busyStartTimeRef = useRef<number | null>(null);
+  const picStartTimeRef = useRef<number | null>(null);
+  const gasStartTimeRef = useRef<number | null>(null);
+  const sweepStartTimeRef = useRef<number | null>(null);
+  const [, setElapsedTick] = useState(0);
 
   const [tool, setTool] = useState<Tool>("select");
   // 長さ表示単位 (mm/µm)。内部データ (project) は m のままで、表示・入力の解釈のみが変わる。
@@ -360,6 +397,8 @@ export default function App() {
   // 既存の Undo/Redo 履歴 (history) には積まない。保存/読込 (project.particles) の対象ではある
   const [particles, setParticles] = useState<ParticleSettings>(DEFAULT_PARTICLES);
   const [traceResult, setTraceResult] = useState<TraceResult | null>(null);
+  // トレース実行の計算時間 [s] (solveElapsedS と同じ考え方、prompts/86)。traceResult と一緒にリセットする
+  const [traceElapsedS, setTraceElapsedS] = useState<number | null>(null);
   const [showTrajectories, setShowTrajectories] = useState(true);
   // エミッタのオーバーレイ (緑の線分/×マーカー+矢印) をキャンバスに描くか。
   // FN 電界放出のみのケース等でエミッタ表示が邪魔なときに消せるようにする
@@ -380,6 +419,9 @@ export default function App() {
   // done メッセージで受け取った位相別プロファイル計測 (prompts/75)。continue では
   // 区間分のみに置き換わる (累積ではない)。新規実行開始時にリセットする
   const [picTiming, setPicTiming] = useState<Record<string, number> | null>(null);
+  // done メッセージで受け取った run_batch の壁時計秒 (prompts/86)。picTiming と同じ流儀
+  // (continue では区間分のみに置き換わる。新規実行開始時にリセットする)
+  const [picElapsedS, setPicElapsedS] = useState<number | null>(null);
   // 「結果表示」セレクトの選択と対数スケールチェックボックス。新規実行開始時に既定 (ライブ/線形) へ戻す
   const [picResultField, setPicResultField] = useState<PicResultField>("live");
   const [picLogScale, setPicLogScale] = useState(false);
@@ -462,6 +504,16 @@ export default function App() {
   const [sweepLoadedCaseIndex, setSweepLoadedCaseIndex] = useState<number | null>(null);
   const sweepClientRef = useRef<SweepClient | null>(null);
 
+  // 実行経過時間のリアルタイム表示 (ステータスバー、prompts/86)。何か実行中の間だけ
+  // 1秒間隔で再レンダーする (アイドル時に setInterval を張り続けて無駄な再レンダーを
+  // 起こさないようにするため、実行中フラグが1つでも立っているときだけ張る)
+  const anyRunning = busy || picRunning || gasRunning || sweepRunning;
+  useEffect(() => {
+    if (!anyRunning) return;
+    const id = setInterval(() => setElapsedTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [anyRunning]);
+
   // 周期アニメーション再生ループ: playing 中は fps に応じた間隔でビンを1つずつ順送りし、
   // 最後まで行ったら先頭へループする (setInterval + 関数更新で古いクロージャの影響を避ける)
   useEffect(() => {
@@ -533,9 +585,11 @@ export default function App() {
     projectRef.current = next;
     setProjectState(next);
     setResult(null);
+    setSolveElapsedS(null); // 計算時間表示も結果と一緒に破棄する (prompts/86)
     setMeshResult(null);
     setProfileLine(null);
     setTraceResult(null); // ジオメトリ変更で解析結果とともに trace 結果も破棄する
+    setTraceElapsedS(null);
     setGasResult(null); // メッシュが変わりうるため DSMC 結果 (要素値) も破棄する
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
     // DSMC続き実行の無効化は n_steps/avg_steps/threads/smoothing_passes 以外が変わったときだけ
@@ -552,9 +606,11 @@ export default function App() {
     projectRef.current = prev;
     setProjectState(prev);
     setResult(null);
+    setSolveElapsedS(null);
     setMeshResult(null);
     setProfileLine(null);
     setTraceResult(null);
+    setTraceElapsedS(null);
     setGasResult(null);
     setSelectedRegionId((sel) => ensureSelection(prev, sel));
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
@@ -567,9 +623,11 @@ export default function App() {
     projectRef.current = next;
     setProjectState(next);
     setResult(null);
+    setSolveElapsedS(null);
     setMeshResult(null);
     setProfileLine(null);
     setTraceResult(null);
+    setTraceElapsedS(null);
     setGasResult(null);
     setSelectedRegionId((sel) => ensureSelection(next, sel));
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
@@ -599,13 +657,17 @@ export default function App() {
   }, [doUndo, doRedo]);
 
   const runSolve = async () => {
+    busyStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setBusy(true);
     setError(null);
     setMeshResult(null); // Solve 実行時は Mesh のみの結果を破棄し、Solve 側の表示を優先する
+    const t0 = performance.now(); // 結果サマリの「計算時間」表示用。backend 変更不要のフロント側計測 (prompts/86)
     try {
       setResult(await api.solve(project));
+      setSolveElapsedS((performance.now() - t0) / 1000);
     } catch (e) {
       setError(String(e));
+      setSolveElapsedS(null);
     } finally {
       setBusy(false);
     }
@@ -613,6 +675,7 @@ export default function App() {
 
   // メッシュ生成のみ (解析は行わない)
   const runMesh = async () => {
+    busyStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setBusy(true);
     setError(null);
     try {
@@ -626,11 +689,15 @@ export default function App() {
 
   // 粒子軌道トレース実行 (project.particles として送信する)
   const runTrace = async () => {
+    busyStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setBusy(true);
     setError(null);
+    const t0 = performance.now(); // トレース結果サマリの「計算時間」表示用 (prompts/86)
     try {
       setTraceResult(await api.trace({ ...project, particles }));
+      setTraceElapsedS((performance.now() - t0) / 1000);
     } catch (e) {
+      setTraceElapsedS(null);
       setError(String(e));
     } finally {
       setBusy(false);
@@ -675,6 +742,7 @@ export default function App() {
 
   // DSMC ガス流れ計算実行 (WebSocket。project.dsmc を送信する。project.dsmc が null の場合は呼ばれない想定)
   const runDsmc = () => {
+    gasStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setGasError(null);
     setGasResult(null);
     setGasProgress(null);
@@ -695,6 +763,7 @@ export default function App() {
     if (!dsmcClientRef.current || !project.dsmc || gasRunning || !gasContinueReady || gasProjectChangedSinceRun) {
       return;
     }
+    gasStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setGasError(null);
     setGasResult(null); // 進捗表示は新区間で0から (前回結果は継続分の done で置き換わる)
     setGasProgress(null);
@@ -770,6 +839,7 @@ export default function App() {
   };
 
   const runSweepStart = (paramPath: string, values: number[], parallel: number) => {
+    sweepStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setSweepError(null);
     setSweepStarted(null);
     setSweepCases([]);
@@ -807,6 +877,7 @@ export default function App() {
       setPicHistory((h) => (isContinue ? [...h, ...added] : added));
       setPicFields(msg.fields ?? null);
       setPicTiming(msg.timing ?? null);
+      setPicElapsedS(msg.elapsed_s ?? null); // run_batch の壁時計秒 (prompts/86)
       setPicCycle(msg.cycle ?? null);
       // collectors 配列が来ればそちらを使い、旧バックエンドで単数 collector のみの場合は
       // 先頭(1個)として扱う (prompts/37、必須ではないが安全に対応しておく)
@@ -825,6 +896,7 @@ export default function App() {
 
   // PIC開始: WebSocket接続を張り、project.pic (エミッタはフェーズ2の設定と同期) を送信する
   const runPicStart = () => {
+    picStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setPicError(null);
     setPicStarted(null);
     setPicFrame(null);
@@ -834,6 +906,7 @@ export default function App() {
     // 新しい実行を開始したら結果フィールド表示 (前回 done の残骸) をリセットする
     setPicFields(null);
     setPicTiming(null); // 位相別プロファイル計測 (prompts/75) も前回 done の残骸を消す
+    setPicElapsedS(null);
     setPicResultField("live");
     setPicLogScale(false);
     // 周期アニメーションの状態も新規実行開始時にリセットする (前回 done の cycle・再生状態を破棄)
@@ -861,6 +934,7 @@ export default function App() {
   // picHistory はクリアせず、既存の履歴 (フル実行分) の末尾へ追加区間分を連結する
   const runPicContinue = () => {
     if (!picClientRef.current || picRunning || !picContinueReady || picProjectChangedSinceRun) return;
+    picStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setPicError(null);
     setPicRunning(true);
     setPicContinueReady(false);
@@ -870,6 +944,7 @@ export default function App() {
     // 新しい fields / cycle / collectors / eedf は追加区間の done で置き換わる
     setPicFields(null);
     setPicTiming(null);
+    setPicElapsedS(null);
     setPicResultField("live");
     setPicLogScale(false);
     setPicCycle(null);
@@ -1375,6 +1450,7 @@ export default function App() {
             cycle: picCycle,
             collectors: picCollectors,
             eedf: picEedf,
+            elapsed_s: picElapsedS ?? undefined, // run_batch の壁時計秒 (prompts/86)
           }
         : null,
       gas: gasResult,
@@ -1435,6 +1511,7 @@ export default function App() {
       setPicCycle(results.pic?.cycle ?? null);
       setPicCollectors(results.pic?.collectors ?? []);
       setPicEedf(results.pic?.eedf ?? []);
+      setPicElapsedS(results.pic?.elapsed_s ?? null); // run_batch の壁時計秒 (旧形式ファイルには無い、prompts/86)
       // 結果表示セレクトは既定 (ライブ/線形) へ戻す
       setPicResultField("live");
       setPicLogScale(false);
@@ -1692,6 +1769,14 @@ export default function App() {
     : 0;
   const gasPct = gasProgress && gasProgress.nSteps > 0 ? Math.round((gasProgress.step / gasProgress.nSteps) * 100) : 0;
 
+  // 実行経過時間 (ステータスバー、prompts/86)。Date.now() を毎レンダーで直接読むことで
+  // elapsedTick (1秒ごとに更新される tick state) が変わるたびに再計算される。実行中でない
+  // 場合や開始時刻が未記録の場合は 0 (該当ブランチ自体が表示されないので使われない)
+  const busyElapsedSec = busy && busyStartTimeRef.current != null ? (Date.now() - busyStartTimeRef.current) / 1000 : 0;
+  const picElapsedSec = picRunning && picStartTimeRef.current != null ? (Date.now() - picStartTimeRef.current) / 1000 : 0;
+  const gasElapsedSec = gasRunning && gasStartTimeRef.current != null ? (Date.now() - gasStartTimeRef.current) / 1000 : 0;
+  const sweepElapsedSec = sweepRunning && sweepStartTimeRef.current != null ? (Date.now() - sweepStartTimeRef.current) / 1000 : 0;
+
   return (
     <div className="app">
       <div className="toolbar">
@@ -1874,6 +1959,7 @@ export default function App() {
                 canRun={!!health}
                 onTrace={runTrace}
                 traceResult={traceResult}
+                elapsedS={traceElapsedS}
                 showTrajectories={showTrajectories}
                 onToggleTrajectories={setShowTrajectories}
                 showEmitter={showEmitter}
@@ -1891,6 +1977,7 @@ export default function App() {
                 canRun={!!health}
                 onTrace={runTrace}
                 traceResult={traceResult}
+                elapsedS={traceElapsedS}
                 showTrajectories={showTrajectories}
                 onToggleTrajectories={setShowTrajectories}
                 showEmitter={showEmitter}
@@ -1923,6 +2010,7 @@ export default function App() {
                 error={picError}
                 fields={picFields}
                 timing={picTiming}
+                elapsedS={picElapsedS}
                 resultField={picResultField}
                 onResultFieldChange={(v) => {
                   // 結果表示の切替時はアニメ優先を解除し、選択したフィールドを表示する
@@ -1984,6 +2072,7 @@ export default function App() {
                 error={picError}
                 fields={picFields}
                 timing={picTiming}
+                elapsedS={picElapsedS}
                 resultField={picResultField}
                 onResultFieldChange={(v) => {
                   // 結果表示の切替時はアニメ優先を解除し、選択したフィールドを表示する
@@ -2129,7 +2218,7 @@ export default function App() {
               )}
 
               <h2>解析結果</h2>
-              <ResultSummary result={result} coord={project.coord} />
+              <ResultSummary result={result} coord={project.coord} elapsedS={solveElapsedS} />
             </div>
           </div>
         </div>
@@ -2314,11 +2403,11 @@ export default function App() {
         {statusError ? (
           <span className="statusbar-error">{statusError}</span>
         ) : busy ? (
-          <span>静電場/トレース 計算中...</span>
+          <span>静電場/トレース 計算中... — 経過 {formatElapsed(busyElapsedSec)}</span>
         ) : picRunning ? (
           <>
             <span>
-              PIC-MCC 実行中... {picPct}% ({picSegStep}/{picStarted?.n_steps ?? 0})
+              PIC-MCC 実行中... {picPct}% ({picSegStep}/{picStarted?.n_steps ?? 0}) — 経過 {formatElapsed(picElapsedSec)}
             </span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${picPct}%` }} />
@@ -2326,7 +2415,7 @@ export default function App() {
           </>
         ) : gasRunning ? (
           <>
-            <span>DSMC 実行中... {gasPct}%</span>
+            <span>DSMC 実行中... {gasPct}% — 経過 {formatElapsed(gasElapsedSec)}</span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${gasPct}%` }} />
             </div>
@@ -2334,7 +2423,7 @@ export default function App() {
         ) : sweepRunning ? (
           <>
             <span>
-              スイープ実行中... {sweepCompletedCount}/{sweepStarted?.n_cases ?? 0} ケース完了
+              スイープ実行中... {sweepCompletedCount}/{sweepStarted?.n_cases ?? 0} ケース完了 — 経過 {formatElapsed(sweepElapsedSec)}
             </span>
             <div className="statusbar-progress">
               <div

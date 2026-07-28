@@ -60,6 +60,9 @@ def test_dsmc_equilibrium_box():
     sim = DsmcSimulation(project)
     res = sim.run()
 
+    # 実行時間のリアルタイム表示 (prompts/86): run() の壁時計秒が結果に載る
+    assert res.elapsed_s > 0
+
     n0 = p0 / (KB * t0)
     area = sim.area
     # 面積重み平均で比較 (セル単位は統計ノイズがある)
@@ -628,6 +631,8 @@ def test_dsmc_ws_progress():
         result = msg["result"]
         assert len(result["n"]) > 0
         assert all(np.isfinite(result["p"]))
+        # 実行時間のリアルタイム表示 (prompts/86): done.result に run() の壁時計秒が載る
+        assert result["elapsed_s"] > 0
     # done 後は保持スロットが更新されている
     assert srv._last_dsmc is not None
 

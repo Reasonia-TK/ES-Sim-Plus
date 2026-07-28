@@ -111,6 +111,9 @@ interface Props {
   // done メッセージで受け取った位相別プロファイル計測 (prompts/75)。
   // continue では区間分のみに置き換わる。未受信 or 未対応バックエンドでは null
   timing: Record<string, number> | null;
+  // done メッセージで受け取った run_batch の壁時計秒 (prompts/86)。
+  // continue では区間分のみに置き換わる。未受信 or 未対応バックエンドでは null
+  elapsedS: number | null;
   // 「結果表示」セレクトの現在値と対数スケールチェックボックスの状態 (App 側で保持・CadCanvas に反映)
   resultField: PicResultField;
   onResultFieldChange: (v: PicResultField) => void;
@@ -262,6 +265,7 @@ export default function PicPanel({
   error,
   fields,
   timing,
+  elapsedS,
   resultField,
   onResultFieldChange,
   logScale,
@@ -1139,7 +1143,7 @@ export default function PicPanel({
       )}
 
       {/* 位相別プロファイル計測 (prompts/75、done 後のみ表示。実行中/未実行は非表示) */}
-      {timing && <PicTimingSection timing={timing} />}
+      {timing && <PicTimingSection timing={timing} elapsedS={elapsedS} />}
       </>
       )}
 
@@ -1212,7 +1216,15 @@ const TIMING_PHASE_LABELS: Record<string, string> = {
 // PIC: 実行時間内訳。done メッセージの timing を値の大きい順に「名称 / 秒 / %」で表示する
 // (次フェーズ (Numba化・粒子マージ) の効果測定のベースライン確認用、prompts/75)。
 // 未知のキー (将来の位相追加) も TIMING_PHASE_LABELS に無ければキー名そのままで表示する
-function PicTimingSection({ timing }: { timing: Record<string, number> }) {
+function PicTimingSection({
+  timing,
+  elapsedS,
+}: {
+  timing: Record<string, number>;
+  // run_batch の壁時計秒 (prompts/86)。timing の内訳合計 (total) との差分は
+  // フレーム送信等のオーバーヘッドに相当する (未受信 or 未対応バックエンドでは null)
+  elapsedS: number | null;
+}) {
   const total = timing.total ?? Object.entries(timing)
     .filter(([k]) => k !== "total")
     .reduce((sum, [, v]) => sum + v, 0);
@@ -1222,6 +1234,12 @@ function PicTimingSection({ timing }: { timing: Record<string, number> }) {
   return (
     <>
       <h2>PIC: 実行時間内訳</h2>
+      {elapsedS != null && (
+        <div className="kv">
+          <span>経過時間 (壁時計)</span>
+          <span>{elapsedS.toFixed(3)} s</span>
+        </div>
+      )}
       {rows.map(([key, sec]) => (
         <div className="kv" key={key}>
           <span>{TIMING_PHASE_LABELS[key] ?? key}</span>

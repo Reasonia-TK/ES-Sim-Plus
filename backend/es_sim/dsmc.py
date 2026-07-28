@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -70,6 +71,7 @@ class DsmcResult:
     dt: float            # 実際に使った dt [s]
     inflow: float        # 平均区間の流入実分子数 (リザーバ)
     outflow: float       # 平均区間の流出実分子数 (リザーバ + 真空)
+    elapsed_s: float     # この run() 呼び出しの壁時計秒 (continue は区間分のみ、prompts/86)
 
 
 class DsmcSimulation:
@@ -752,6 +754,9 @@ class DsmcSimulation:
         粒子座標 (≤2000点、(k,2) ndarray)。should_stop() が True を返したら中断する
         (WS の stop コマンド用)。平均区間に入る前に中断された場合は結果が無いためエラーを送出する。
         """
+        # 壁時計計測 (prompts/86)。continue で複数回 run() を呼ぶ場合はこの呼び出し
+        # (= その区間) の所要時間のみを返す (step_count のような通算値にはしない)
+        t0 = time.perf_counter()
         n_steps = self.s.n_steps
         avg_start = max(0, n_steps - self.s.avg_steps)
         for i in range(n_steps):
@@ -804,4 +809,5 @@ class DsmcSimulation:
             dt=self.dt,
             inflow=self.inflow,
             outflow=self.outflow,
+            elapsed_s=time.perf_counter() - t0,
         )
