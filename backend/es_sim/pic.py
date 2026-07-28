@@ -644,6 +644,30 @@ class PicSimulation:
                     "samples": 0,   # 保存済みサンプル数 (上限はコレクタごとに適用)
                 }
             )
+
+        # ---- EEDF/EEPF 領域 (prompts/85) --------------------------------------
+        # 時間平均区間中の毎ステップ、各領域 (軸平行矩形) 内の電子を重み付き
+        # エネルギーヒストグラムへ加算する (コレクタと同じ「平均区間内のみ集計」の
+        # ライフサイクル)。e_max_ev が未指定の領域は最初の集計ステップで確定する
+        self.eedf_results: list[dict] | None = None
+        self._eedf_st: list[dict] = []  # 領域ごとの前計算 + 集計ストレージ
+        for reg in self.pic.eedf_regions:
+            x0, x1 = sorted((reg.p1[0], reg.p2[0]))
+            y0, y1 = sorted((reg.p1[1], reg.p2[1]))
+            auto = reg.e_max_ev is None
+            self._eedf_st.append(
+                {
+                    "x0": x0, "x1": x1, "y0": y0, "y1": y1,
+                    "bins": reg.bins,
+                    "label": reg.label,
+                    "auto": auto,               # e_max_ev 未指定 (自動決定) か
+                    "e_max": reg.e_max_ev,      # auto の間は None (最初の集計ステップで確定)
+                    "hist": None if auto else np.zeros(reg.bins),  # Σw (ビンごと)
+                    "sum_w": 0.0,      # 域内かつビン範囲内の Σw (正規化・平均エネルギーの分母)
+                    "sum_we": 0.0,     # 同 ΣwE (平均エネルギー用)
+                    "overflow_w": 0.0,  # e_max 超過分の Σw (ヒストグラム形状を歪めないよう除外)
+                }
+            )
         # 節点集中体積 (averaged_density の規格化に使う)。
         # xy: Σ隣接要素面積/3 (従来どおり)。rz: Σ 2π∫L_i r dA = Σ 2π(A/12)(2r_i+r_j+r_k)
         # (線形 r の厳密積分。fem.assemble の右辺と同じ公式)。
@@ -1067,6 +1091,90 @@ class PicSimulation:
             }
             for st in self._collectors_st
         ]
+
+    # ---- EEDF/EEPF 領域 (prompts/85) -------------------------------------------
+
+    def _accumulate_eedf(self) -> None:
+        """1ステップ分、各EEDF領域内の電子を重み付きエネルギーヒストグラムへ加算する
+        (時間平均区間のみ呼ばれる。領域未設定ならコストゼロで即 return)。
+
+        矩形内判定は min/max のベクトル化比較 (軸平行のみ対応)。e_max_ev 未指定の
+        領域は最初にここへ来たステップで「矩形内電子の最大エネルギー×1.2」
+        (電子がいなければ既定30eV) に確定し、以後は固定する。確定後の範囲外
+        (E > e_max) はヒストグラムへは畳まずオーバーフロー重みへ加算する
+        (分布の形を歪めないため)。
+        """
+        if not self._eedf_st:
+            return
+        el = self.species["electron"]
+        if len(el.x) == 0:
+            return
+        x, y = el.x[:, 0], el.x[:, 1]
+        e_all: np.ndarray | None = None  # 領域が複数あっても1回だけ計算して使い回す
+        for st in self._eedf_st:
+            mask = (x >= st["x0"]) & (x <= st["x1"]) & (y >= st["y0"]) & (y <= st["y1"])
+            if not np.any(mask):
+                continue
+            if e_all is None:
+                v = el.v
+                e_all = 0.5 * ME * (v[:, 0] ** 2 + v[:, 1] ** 2 + v[:, 2] ** 2) / QE
+            e_sel = e_all[mask]
+            w_sel = el.w[mask]
+            if st["auto"] and st["hist"] is None:
+                e_max = float(e_sel.max()) * 1.2 if e_sel.size else 30.0
+                st["e_max"] = e_max if e_max > 0.0 else 30.0
+                st["hist"] = np.zeros(st["bins"])
+            e_max = st["e_max"]
+            in_range = e_sel <= e_max
+            if np.any(in_range):
+                idx = np.minimum(
+                    (e_sel[in_range] / e_max * st["bins"]).astype(np.int64), st["bins"] - 1
+                )
+                st["hist"] += np.bincount(idx, weights=w_sel[in_range], minlength=st["bins"])
+                st["sum_w"] += float(w_sel[in_range].sum())
+                st["sum_we"] += float((w_sel[in_range] * e_sel[in_range]).sum())
+            if not np.all(in_range):
+                st["overflow_w"] += float(w_sel[~in_range].sum())
+
+    def _eedf_data(self) -> list[dict] | None:
+        """各EEDF領域の集計結果を dict のリストにまとめる (eedf_regions と同順、prompts/85)。
+
+        f は EEDF [eV^-1] (Σ f_i·dE = 1 に正規化。オーバーフローは除いた「ヒストグラム化
+        できた」重みのみを分母にするので、分布の形はそのまま数値積分1に一致する)。
+        Σw=0 (電子が一度も入らなかった) 領域は f 全ゼロ・mean/t_eff も 0 で返す。
+        """
+        if not self._eedf_st:
+            return None
+        n_samples = self._accum_count
+        out = []
+        for st in self._eedf_st:
+            bins = st["bins"]
+            e_max = st["e_max"] if st["e_max"] is not None else 30.0
+            hist = st["hist"] if st["hist"] is not None else np.zeros(bins)
+            d_e = e_max / bins
+            e_centers = (np.arange(bins) + 0.5) * d_e
+            sum_w = st["sum_w"]
+            if sum_w > 0.0:
+                f = hist / (sum_w * d_e)
+                mean_e = st["sum_we"] / sum_w
+            else:
+                f = np.zeros(bins)
+                mean_e = 0.0
+            denom = sum_w + st["overflow_w"]
+            overflow_frac = st["overflow_w"] / denom if denom > 0.0 else 0.0
+            out.append(
+                {
+                    "label": st["label"],
+                    "e_centers": e_centers,
+                    "f": f,
+                    "mean_energy_ev": mean_e,
+                    "t_eff_ev": (2.0 / 3.0) * mean_e,
+                    "total_weight": sum_w,
+                    "overflow_frac": overflow_frac,
+                    "n_samples": n_samples,
+                }
+            )
+        return out
 
     def _emit_see(
         self,
@@ -2075,6 +2183,8 @@ class PicSimulation:
         # 節点密度・時間平均フィールド (enable_density_accum 以後、毎ステップ積算)
         if accumulating:
             self._accumulate_fields(phi, ex, ey, t)
+            # EEDF/EEPF 領域 (prompts/85)。領域未設定なら _eedf_st が空でゼロコスト
+            self._accumulate_eedf()
 
         # 診断記録 (毎ステップ)
         el, io = self.species["electron"], self.species["ion"]
@@ -2423,6 +2533,16 @@ class PicSimulation:
             st["count"] = 0
             st["weight"] = 0.0
             st["samples"] = 0
+        # EEDF/EEPF 領域 (prompts/85) も同様にリセットする。e_max_ev 自動決定の
+        # 領域は次の平均区間で改めて確定し直す (前区間の電子分布から動いている可能性があるため)
+        self.eedf_results = None
+        for st in self._eedf_st:
+            st["sum_w"] = 0.0
+            st["sum_we"] = 0.0
+            st["overflow_w"] = 0.0
+            st["hist"] = None if st["auto"] else np.zeros(st["bins"])
+            if st["auto"]:
+                st["e_max"] = None
         # 不動種の堆積キャッシュは維持して良い (粒子状態が変わらない限り有効)
 
     def _make_frame(self, phi: np.ndarray) -> dict:
@@ -2526,6 +2646,7 @@ class PicSimulation:
         self.collector_result = (
             self.collector_results[0] if self.collector_results else None
         )
+        self.eedf_results = self._eedf_data()
         # continue可能な粒子状態は維持しつつ、実行中だけ必要なping-pong側を解放する。
         self._release_push_walk_spares()
         return self.history, frames

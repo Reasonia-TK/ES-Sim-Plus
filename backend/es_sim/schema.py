@@ -370,6 +370,22 @@ class Collector(BaseModel):
     label: str = ""  # 表示用ラベル (空ならフロントが "C1" 等を振る、prompts/36)
 
 
+class EedfRegion(BaseModel):
+    """EEDF/EEPF の集計領域 (軸平行矩形、prompts/85)。キャンバスの2点クリックで指定する。
+
+    時間平均区間中の毎ステップ、矩形内 (min(p1,p2) ≦ x ≦ max(p1,p2)) の電子を
+    重み付きエネルギーヒストグラムへ加算し、EEDF (f(E)、∫f dE=1) を得る。
+    """
+
+    p1: Point
+    p2: Point                      # 対角の2点 (順不同)
+    label: str = ""
+    bins: int = Field(100, ge=10, le=1000)
+    # None = 平均区間の最初の集計ステップで「矩形内電子の最大エネルギー×1.2」に自動決定
+    # (電子がいなければ 30 eV)。以後のステップはこの値で固定し、範囲外はオーバーフロー計数する
+    e_max_ev: float | None = None
+
+
 class PicMerge(BaseModel):
     """粒子マージ設定 (高速化③、prompts/77)。
 
@@ -411,6 +427,15 @@ class PicSettings(BaseModel):
             self.collector = None
         if len(self.collectors) > 8:
             raise ValueError("collectors は最大 8 個までです")
+        return self
+    # EEDF/EEPF 集計領域 (prompts/85、最大4個)。時間平均区間中の毎ステップ、
+    # 矩形内の電子を重み付きエネルギーヒストグラムへ加算する
+    eedf_regions: list[EedfRegion] = []
+
+    @model_validator(mode="after")
+    def _check_eedf_regions(self) -> "PicSettings":
+        if len(self.eedf_regions) > 4:
+            raise ValueError("eedf_regions は最大 4 個までです")
         return self
     # 鏡面反射する domain 外周エッジ番号のリスト (エッジ i は頂点 i → i+1)。
     # 到達粒子は吸収せず法線速度成分を反転して境界内へ折り返す (壁カウンタに含めない)。

@@ -5,7 +5,14 @@ import type { MultiPolygon } from "polygon-clipping";
 import { api } from "./api";
 import { getPort, initPort, setPort } from "./backendPort";
 import CadCanvas from "./canvas/CadCanvas";
-import type { FieldView, GasBoundaryView, PicCollectorView, PicFieldView, Tool } from "./canvas/CadCanvas";
+import type {
+  FieldView,
+  GasBoundaryView,
+  PicCollectorView,
+  PicEedfRegionView,
+  PicFieldView,
+  Tool,
+} from "./canvas/CadCanvas";
 import ProfilePanel from "./panels/ProfilePanel";
 import RfPhaseMonitor from "./panels/RfPhaseMonitor";
 import FieldPanel, { EDGE_LABELS_RZ, EDGE_LABELS_RZ_X0, EDGE_LABELS_XY } from "./panels/FieldPanel";
@@ -44,6 +51,8 @@ import type {
   PicCollectorSettings,
   PicCycle,
   PicDiag,
+  PicEedfRegionSettings,
+  PicEedfResult,
   PicFields,
   PicFrameMsg,
   PicLiveFrame,
@@ -104,6 +113,9 @@ function withInjectionEmitter(pic: PicSettings, emitter: ParticleSettings["emitt
 // コレクタ追加数の上限 (バックエンドの validator と同じ、prompts/36/37)
 const MAX_COLLECTORS = 8;
 
+// EEDF/EEPF 領域追加数の上限 (バックエンドの validator と同じ、prompts/85)
+const MAX_EEDF_REGIONS = 4;
+
 // 長さ表示単位の localStorage キー。プロジェクトファイルには含めない (表示設定のみ)
 const LENGTH_UNIT_STORAGE_KEY = "es-sim-length-unit";
 
@@ -116,6 +128,17 @@ function nextCollectorLabel(collectors: PicCollectorSettings[]): string {
     if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
   }
   return `C${maxN + 1}`;
+}
+
+// 次の EEDF 領域ラベルを生成する ("E1", "E2", ...)。nextCollectorLabel と同じ流儀
+// (欠番があっても詰めない。カスタムラベルは無視する)
+function nextEedfLabel(regions: PicEedfRegionSettings[]): string {
+  let maxN = 0;
+  for (const r of regions) {
+    const m = /^E(\d+)$/.exec(r.label ?? "");
+    if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+  }
+  return `E${maxN + 1}`;
 }
 
 // 領域マージ (prompts/63) の union 結果から共線頂点を除去する。
@@ -187,6 +210,7 @@ const TOOL_LABELS: Record<Tool, string> = {
   emitter: "エミッタ",
   collector: "コレクタ",
   gasbc: "ガス境界",
+  eedfbox: "EEDF領域",
 };
 
 // 電極ラベル ("edge0".."edge3" は FieldPanel の EDGE_LABELS_* で辺名に変換、
@@ -299,6 +323,7 @@ export default function App() {
   // 配置済みでも常時表示だと混み合うため、個別に消せるようにする (既定は表示)
   const [showCollectors, setShowCollectors] = useState(true);
   const [showGasBoundaries, setShowGasBoundaries] = useState(true);
+  const [showEedfRegions, setShowEedfRegions] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -380,6 +405,12 @@ export default function App() {
   // コレクタ一覧 (PICパネル) で選択中のインデックス。範囲外になった場合は下の
   // selectedCollectorIndex (派生値) で自動的に補正する
   const [selectedCollectorIndexRaw, setSelectedCollectorIndexRaw] = useState<number | null>(null);
+
+  // done メッセージで受け取った EEDF/EEPF 領域の集計結果 (pic.eedf_regions と同順、prompts/85)。
+  // 新規実行開始時にリセットする
+  const [picEedf, setPicEedf] = useState<PicEedfResult[]>([]);
+  // 領域一覧 (PICパネル) で選択中のインデックス (collector と同じ流儀)
+  const [selectedEedfIndexRaw, setSelectedEedfIndexRaw] = useState<number | null>(null);
 
   // RF 1周期の位相分解データ (done で受信、RFなし/phase_bins=0 では null)。
   // 周期アニメーションプレイヤー (PicPanel) の状態一式も新規実行開始時にリセットする
@@ -780,6 +811,7 @@ export default function App() {
       // collectors 配列が来ればそちらを使い、旧バックエンドで単数 collector のみの場合は
       // 先頭(1個)として扱う (prompts/37、必須ではないが安全に対応しておく)
       setPicCollectors(msg.collectors ?? (msg.collector ? [msg.collector] : []));
+      setPicEedf(msg.eedf ?? []);
       setPicRunning(false);
       setPicContinueReady(true); // done (stop 済みも含む) したので続き実行が可能になる
     },
@@ -814,6 +846,8 @@ export default function App() {
     setCycleViewActive(false);
     // IEDF/IADF コレクタ結果も新規実行開始時にリセットする (前回 done の残骸を消す)
     setPicCollectors([]);
+    // EEDF/EEPF 領域結果も同様にリセットする (prompts/85)
+    setPicEedf([]);
     const client = new PicClient(makePicCallbacks(false));
     picClientRef.current = client;
     // 現在のプロジェクト状態をサーバーへ送るので、続き実行の食い違いフラグをここで解消する
@@ -833,7 +867,7 @@ export default function App() {
     // 表示状態を新規実行と同様にリセットする。描画優先順位が
     // 「周期アニメ > 結果フィールド > ライブ」のため、前回 done の cycle / 結果フィールド
     // 選択が残っているとライブ表示が隠れ、続き実行中の画面が追従しない (不具合修正)。
-    // 新しい fields / cycle / collectors は追加区間の done で置き換わる
+    // 新しい fields / cycle / collectors / eedf は追加区間の done で置き換わる
     setPicFields(null);
     setPicTiming(null);
     setPicResultField("live");
@@ -843,6 +877,7 @@ export default function App() {
     setCycleBinIndex(0);
     setCycleViewActive(false);
     setPicCollectors([]);
+    setPicEedf([]);
     picClientRef.current.setCallbacks(makePicCallbacks(true));
     picClientRef.current.continueRun({
       n_steps: pic.n_steps,
@@ -904,6 +939,41 @@ export default function App() {
     if (index < 0 || index >= collectors.length) return;
     setPic({ ...pic, collectors: collectors.filter((_, i) => i !== index) });
     setSelectedCollectorIndexRaw((sel) => (sel === index ? null : sel));
+  };
+
+  // EEDF領域配置ツール (CadCanvas) からの確定通知。矩形ツールと同じ2点クリックUXだが、
+  // 領域一覧の格納形式はコレクタと同じ「対角の2点そのまま」で持つ (backend は
+  // min/max で軸平行矩形として解釈する)。最大 MAX_EEDF_REGIONS 個、達したら追加しない。
+  // ラベルは "E1","E2",... を自動採番。配置したら PIC インスペクタページへ切替え、
+  // 追加した領域を選択状態にする
+  const setEedfRegionPoints = (p1: Point, p2: Point) => {
+    const regions = pic.eedf_regions ?? [];
+    if (regions.length < MAX_EEDF_REGIONS) {
+      const label = nextEedfLabel(regions);
+      // bins/e_max_ev はバックエンドの既定 (100 / 自動決定) に合わせて明示しておく
+      // (コレクタの tol: null と同じ流儀)
+      const next = [...regions, { p1, p2, label, bins: 100, e_max_ev: null }];
+      setPic({ ...pic, eedf_regions: next });
+      setSelectedEedfIndexRaw(next.length - 1);
+    }
+    setActiveNode("study-pic");
+  };
+
+  // EEDF領域一覧 (PICパネル) の1件を更新する (ラベル・bins・e_max_ev の編集)
+  const updateEedfRegion = (index: number, patch: Partial<PicEedfRegionSettings>) => {
+    const regions = pic.eedf_regions ?? [];
+    if (index < 0 || index >= regions.length) return;
+    const next = regions.slice();
+    next[index] = { ...next[index], ...patch };
+    setPic({ ...pic, eedf_regions: next });
+  };
+
+  // EEDF領域一覧の1件を削除する
+  const deleteEedfRegion = (index: number) => {
+    const regions = pic.eedf_regions ?? [];
+    if (index < 0 || index >= regions.length) return;
+    setPic({ ...pic, eedf_regions: regions.filter((_, i) => i !== index) });
+    setSelectedEedfIndexRaw((sel) => (sel === index ? null : sel));
   };
 
   // キャンバス上で領域を選択したら「領域」インスペクタページに切替える (選択解除時は切替しない)
@@ -1304,6 +1374,7 @@ export default function App() {
             fields: picFields,
             cycle: picCycle,
             collectors: picCollectors,
+            eedf: picEedf,
           }
         : null,
       gas: gasResult,
@@ -1349,6 +1420,7 @@ export default function App() {
     // 旧形式 (単数 collector) のプロジェクトは collectors 配列へ移行する
     setPic(loadedPic ? normalizeCollectors({ ...DEFAULT_PIC, ...loadedPic }) : DEFAULT_PIC);
     setSelectedCollectorIndexRaw(null);
+    setSelectedEedfIndexRaw(null);
     setSelectedRegionId(null);
     // 結果付き保存ファイルなら計算結果も復元する (commitProject による結果クリアの後に上書きする)
     if (results) {
@@ -1362,6 +1434,7 @@ export default function App() {
       setPicFields(results.pic?.fields ?? null);
       setPicCycle(results.pic?.cycle ?? null);
       setPicCollectors(results.pic?.collectors ?? []);
+      setPicEedf(results.pic?.eedf ?? []);
       // 結果表示セレクトは既定 (ライブ/線形) へ戻す
       setPicResultField("live");
       setPicLogScale(false);
@@ -1442,6 +1515,22 @@ export default function App() {
     selectedCollectorIndexRaw !== null && selectedCollectorIndexRaw < collectorsList.length
       ? selectedCollectorIndexRaw
       : collectorsList.length > 0
+        ? 0
+        : null;
+
+  // 配置済み EEDF/EEPF 領域一覧 (CadCanvas への常時オーバーレイ表示用、prompts/85)。
+  // label が未設定でも表示できるよう "E<n>" のフォールバックを与える
+  const eedfRegionsList: PicEedfRegionView[] = (pic.eedf_regions ?? []).map((r, i) => ({
+    p1: r.p1,
+    p2: r.p2,
+    label: r.label && r.label.trim() !== "" ? r.label : `E${i + 1}`,
+  }));
+
+  // 領域一覧の選択インデックス (範囲外・未選択なら先頭を既定選択とする、コレクタと同じ流儀)
+  const selectedEedfIndex: number | null =
+    selectedEedfIndexRaw !== null && selectedEedfIndexRaw < eedfRegionsList.length
+      ? selectedEedfIndexRaw
+      : eedfRegionsList.length > 0
         ? 0
         : null;
 
@@ -1867,6 +1956,11 @@ export default function App() {
                 onSelectCollector={setSelectedCollectorIndexRaw}
                 onUpdateCollector={updateCollector}
                 onDeleteCollector={deleteCollector}
+                eedfResults={picEedf}
+                selectedEedfIndex={selectedEedfIndex}
+                onSelectEedfRegion={setSelectedEedfIndexRaw}
+                onUpdateEedfRegion={updateEedfRegion}
+                onDeleteEedfRegion={deleteEedfRegion}
                 mode="setup"
               />
             </div>
@@ -1923,6 +2017,11 @@ export default function App() {
                 onSelectCollector={setSelectedCollectorIndexRaw}
                 onUpdateCollector={updateCollector}
                 onDeleteCollector={deleteCollector}
+                eedfResults={picEedf}
+                selectedEedfIndex={selectedEedfIndex}
+                onSelectEedfRegion={setSelectedEedfIndexRaw}
+                onUpdateEedfRegion={updateEedfRegion}
+                onDeleteEedfRegion={deleteEedfRegion}
                 mode="results"
               />
             </div>
@@ -2117,6 +2216,22 @@ export default function App() {
             >
               ガス境界
             </button>
+            <button
+              className={`tool ${tool === "eedfbox" ? "active" : ""}`}
+              onClick={() => setTool("eedfbox")}
+              title={
+                eedfRegionsList.length >= MAX_EEDF_REGIONS
+                  ? `EEDF領域は最大${MAX_EEDF_REGIONS}個までです`
+                  : "2点クリックでEEDF/EEPF集計領域 (矩形) を追加します"
+              }
+            >
+              EEDF領域 ({eedfRegionsList.length}/{MAX_EEDF_REGIONS})
+            </button>
+            {tool === "eedfbox" && eedfRegionsList.length >= MAX_EEDF_REGIONS && (
+              <span className="snap" style={{ color: "#e0b050" }}>
+                EEDF領域は最大{MAX_EEDF_REGIONS}個に達しました
+              </span>
+            )}
             <div className="sep" />
             <Toggle label="グリッドスナップ" checked={gridSnap} onChange={setGridSnap} />
             <label className="snap">
@@ -2141,6 +2256,7 @@ export default function App() {
             <Toggle label="エミッタ" checked={showEmitter} onChange={setShowEmitter} />
             <Toggle label="コレクタ" checked={showCollectors} onChange={setShowCollectors} />
             <Toggle label="ガス境界" checked={showGasBoundaries} onChange={setShowGasBoundaries} />
+            <Toggle label="EEDF領域" checked={showEedfRegions} onChange={setShowEedfRegions} />
           </div>
 
           <CadCanvas
@@ -2159,6 +2275,8 @@ export default function App() {
             profileLine={profileLine}
             collectors={showCollectors ? collectorsList : []}
             selectedCollectorIndex={selectedCollectorIndex}
+            eedfRegions={showEedfRegions ? eedfRegionsList : []}
+            selectedEedfIndex={selectedEedfIndex}
             emitter={showEmitter ? particles.emitter : null}
             traceResult={traceResult}
             showTrajectories={showTrajectories}
@@ -2176,6 +2294,7 @@ export default function App() {
             onSetEmitter={setEmitterPoints}
             onSetCollector={setCollectorPoints}
             onSetGasBoundary={setGasBoundaryPoints}
+            onSetEedfRegion={setEedfRegionPoints}
           />
           {showRfMonitorPanel && <RfPhaseMonitor project={project} t={picFrame!.t} />}
           {profileLine && (

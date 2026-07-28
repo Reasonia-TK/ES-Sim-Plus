@@ -534,6 +534,21 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
             if len(sim.collector_results) == 1:
                 # 後方互換: コレクタが1個のときのみ従来の単数キーも出力する
                 done_msg["collector"] = done_msg["collectors"][0]
+        # EEDF/EEPF 領域 (prompts/85)。有効時のみ添付する
+        if sim.eedf_results is not None:
+            done_msg["eedf"] = [
+                {
+                    "label": r["label"],
+                    "e_centers": r["e_centers"].tolist(),
+                    "f": r["f"].tolist(),
+                    "mean_energy_ev": r["mean_energy_ev"],
+                    "t_eff_ev": r["t_eff_ev"],
+                    "total_weight": r["total_weight"],
+                    "overflow_frac": r["overflow_frac"],
+                    "n_samples": r["n_samples"],
+                }
+                for r in sim.eedf_results
+            ]
         await ws.send_json(done_msg)
     except Exception as exc:
         try:

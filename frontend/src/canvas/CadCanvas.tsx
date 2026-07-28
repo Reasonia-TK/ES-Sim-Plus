@@ -25,7 +25,16 @@ import { arrayMin, arrayMax } from "../mathUtils";
  * - 粒子軌道: traceResult をシアン系の半透明ポリラインで描画 (吸収位置は小さな点)
  */
 
-export type Tool = "select" | "polyline" | "rect" | "circle" | "profile" | "emitter" | "collector" | "gasbc";
+export type Tool =
+  | "select"
+  | "polyline"
+  | "rect"
+  | "circle"
+  | "profile"
+  | "emitter"
+  | "collector"
+  | "gasbc"
+  | "eedfbox";
 
 // カラーマップの対象: 電位 V か |E|
 export type FieldView = "v" | "e_abs";
@@ -55,6 +64,16 @@ function collectorColor(i: number): string {
 // DSMC 線分境界の表示色 (橙系)。コレクタのパレットとは重ならない固定色にして、
 // 見た目でコレクタ (黄・シアン等) とガス境界を区別できるようにする
 const GAS_BOUNDARY_COLOR = "#ffb454";
+
+// EEDF/EEPF 集計領域の表示色 (紫系)。コレクタ・ガス境界のパレットと重ならない固定色にする (prompts/85)
+const EEDF_REGION_COLOR = "#c792ea";
+
+// 配置済み EEDF/EEPF 集計領域 (軸平行矩形) の表示用ビュー (最大4個、常時オーバーレイ表示対象)
+export interface PicEedfRegionView {
+  label: string;
+  p1: Point;
+  p2: Point;
+}
 
 // 配置済み DSMC 線分境界のオーバーレイ表示用ビュー (p1/p2 を持つ境界のみが対象、prompts/72)
 export interface GasBoundaryView {
@@ -101,6 +120,10 @@ interface Props {
   collectors: PicCollectorView[];
   // コレクタ一覧 (PICパネル) で選択中のインデックス。キャンバス上で該当線分を強調表示する
   selectedCollectorIndex: number | null;
+  // EEDF/EEPF 集計領域 (複数、常時オーバーレイ表示の対象。最大4個、prompts/85)
+  eedfRegions: PicEedfRegionView[];
+  // 領域一覧 (PICパネル) で選択中のインデックス。キャンバス上で該当矩形を強調表示する
+  selectedEedfIndex: number | null;
   // 粒子エミッタ (常時オーバーレイ表示の対象)。粒子パネル側で必ず既定値を持つため常に非 null
   emitter: Emitter | null; // null なら描画しない (「エミッタを表示」オプションOFF)
   // 粒子軌道トレース結果 (Trace 実行前は null)
@@ -130,6 +153,9 @@ interface Props {
   onSetCollector: (p1: Point, p2: Point) => void;
   // ガス境界配置ツールの確定通知 (コレクタと同じ2点クリックUX、prompts/72)
   onSetGasBoundary: (p1: Point, p2: Point) => void;
+  // EEDF/EEPF 領域配置ツールの確定通知 (矩形ツールと同じ2点クリックUX、prompts/85)。
+  // p1/p2 は対角の2点 (順不同、そのまま渡す。矩形化は呼び出し側が行う)
+  onSetEedfRegion: (p1: Point, p2: Point) => void;
 }
 
 interface View {
@@ -345,6 +371,8 @@ export default function CadCanvas({
   profileLine,
   collectors,
   selectedCollectorIndex,
+  eedfRegions,
+  selectedEedfIndex,
   emitter,
   traceResult,
   showTrajectories,
@@ -362,6 +390,7 @@ export default function CadCanvas({
   onSetEmitter,
   onSetCollector,
   onSetGasBoundary,
+  onSetEedfRegion,
 }: Props) {
   // 軸対称 (r-z) モードかどうか。x=z(軸方向)・y=r(径方向) と読み替えて表示する
   const isRz = project.coord === "rz";
@@ -1023,6 +1052,19 @@ export default function CadCanvas({
       ctx.beginPath();
       ctx.arc(sx(x0g), sy(y0g), 3, 0, Math.PI * 2);
       ctx.fill();
+    } else if (tool === "eedfbox" && drawPts.length === 1 && cursor) {
+      // EEDF/EEPF 領域配置ツールのラバーバンド (紫系破線、矩形ツールと同じ2点クリックUX)
+      const [x0f, y0f] = drawPts[0];
+      const [x1f, y1f] = cursor;
+      ctx.strokeStyle = EEDF_REGION_COLOR;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(
+        sx(Math.min(x0f, x1f)),
+        sy(Math.max(y0f, y1f)),
+        Math.abs(x1f - x0f) * view.scale,
+        Math.abs(y1f - y0f) * view.scale,
+      );
+      ctx.setLineDash([]);
     }
 
     // 確定済みプロファイル線のオーバーレイ (白破線 + 端点マーカー)
@@ -1115,6 +1157,34 @@ export default function CadCanvas({
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
       ctx.fillText(g.label, sx(mx), sy(my) - 6);
+    });
+
+    // 配置済み EEDF/EEPF 集計領域のオーバーレイ (常時表示、紫系固定色の破線矩形+ラベル、
+    // 選択中は白破線ハローで強調。prompts/85)
+    eedfRegions.forEach((r, i) => {
+      const isSelected = selectedEedfIndex === i;
+      const [xr0, yr0] = r.p1;
+      const [xr1, yr1] = r.p2;
+      const rx = sx(Math.min(xr0, xr1));
+      const ry = sy(Math.max(yr0, yr1));
+      const rw = Math.abs(xr1 - xr0) * view.scale;
+      const rh = Math.abs(yr1 - yr0) * view.scale;
+      ctx.strokeStyle = EEDF_REGION_COLOR;
+      ctx.lineWidth = isSelected ? 3 : 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(rx, ry, rw, rh);
+      if (isSelected) {
+        ctx.strokeStyle = "rgba(255,255,255,0.85)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 3]);
+        ctx.strokeRect(rx, ry, rw, rh);
+      }
+      ctx.setLineDash([]);
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.fillStyle = EEDF_REGION_COLOR;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(r.label, rx + 3, ry - 3);
     });
 
     // 粒子軌道 (trace 結果): シアン系半透明ポリライン。粒子数が多くても見えるように線幅は細く保つ
@@ -1321,6 +1391,8 @@ export default function CadCanvas({
     profileLine,
     collectors,
     selectedCollectorIndex,
+    eedfRegions,
+    selectedEedfIndex,
     rulerFontSize,
     emitter,
     traceResult,
@@ -1618,6 +1690,14 @@ export default function CadCanvas({
             } else {
               const p1 = drawPts[0];
               onSetGasBoundary(p1, pt);
+              setDrawPts([]);
+            }
+          } else if (tool === "eedfbox") {
+            if (drawPts.length === 0) {
+              setDrawPts([pt]);
+            } else {
+              const p1 = drawPts[0];
+              onSetEedfRegion(p1, pt);
               setDrawPts([]);
             }
           }

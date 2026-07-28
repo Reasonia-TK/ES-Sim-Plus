@@ -315,6 +315,8 @@ export interface PicSettings {
   collector?: PicCollectorSettings | null;
   // 複数コレクタ (最大8個)。バックエンドは旧単数形をこちらへ正規化する
   collectors?: PicCollectorSettings[];
+  // EEDF/EEPF 集計領域 (最大4個、prompts/85)。省略/undefined = 無効
+  eedf_regions?: PicEedfRegionSettings[];
   // FN 電界放出源 (prompts/46)。毎ステップの表面電界から放出する。null/undefined = 無効
   fn?: FnEmission | null;
   // イオンサブサイクリング (prompts/50)。イオンを N ステップに1回、実効刻み N·dt で押す。
@@ -333,6 +335,15 @@ export interface PicCollectorSettings {
   p2: [number, number];  // 線分の終点 [m]
   tol?: number | null;   // 判定距離 [m]。null = mesh.size と同値
   label?: string;        // 表示用ラベル (空なら "C1" 等をフロントが振る)
+}
+
+// EEDF/EEPF 集計領域の設定 (軸平行矩形、prompts/85)
+export interface PicEedfRegionSettings {
+  p1: [number, number];  // 対角の2点 (順不同) [m]
+  p2: [number, number];
+  label?: string;         // 表示用ラベル (空なら "E1" 等をフロントが振る)
+  bins?: number;          // ヒストグラムのビン数 (既定100)
+  e_max_ev?: number | null; // null = 平均区間の最初の集計で自動決定
 }
 
 // PIC診断 (1ステップ分)
@@ -455,6 +466,19 @@ export interface PicCollectorResult {
   truncated: boolean;
 }
 
+// 指定矩形範囲の EEDF/EEPF 集計結果 (done メッセージの eedf、prompts/85)。
+// f は EEDF [eV^-1] (∫f dE = 1 に正規化)。EEPF は f/√E で表示側 (PicPanel) が導出する
+export interface PicEedfResult {
+  label: string;
+  e_centers: number[];    // ビン中心のエネルギー [eV]
+  f: number[];            // EEDF [eV^-1] (e_centers と同数)
+  mean_energy_ev: number; // 平均運動エネルギー [eV]
+  t_eff_ev: number;       // T_eff = (2/3)⟨E⟩ [eV]
+  total_weight: number;   // ヒストグラムに入った Σw (実電子数)。0 = 電子が一度も入らなかった
+  overflow_frac: number;  // e_max_ev を超えた分の重み比率 (0〜1)
+  n_samples: number;      // 平均区間の実ステップ数
+}
+
 export interface PicDoneMsg {
   type: "done";
   history: PicHistoryDict; // 列ごとの辞書 (toDiagArray で PicDiag[] に変換して使う)
@@ -462,6 +486,7 @@ export interface PicDoneMsg {
   cycle?: PicCycle;        // RF 1周期の位相分解 (RFなし/phase_bins=0 では省略)
   collector?: PicCollectorResult;    // 旧単数キー (コレクタが1個のときのみ、後方互換)
   collectors?: PicCollectorResult[]; // 複数コレクタの結果 (collectors と同順)
+  eedf?: PicEedfResult[];  // 指定矩形範囲の EEDF/EEPF (eedf_regions と同順、prompts/85)
   // 位相別プロファイル計測 (prompts/75)。キーは solve/gather_push/walk/deposit/mcc/other/total [秒]。
   // continue では区間分のみ (未対応バックエンドでは省略、optional)
   timing?: Record<string, number>;
@@ -675,6 +700,7 @@ export interface ResultsBundle {
     fields: PicFields | null;
     cycle: PicCycle | null;
     collectors: PicCollectorResult[];
+    eedf: PicEedfResult[];
   } | null;
   gas?: DsmcResult | null;
 }

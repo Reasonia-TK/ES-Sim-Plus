@@ -17,6 +17,8 @@ import type {
   PicCollectorSettings,
   PicCycle,
   PicDiag,
+  PicEedfRegionSettings,
+  PicEedfResult,
   PicFields,
   PicFrameMsg,
   PicInjection,
@@ -151,6 +153,15 @@ interface Props {
   onUpdateCollector: (index: number, patch: Partial<PicCollectorSettings>) => void;
   onDeleteCollector: (index: number) => void;
 
+  // done で受信した EEDF/EEPF 領域の集計結果一覧 (pic.eedf_regions と同順、prompts/85)。
+  // 新しい実行開始時に App 側で [] にリセットされる
+  eedfResults: PicEedfResult[];
+  // 領域一覧で選択中のインデックス (未配置なら null)。collectorResults と同じ流儀
+  selectedEedfIndex: number | null;
+  onSelectEedfRegion: (index: number | null) => void;
+  onUpdateEedfRegion: (index: number, patch: Partial<PicEedfRegionSettings>) => void;
+  onDeleteEedfRegion: (index: number) => void;
+
   // 表示モード: "all"=従来通り全表示 (既定・後方互換)、"setup"=設定/実行UIのみ、
   // "results"=結果表示のみ (結果ノード用インスペクタページで使う)
   mode?: "all" | "setup" | "results";
@@ -175,6 +186,10 @@ const DEFAULT_MCC: McSettings = {
 
 // 粒子マージ (prompts/77) の既定値。backend/es_sim/schema.py PicMerge の既定と同じ
 const DEFAULT_MERGE: PicMerge = { n_max: 100000, every: 100 };
+
+// EEDF/EEPF 領域の重ね描き用パレット (紫系を基調に、最大4個を色分け。CadCanvas の
+// 領域オーバーレイ色 #c792ea を1本目に使い、残りは識別しやすい色を添える、prompts/85)
+const EEDF_CHART_COLORS = ["#c792ea", "#7ec8e3", "#f2b880", "#8ee6a9"];
 
 // プロセスラベルは長いことがあるので一覧表示では短縮する (title 属性でフルテキストを見せる)
 function shortLabel(label: string, max = 34): string {
@@ -275,6 +290,11 @@ export default function PicPanel({
   onSelectCollector,
   onUpdateCollector,
   onDeleteCollector,
+  eedfResults,
+  selectedEedfIndex,
+  onSelectEedfRegion,
+  onUpdateEedfRegion,
+  onDeleteEedfRegion,
   mode = "all",
 }: Props) {
   // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
@@ -397,6 +417,31 @@ export default function PicPanel({
     setCsvError(null);
     saveTextFile(`iedf_iadf_${label}.csv`, lines.join("\n"), "CSV", ["csv"]).catch((err) => {
       setCsvError(String(err));
+    });
+  };
+
+  // EEDF/EEPF 領域 (prompts/85)。表示切替 (EEDF/EEPF) と縦軸対数 (既定ON、EEPFは
+  // 片対数で見るのが定番) は結果表示専用のローカル状態 (project 保存対象外)
+  const eedfRegions = pic.eedf_regions ?? [];
+  const [eedfMode, setEedfMode] = useState<"eedf" | "eepf">("eepf");
+  const [eedfLogScale, setEedfLogScale] = useState(true);
+  const [eedfCsvError, setEedfCsvError] = useState<string | null>(null);
+
+  // 選択中領域のCSV保存 (E, f_EEDF, f_EEPF の列。EEPF は E=0 (最初のビン) を除く
+  // 定義通りに列だけは全ビン分書き出し、E=0 の f_EEPF は空欄にする)
+  const downloadEedfCsv = (index: number) => {
+    const r = eedfResults[index];
+    if (!r) return;
+    const label = eedfRegions[index]?.label || `E${index + 1}`;
+    const lines = ["E_eV,f_eedf_ev-1,f_eepf_ev-1.5"];
+    for (let i = 0; i < r.e_centers.length; i++) {
+      const e = r.e_centers[i];
+      const eepf = e > 0 ? r.f[i] / Math.sqrt(e) : "";
+      lines.push(`${e},${r.f[i]},${eepf}`);
+    }
+    setEedfCsvError(null);
+    saveTextFile(`eedf_eepf_${label}.csv`, lines.join("\n"), "CSV", ["csv"]).catch((err) => {
+      setEedfCsvError(String(err));
     });
   };
 
@@ -802,6 +847,83 @@ export default function PicPanel({
       </>
       )}
 
+      {/* EEDF/EEPF 集計領域は一覧編集(setup)と結果表示(results)にまたがるため、
+          見出しは両モードで出し、中身だけモードで出し分ける (コレクタと同じ流儀、prompts/85) */}
+      <h2>PIC: EEDF/EEPF 領域 (最大4個)</h2>
+      {show("setup") && (
+      <>
+      <p className="hint">
+        キャンバスの「EEDF領域」ツールで2点クリックして矩形を追加します。
+        一覧の行をクリックするとキャンバス上で選択中の領域を強調表示します。
+        e_max (空欄=自動) は最初の集計ステップで「矩形内電子の最大エネルギー×1.2」に決まります。
+      </p>
+      <div className="collector-list">
+        {eedfRegions.length === 0 && <div className="muted">(領域なし。キャンバスで配置してください)</div>}
+        {eedfRegions.map((r, i) => (
+          <div
+            key={i}
+            className={`collector-row ${selectedEedfIndex === i ? "selected" : ""}`}
+            onClick={() => onSelectEedfRegion(i)}
+          >
+            <input
+              type="text"
+              className="collector-label-input"
+              value={r.label ?? ""}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => onUpdateEedfRegion(i, { label: e.target.value })}
+            />
+            <span
+              className="collector-points"
+              title={`(${mToUnit(r.p1[0], lengthUnit).toFixed(2)}, ${mToUnit(r.p1[1], lengthUnit).toFixed(2)}) - (${mToUnit(r.p2[0], lengthUnit).toFixed(2)}, ${mToUnit(r.p2[1], lengthUnit).toFixed(2)}) ${unitLabel}`}
+            >
+              ({mToUnit(r.p1[0], lengthUnit).toFixed(1)},{mToUnit(r.p1[1], lengthUnit).toFixed(1)})–({mToUnit(r.p2[0], lengthUnit).toFixed(1)},{mToUnit(r.p2[1], lengthUnit).toFixed(1)})
+            </span>
+            <input
+              type="text"
+              inputMode="numeric"
+              className="collector-tol-input"
+              title="ビン数 (10〜1000)"
+              value={String(r.bins ?? 100)}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (Number.isFinite(n)) onUpdateEedfRegion(i, { bins: Math.round(n) });
+              }}
+            />
+            <input
+              type="text"
+              inputMode="decimal"
+              className="collector-tol-input"
+              placeholder="自動"
+              title="e_max [eV] (空欄=最初の集計ステップで自動決定)"
+              value={r.e_max_ev == null ? "" : String(r.e_max_ev)}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                const raw = e.target.value;
+                if (raw.trim() === "") {
+                  onUpdateEedfRegion(i, { e_max_ev: null });
+                  return;
+                }
+                const n = Number(raw);
+                if (Number.isFinite(n)) onUpdateEedfRegion(i, { e_max_ev: n });
+              }}
+            />
+            <button
+              className="danger collector-delete"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeleteEedfRegion(i);
+              }}
+              title="この領域を削除"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+      </>
+      )}
+
       {show("results") && collectorResults.length > 0 && (
         <>
           <div className="field">
@@ -868,6 +990,41 @@ export default function PicPanel({
           ) : (
             <div className="muted">(選択中のコレクタの実行結果がありません)</div>
           )}
+        </>
+      )}
+
+      {show("results") && eedfResults.length > 0 && (
+        <>
+          <div className="field">
+            <span className="label">表示</span>
+            <select value={eedfMode} onChange={(e) => setEedfMode(e.target.value as "eedf" | "eepf")}>
+              <option value="eedf">EEDF f(E) [eV^-1]</option>
+              <option value="eepf">EEPF f(E)/√E [eV^-1.5]</option>
+            </select>
+          </div>
+          <Toggle label="縦軸対数スケール" checked={eedfLogScale} onChange={setEedfLogScale} />
+          <p className="hint">横軸: 電子エネルギー E [eV] (領域ごとに色分けして重ね描き)</p>
+          <EedfChart regions={eedfRegions} results={eedfResults} mode={eedfMode} logScale={eedfLogScale} />
+          {eedfCsvError && <div className="error">{eedfCsvError}</div>}
+          {eedfResults.map((r, i) => (
+            <div key={i} className="collector-row" style={{ cursor: "default" }}>
+              <span className="tag" style={{ color: EEDF_CHART_COLORS[i % EEDF_CHART_COLORS.length] }}>
+                {eedfRegions[i]?.label || `E${i + 1}`}
+              </span>
+              {r.total_weight > 0 ? (
+                <>
+                  <span>T_eff {r.t_eff_ev.toFixed(2)} eV</span>
+                  <span>⟨E⟩ {r.mean_energy_ev.toFixed(2)} eV</span>
+                  <span>overflow {(r.overflow_frac * 100).toFixed(2)}%</span>
+                  <button className="secondary" onClick={() => downloadEedfCsv(i)}>
+                    CSV保存
+                  </button>
+                </>
+              ) : (
+                <span className="muted">(電子が一度も入りませんでした)</span>
+              )}
+            </div>
+          ))}
         </>
       )}
 
@@ -1514,6 +1671,160 @@ function IaedfChart({ result, bins }: IaedfChartProps) {
       </div>
       <div className="iaedf-log-field">
         <Toggle label="対数スケール" checked={logScale} onChange={setLogScale} />
+      </div>
+    </div>
+  );
+}
+
+interface EedfChartProps {
+  regions: PicEedfRegionSettings[]; // ラベル表示用 (results と同じインデックス対応)
+  results: PicEedfResult[];
+  mode: "eedf" | "eepf";
+  logScale: boolean;
+}
+
+// EEDF/EEPF の重ね描きチャート (領域比較が本機能の主目的のため、選択領域だけでなく
+// 全領域を色分けして同時表示する、prompts/85)。HistogramChart/IaedfChart と同じ
+// canvas 直描きスタイル (枠 #363c48, 9px 目盛りフォント, padL≈44) に合わせる。
+// EEPF (= f/√E) は E=0 の点を除外する (定義上 √E で割れないため)
+function EedfChart({ regions, results, mode, logScale }: EedfChartProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // 領域ごとの (E, y) 系列。y は EEDF ならそのまま f、EEPF なら f/√E (E>0 のみ)
+  const series = useMemo(() => {
+    return results.map((r, i) => {
+      const e: number[] = [];
+      const y: number[] = [];
+      for (let k = 0; k < r.e_centers.length; k++) {
+        const ev = r.e_centers[k];
+        if (mode === "eepf" && !(ev > 0)) continue;
+        const val = mode === "eepf" ? r.f[k] / Math.sqrt(ev) : r.f[k];
+        e.push(ev);
+        y.push(val);
+      }
+      return {
+        label: regions[i]?.label || `E${i + 1}`,
+        color: EEDF_CHART_COLORS[i % EEDF_CHART_COLORS.length],
+        e,
+        y,
+        hasData: r.total_weight > 0,
+      };
+    });
+  }, [regions, results, mode]);
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = el.getBoundingClientRect();
+    el.width = rect.width * dpr;
+    el.height = rect.height * dpr;
+    const ctx = el.getContext("2d")!;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const padL = 52;
+    const padR = 6;
+    const padT = 6;
+    const padB = 16;
+    const plotW = rect.width - padL - padR;
+    const plotH = rect.height - padT - padB;
+
+    // 枠
+    ctx.strokeStyle = "#363c48";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    const active = series.filter((s) => s.hasData && s.e.length > 0);
+    if (active.length === 0) {
+      ctx.fillStyle = "#8a919e";
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("(表示できるデータがありません)", padL + plotW / 2, padT + plotH / 2);
+      return;
+    }
+
+    let eMax = 0;
+    for (const s of active) eMax = Math.max(eMax, arrayMax(s.e));
+    eMax = eMax > 0 ? eMax : 1;
+
+    // 対数スケール時は正の最小値を下限にする (0以下は描画しない)
+    let yMax = 0;
+    let yMinPositive = Infinity;
+    for (const s of active) {
+      for (const v of s.y) {
+        if (v > yMax) yMax = v;
+        if (v > 0 && v < yMinPositive) yMinPositive = v;
+      }
+    }
+    if (!(yMax > 0)) yMax = 1;
+    if (!(yMinPositive < Infinity)) yMinPositive = yMax * 1e-6;
+    const useLog = logScale && yMinPositive < yMax;
+    const logLo = Math.log10(yMinPositive);
+    const logHi = Math.log10(yMax);
+    const logRange = logHi - logLo || 1;
+
+    const xOf = (e: number) => padL + (e / eMax) * plotW;
+    const yOf = (v: number) => {
+      if (useLog) {
+        if (!(v > 0)) return padT + plotH; // 0以下はプロット外 (下端に落とす)
+        const t = (Math.log10(v) - logLo) / logRange;
+        return padT + plotH - Math.min(1, Math.max(0, t)) * plotH;
+      }
+      return padT + plotH - (v / yMax) * plotH;
+    };
+
+    for (const s of active) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      let started = false;
+      for (let k = 0; k < s.e.length; k++) {
+        const v = s.y[k];
+        if (useLog && !(v > 0)) continue; // 対数軸では非正値の点は飛ばす (線が切れる)
+        const x = xOf(s.e[k]);
+        const y = yOf(v);
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+    }
+
+    // 横軸目盛り (0 / 中央 / 最大 E)
+    ctx.font = "9px system-ui, sans-serif";
+    ctx.fillStyle = "#8a919e";
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText("0", padL, padT + plotH + 3);
+    ctx.textAlign = "center";
+    ctx.fillText((eMax / 2).toFixed(1), padL + plotW / 2, padT + plotH + 3);
+    ctx.textAlign = "right";
+    ctx.fillText(eMax.toFixed(1), padL + plotW, padT + plotH + 3);
+
+    // 縦軸目盛り (最大値 / 最小値)
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(yMax.toExponential(1), padL - 4, padT);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(useLog ? yMinPositive.toExponential(1) : "0", padL - 4, padT + plotH);
+  }, [series, logScale]);
+
+  return (
+    <div className="iedf-hist-wrap">
+      <canvas ref={canvasRef} className="iedf-hist" />
+      <div className="pic-chart-legend">
+        {series.map((s, i) => (
+          <span key={i}>
+            <span className="swatch" style={{ background: s.color }} />
+            {s.label}
+            {!s.hasData && " (データなし)"}
+          </span>
+        ))}
       </div>
     </div>
   );

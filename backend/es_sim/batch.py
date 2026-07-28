@@ -133,6 +133,23 @@ def _build_results_bundle(sim: PicSimulation, step_offset: int) -> dict:
                 }
             )
 
+    # ResultsBundle.pic.eedf も同様に必須配列 (prompts/85)。server.py の done 組み立てと同じ変換
+    eedf: list[dict] = []
+    if sim.eedf_results is not None:
+        for r in sim.eedf_results:
+            eedf.append(
+                {
+                    "label": r["label"],
+                    "e_centers": r["e_centers"].tolist(),
+                    "f": r["f"].tolist(),
+                    "mean_energy_ev": r["mean_energy_ev"],
+                    "t_eff_ev": r["t_eff_ev"],
+                    "total_weight": r["total_weight"],
+                    "overflow_frac": r["overflow_frac"],
+                    "n_samples": r["n_samples"],
+                }
+            )
+
     return {
         "version": 1,
         "pic": {
@@ -142,6 +159,7 @@ def _build_results_bundle(sim: PicSimulation, step_offset: int) -> dict:
             "fields": fields,
             "cycle": cycle,
             "collectors": collectors,
+            "eedf": eedf,
         },
     }
 
