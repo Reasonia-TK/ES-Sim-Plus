@@ -450,7 +450,7 @@ class PicSettings(BaseModel):
     # 粒子処理 (walk 探索) のワーカースレッド数 (prompts/50)。粒子ごとの walk は独立な
     # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。
     # 0 = 粒子数・CPU数から自動選択、1 = 逐次、2以上 = 明示並列
-    threads: int = Field(0, ge=0, le=32)
+    threads: int = Field(0, ge=0, le=128)
     # 粒子マージ (高速化③、prompts/77)。null = 無効 (既定。マージ関連の処理・乱数消費が
     # 一切発生せず、従来経路と完全一致する)
     merge: PicMerge | None = None
@@ -530,7 +530,7 @@ class DsmcSettings(BaseModel):
     seed: int = 0
     # 粒子処理 (walk 探索) のワーカースレッド数 (prompts/65)。粒子ごとの walk は独立な
     # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。1 = 従来経路
-    threads: int = Field(1, ge=1, le=32)
+    threads: int = Field(1, ge=1, le=128)
     # 隣接セル拡散による統計ノイズ平滑化の回数 (0=無効、prompts/67)。導出前の生モーメント
     # (Σ個数・Σv・Σv²) に体積重み対称拡散を適用してから n/T/u/p を導出するため、
     # p = n kB T の整合を保ったまま総量 (質量・運動量・エネルギー) を厳密に保存する
