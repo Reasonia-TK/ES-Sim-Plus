@@ -3,6 +3,7 @@ import type { Project, VoltageRf, VoltageWaveform } from "../types";
 import { rfComponents } from "../types";
 import { evalVoltage, voltagePreviewFreqs, pickTimeUnit } from "./VoltagePreviewChart";
 import { EDGE_LABELS_RZ, EDGE_LABELS_RZ_X0, EDGE_LABELS_XY } from "./FieldPanel";
+import { arrayMin, arrayMax } from "../mathUtils";
 
 /**
  * RF位相モニタ (prompts/82)
@@ -71,7 +72,7 @@ export default function RfPhaseMonitor({ project, t }: Props) {
   // 基本周期 T = 1/(全時間依存ソースの最小周波数)。backend _find_rf_freq (全境界・全conductor
   // 領域の freq_hz の min) と同じ集合から求める (voltagePreviewFreqs が 0Hz を除外するのも同じ)
   const freqs = electrodes.flatMap((e) => voltagePreviewFreqs(e.rf, e.waveform));
-  const fMin = freqs.length > 0 ? Math.min(...freqs) : 0;
+  const fMin = freqs.length > 0 ? arrayMin(freqs) : 0;
   const T = fMin > 0 ? 1 / fMin : 0;
 
   const shown = electrodes.slice(0, MAX_ELECTRODES);
@@ -115,8 +116,8 @@ export default function RfPhaseMonitor({ project, t }: Props) {
     const tMaxDisp = T * unitScale || 1;
 
     const allV = series.flat();
-    const vMin = Math.min(...allV);
-    const vMax = Math.max(...allV);
+    const vMin = arrayMin(allV);
+    const vMax = arrayMax(allV);
     const vRange = vMax - vMin || 1;
 
     const xOfFrac = (frac: number) => PAD_L + frac * plotW;

@@ -1,4 +1,5 @@
 import type { Point } from "../types";
+import { arrayMin, arrayMax } from "../mathUtils";
 
 /**
  * 等値線 (マーチング・トライアングル)
@@ -37,8 +38,8 @@ export function computeIsolines(
 ): Point[][][] {
   if (v.length === 0 || triangles.length === 0) return [];
 
-  const vMin = Math.min(...v);
-  const vMax = Math.max(...v);
+  const vMin = arrayMin(v);
+  const vMax = arrayMax(v);
   const range = vMax - vMin;
   if (range <= 0) return [];
 

@@ -14,6 +14,7 @@ import type {
 import { computeIsolines } from "./isolines";
 import { LENGTH_UNIT_LABEL, mToUnit } from "../units";
 import type { LengthUnit } from "../units";
+import { arrayMin, arrayMax } from "../mathUtils";
 
 /**
  * CAD キャンバス
@@ -437,14 +438,14 @@ export default function CadCanvas({
     const poly = project.geometry.domain.polygon;
     const xs = poly.map((p) => p[0]);
     const ys = poly.map((p) => p[1]);
-    const w = Math.max(...xs) - Math.min(...xs);
-    const h = Math.max(...ys) - Math.min(...ys);
+    const w = arrayMax(xs) - arrayMin(xs);
+    const h = arrayMax(ys) - arrayMin(ys);
     const rect = el.getBoundingClientRect();
     const scale = 0.8 * Math.min(rect.width / w, rect.height / h);
     setView({
       scale,
-      ox: rect.width / 2 - scale * (Math.min(...xs) + w / 2),
-      oy: rect.height / 2 + scale * (Math.min(...ys) + h / 2),
+      ox: rect.width / 2 - scale * (arrayMin(xs) + w / 2),
+      oy: rect.height / 2 + scale * (arrayMin(ys) + h / 2),
     });
   }, [project, view]);
 

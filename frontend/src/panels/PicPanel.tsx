@@ -7,6 +7,7 @@ import FnEmissionSection from "./FnPanel";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
 import { isAxisymmetric, rfComponents } from "../types";
+import { arrayMin, arrayMax } from "../mathUtils";
 import type {
   Emitter,
   FnEmission,
@@ -1112,8 +1113,8 @@ function PicHistoryChart({ history }: { history: PicDiag[] }) {
 
     const padY = 3;
     const drawSeries = (values: number[], color: string) => {
-      const vMin = Math.min(...values);
-      const vMax = Math.max(...values);
+      const vMin = arrayMin(values);
+      const vMax = arrayMax(values);
       const range = vMax - vMin || 1;
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.3;
@@ -1174,8 +1175,8 @@ function HistogramChart({ values, weights, bins, unit, color, fixedRange }: Hist
       rangeLo = 0;
       rangeHi = 1;
     } else {
-      rangeLo = Math.min(...values);
-      rangeHi = Math.max(...values);
+      rangeLo = arrayMin(values);
+      rangeHi = arrayMax(values);
       if (!(rangeHi > rangeLo)) rangeHi = rangeLo + 1;
     }
     const counts = new Array(n).fill(0) as number[];
@@ -1211,7 +1212,7 @@ function HistogramChart({ values, weights, bins, unit, color, fixedRange }: Hist
     const binW = plotW / n;
     scaleRef.current = { padL, binW, n };
 
-    const maxCount = Math.max(...counts, 1e-30);
+    const maxCount = Math.max(arrayMax(counts), 1e-30);
 
     // 枠
     ctx.strokeStyle = "#363c48";
@@ -1332,8 +1333,8 @@ function IaedfChart({ result, bins }: IaedfChartProps) {
       eLo = 0;
       eHi = 1;
     } else {
-      eLo = Math.min(...energies);
-      eHi = Math.max(...energies);
+      eLo = arrayMin(energies);
+      eHi = arrayMax(energies);
       if (!(eHi > eLo)) eHi = eLo + 1;
     }
     const counts: number[][] = [];

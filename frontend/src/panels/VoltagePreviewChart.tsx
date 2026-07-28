@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { VoltageRf, VoltageWaveform } from "../types";
+import { arrayMin, arrayMax } from "../mathUtils";
 
 /**
  * 電極電位 V(t) プレビュー (prompts/80)
@@ -95,7 +96,7 @@ export default function VoltagePreviewChart({ voltage, rf, waveform }: Props) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
   const freqs = voltagePreviewFreqs(rf, waveform);
-  const fMin = freqs.length > 0 ? Math.min(...freqs) : 0;
+  const fMin = freqs.length > 0 ? arrayMin(freqs) : 0;
   // 表示窓: 存在する周波数のうち最低周波数の2周期分 (仕様)
   const tMax = fMin > 0 ? 2 / fMin : 0;
 
@@ -138,8 +139,8 @@ export default function VoltagePreviewChart({ voltage, rf, waveform }: Props) {
     const tMaxDisp = tMax * unitScale;
     const tRangeDisp = tMaxDisp || 1;
 
-    const vMin = Math.min(...samples.v);
-    const vMax = Math.max(...samples.v);
+    const vMin = arrayMin(samples.v);
+    const vMax = arrayMax(samples.v);
     const vRange = vMax - vMin || 1;
 
     scaleRef.current = { padL: PAD_L, plotW, tMaxDisp, n: samples.t.length };

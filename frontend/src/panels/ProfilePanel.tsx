@@ -4,6 +4,7 @@ import { saveTextFile } from "../saveFile";
 import { LENGTH_UNIT_LABEL, mToUnit } from "../units";
 import type { LengthUnit } from "../units";
 import type { Point, Project, ProfileResult } from "../types";
+import { arrayMin, arrayMax } from "../mathUtils";
 
 /**
  * ラインプロファイルパネル
@@ -103,10 +104,10 @@ export default function ProfilePanel({ project, lengthUnit, p1, p2, onClose }: P
 
     const vs = data.v.filter((x): x is number => x !== null);
     const es = data.e_abs.filter((x): x is number => x !== null);
-    const vMin = vs.length ? Math.min(...vs) : 0;
-    const vMax = vs.length ? Math.max(...vs) : 1;
+    const vMin = vs.length ? arrayMin(vs) : 0;
+    const vMax = vs.length ? arrayMax(vs) : 1;
     const eMin = 0;
-    const eMax = es.length ? Math.max(...es) : 1;
+    const eMax = es.length ? arrayMax(es) : 1;
     const vRange = vMax - vMin || 1;
     const eRange = eMax - eMin || 1;
 

@@ -5,6 +5,7 @@ import type { LengthUnit } from "../units";
 import FnEmissionSection from "./FnPanel";
 import { isAxisymmetric } from "../types";
 import type { Emitter, FnEmission, ParticleSettings, Project, Species, TraceResult } from "../types";
+import { arrayMin, arrayMax } from "../mathUtils";
 
 /**
  * 粒子パネル
@@ -93,8 +94,8 @@ export default function ParticlePanel({
     const tofs = traceResult.tof.filter((t): t is number => t !== null);
     const avgTof = tofs.length ? tofs.reduce((a, b) => a + b, 0) / tofs.length : null;
     const energies = traceResult.final_energy_ev;
-    const eMin = energies.length ? Math.min(...energies) : null;
-    const eMax = energies.length ? Math.max(...energies) : null;
+    const eMin = energies.length ? arrayMin(energies) : null;
+    const eMax = energies.length ? arrayMax(energies) : null;
     // 吸収粒子の入射角統計 (final_angle_deg を status == "absorbed" の粒子で集計)
     const absorbedAngles = traceResult.status
       .map((s, i) => (s === "absorbed" ? traceResult.final_angle_deg[i] : null))
@@ -108,8 +109,8 @@ export default function ParticlePanel({
       const variance =
         absorbedAngles.reduce((a, b) => a + (b - angleMean!) ** 2, 0) / absorbedAngles.length;
       angleStd = Math.sqrt(variance);
-      angleMin = Math.min(...absorbedAngles);
-      angleMax = Math.max(...absorbedAngles);
+      angleMin = arrayMin(absorbedAngles);
+      angleMax = arrayMax(absorbedAngles);
     }
     summary = { n, absorbed, alive: n - absorbed, avgTof, eMin, eMax, angleMean, angleStd, angleMin, angleMax };
   }
