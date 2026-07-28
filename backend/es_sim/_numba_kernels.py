@@ -947,6 +947,47 @@ if HAVE_NUMBA:
                 maximum = speed2
         return maximum
 
+    @njit(cache=True, nogil=True)
+    def _cell_sort_order_kernel(elem, n_cells):
+        """粒子のセル (elem) 順への安定な置換インデックスを計数ソートで求める
+        (高速化③、prompts/84)。
+
+        elem の値域が [0, n_cells) と既知なので、比較ソート (np.argsort、
+        O(N log N)) ではなく計数ソート (O(N + n_cells)) で求められる。2パス構成:
+          1. 各セルの粒子数を数え、累積和でセルごとの書き込み開始位置を得る
+          2. 元の順序で走査しながら開始位置へ書き込み、書き込み位置を1つ進める
+             (同じセル内の粒子は元の相対順序のまま = 安定ソートと同じ結果)
+        大粒子数 (N ≫ n_cells) で argsort より大幅に速く、ソートを50ステップ
+        ごとに償却してもコストをほぼ無視できる水準にできる。
+        """
+        n = elem.shape[0]
+        counts = np.zeros(n_cells, dtype=np.int64)
+        for i in range(n):
+            counts[elem[i]] += 1
+        pos = np.empty(n_cells, dtype=np.int64)
+        acc = 0
+        for c in range(n_cells):
+            pos[c] = acc
+            acc += counts[c]
+        order = np.empty(n, dtype=np.int64)
+        for i in range(n):
+            e = elem[i]
+            order[pos[e]] = i
+            pos[e] += 1
+        return order
+
+
+def cell_sort_order(elem: np.ndarray, n_cells: int) -> np.ndarray:
+    """粒子のセル順ソート (prompts/84) 用の安定な置換インデックスを返す。
+
+    numba があれば計数ソート (O(N + n_cells))、無ければ np.argsort(kind="stable")
+    (O(N log N)) にフォールバックする。どちらも同一セル内の相対順序を保つ
+    安定ソートであり、返す置換 (同一値どうしの相対順) は完全に一致する。
+    """
+    if HAVE_NUMBA:
+        return _cell_sort_order_kernel(elem, n_cells)
+    return np.argsort(elem, kind="stable")
+
 
 def walk_step(coeffs, adjacency, elem0, x_new, l_out=None, packed=None):
     """particles._walk_step_numpy の numba 版。戻り値・意味は完全に同じ。

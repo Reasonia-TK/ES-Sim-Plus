@@ -65,6 +65,26 @@ MAX_FRAME_PARTICLES = 2000
 # IEDF/IADF コレクタのサンプル上限 (超過分は count/total_weight のみ計上、prompts/30)
 COLLECTOR_MAX_SAMPLES = 50000
 
+# 粒子のセル順ソート間隔 (高速化③、prompts/84)。ソート自体は O(N log N) だが、
+# SORT_EVERY ステップで償却すればコストはほぼゼロになる。一方、粒子は1ステップに
+# 隣接セル数個分しか移動しないため、生成順 (電離・注入順) のまま放置しても
+# 50ステップ程度は所属要素順からの乱れが小さい。50 はこの二つのバランス点
+# (古典的な PIC の空間局所性最適化で一般的な目安)
+SORT_EVERY = 50
+
+# セル順ソートを有効化する最小メッシュ要素数 (prompts/84 の追加ガード)。
+# 実測 (backend/benchmarks/pic_bench.py): 770要素 (既定ベンチ) では
+# per-element データ (coeffs・adjacency・E場など) がまるごとキャッシュに常駐して
+# しまい、粒子順を揃えても局所性は改善せず、ソートのコスト (計数ソート後も残る
+# 配列コピー) だけが乗って 20万粒子規模で最大 +9% の退行を確認した。一方
+# 20928要素では per-element データがキャッシュに収まらなくなり -5.2% の高速化を
+# 確認できた。要素あたりの参照データ (coeffs 4本 + adjacency 3本 + E場2本 など
+# 概算100バイト級) × 4000要素 ≒ 数百KB〜1MB で L2 級のサイズになる見込みを
+# 境界の目安とする。これ未満のメッシュではソートを完全にスキップし
+# (呼び出しコストも含めて従来経路と実質不変)、粗いメッシュの小規模計算で
+# 退行しないことを優先する。
+SORT_MIN_ELEMS = 4000
+
 # walk 並列実行用の共有ワーカースレッド (遅延生成、プロセスで1本)
 _WALK_POOL: ThreadPoolExecutor | None = None
 
@@ -1530,6 +1550,51 @@ class PicSimulation:
             if sp.name == "ion":
                 self._f_ion_cache = None
 
+    def _sort_particles_by_cell(self) -> None:
+        """種ごとの粒子配列を所属要素 (elem) 順に並べ替える (高速化③、prompts/84)。
+
+        隣り合うインデックスの粒子が同じ・近いセルを触るようにすることで、
+        gather (E補間)・deposit (電荷堆積)・walk (隣接セル参照) のメモリアクセスの
+        空間局所性を上げる。粒子は生成順 (装荷・注入・電離順) のまま蓄積されるため、
+        ステップを重ねるほど所属セルの並びはバラバラになる。
+
+        stable ソートを使う理由: 同一セル内の相対順序を保つことで、粒子順に乱数を
+        消費する処理 (MCC 等) への影響を「異なるセル間の順序変化」のみに抑える
+        (同一セル内の粒子同士の相対順は不変)。ただし他セルとの相対順は変わるため、
+        ソートあり/なしの実行はステップを跨ぐとビット単位では一致しなくなる
+        (統計的には同等。同一シードでの再実行同士は決定的に一致し続ける)。
+
+        不動種 (immobile、mobile=False) は動かないため元の並びが局所性を失わず、
+        並べ替える意味が無いのでスキップする。
+
+        バッファ再利用との整合: 並べ替えはファンシーインデックス (常に新規配列)
+        で行うため、push+walk 出力バッファ (_push_walk_buffers) が現在状態と
+        共有していたメモリは自動的に「共有していない予備」として扱われる
+        (_push_walk_output_buffers / _release_push_walk_spares の np.shares_memory
+        判定がそのまま機能する)。専用の無効化処理は不要。
+        """
+        for sp in self.species.values():
+            if not sp.mobile or len(sp.elem) == 0:
+                continue
+            # 粒子数 ≫ 要素数が通常のケースなので、比較ソートではなく
+            # 計数ソート (numba あれば O(N + 要素数)) で置換インデックスを求める
+            # (_numba_kernels.cell_sort_order を参照。argsort と同じ安定な結果)
+            order = _numba_kernels.cell_sort_order(sp.elem, len(self.tris))
+            sp.x = sp.x[order]
+            sp.v = sp.v[order]
+            sp.w = sp.w[order]
+            sp.elem = sp.elem[order]
+            # 重心座標キャッシュは同じ置換で追従させれば再計算を避けられる
+            # (無効なキャッシュ = None ならそのまま、次回参照時に自然に再計算される)
+            if sp.bary is not None and len(sp.bary) == len(order):
+                sp.bary = sp.bary[order]
+            sp.nidx = None  # tris_dep[elem] は安価に再計算できるため単純に無効化
+            if sp.name == "ion":
+                # イオンサブサイクル中の堆積キャッシュ (prompts/50) は、粒子の並びが
+                # 変わっても合計値としては不変 (Σ は順序に依存しない量) だが、他の
+                # 粒子配列変更箇所と同じ規約で揃えて無効化する (安全側・意図を明確にする)
+                self._f_ion_cache = None
+
     def _walk_chunked_submit(
         self, elem: np.ndarray, x_new: np.ndarray, l_new: np.ndarray, futures: list
     ):
@@ -2034,7 +2099,20 @@ class PicSimulation:
         # FN 電界放出: このステップの総放出電流 [A/m] と累計放出マクロ電子数
         h["fn_i"].append(fn_i)
         h["fn_events"].append(self.fn_events)
-        # 注入・FN放出・時間平均積算・診断記録などの細かい処理をまとめて計測する
+
+        # 8. セル順ソート (高速化③、prompts/84)。診断記録の後 (このステップの
+        # 全処理が終わった後) に行うのが安全 — 途中の壁吸収判定・MCC・注入は
+        # いずれも sp.x/sp.elem の対応関係のみを使うため、並べ替え自体はどこで
+        # 行っても物理的な結果は変わらないが、記録済みの診断値には影響しない
+        # 末尾が最も見通しが良い。
+        # メッシュ要素数が SORT_MIN_ELEMS 未満なら丸ごとスキップする (実測に基づく
+        # ガード。定数の根拠は SORT_MIN_ELEMS のコメントを参照。粗いメッシュでは
+        # per-element データがキャッシュに収まり局所性改善が出ないため、
+        # ソートコストだけが乗って退行するのを避ける)
+        if len(self.tris) >= SORT_MIN_ELEMS and self.step_count % SORT_EVERY == 0:
+            self._sort_particles_by_cell()
+
+        # 注入・FN放出・時間平均積算・診断記録・セル順ソートなどの細かい処理をまとめて計測する
         t_other1 = time.perf_counter()
         self.timing["other"] += t_other1 - t_mcc1
         return phi
