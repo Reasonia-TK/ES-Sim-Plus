@@ -121,7 +121,11 @@ def test_auto_threads_uses_particle_threshold_and_cpu_cap():
     """threads=0 は小規模で逐次、大規模でCPU数と上限2を考慮して選ぶ。"""
     assert _effective_thread_count(0, 20_000, cpu_count=16) == 1
     assert _effective_thread_count(0, 100_000, cpu_count=2) == 2
-    assert _effective_thread_count(0, 100_000, cpu_count=16) == 2
+    # メニーコア機では論理コア数の半分 (上限16) まで自動で使う (prompts/86 相当の修正:
+    # 旧上限2は小コア環境の実測によるもので、24コア級では機械を遊ばせていた)
+    assert _effective_thread_count(0, 100_000, cpu_count=16) == 8
+    assert _effective_thread_count(0, 200_000, cpu_count=48) == 16
+    assert _effective_thread_count(0, 100_000, cpu_count=4) == 2
     # 明示指定は自動選択の閾値・上限に関係なく尊重する
     assert _effective_thread_count(8, 20_000, cpu_count=16) == 8
 

@@ -100,10 +100,17 @@ FN_MAX_MACROS_PER_STEP = 10000
 # 実測では2万粒子/種で4スレッドが逆効果、10万粒子/種で有効だったため、中間の
 # 5万を保守的な開始点にする。Numbaありでも小配列のprange起動コストを避けられる。
 AUTO_THREAD_MIN_PARTICLES = 50000
-# Windowsデスクトップ用途では、粒子カーネルに全論理コアを与えるとUI・WebSocket・
-# BLASと競合しやすい。10万〜50万粒子/種の実測で4より安定して速かった2を
-# 自動選択の上限とし、明示指定なら最大32まで許す。
-AUTO_THREAD_CAP = 2
+# 自動選択の上限。全論理コアを与えるとUI・WebSocket・BLASと競合し、HT分の論理コアは
+# 数値カーネルではほぼ効かないため「論理コア数の半分 (≒物理コア相当)」を基本とする。
+# 小コア機 (2〜4論理) では下限2を維持 (旧上限2の実測はこの規模の環境によるもの)。
+# メニーコア機でもメモリ帯域の飽和と直列部 (solve等) の存在から16で頭打ちにする。
+# 明示指定なら最大32まで許す。
+AUTO_THREAD_MAX = 16
+
+
+def _auto_thread_cap(cores: int) -> int:
+    """自動選択時の上限スレッド数 (論理コア数から決める)。"""
+    return max(2, min(AUTO_THREAD_MAX, cores // 2))
 
 
 def _walk_pool() -> ThreadPoolExecutor:
@@ -126,7 +133,7 @@ def _effective_thread_count(
     cores = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
     if n_particles_per_species < AUTO_THREAD_MIN_PARTICLES:
         return 1
-    return min(AUTO_THREAD_CAP, cores)
+    return min(_auto_thread_cap(cores), cores)
 
 
 def _eval_waveform(phase, v, freq_hz: float, t):
