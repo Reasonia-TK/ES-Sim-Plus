@@ -261,6 +261,8 @@ export interface DsmcStartedMsg {
   n_steps: number;
   dt: number;
   n_particles: number;
+  // 実効スレッド数 (旧バックエンドには無いので optional)。設定が届いているかの確認用
+  threads?: number;
 }
 
 // 100ステップごとに送られる進捗通知

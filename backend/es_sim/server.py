@@ -260,6 +260,9 @@ async def _stream_dsmc(ws: WebSocket, sim: DsmcSimulation) -> None:
             "n_steps": sim.s.n_steps,
             "dt": sim.dt,
             "n_particles": len(sim.x),
+            # 実効スレッド数。設定が実際に動いているバックエンドへ届いているかを
+            # フロントで確認できるようにする (PIC の effective_threads と同じ趣旨)
+            "threads": sim._nthreads,
         }
     )
 

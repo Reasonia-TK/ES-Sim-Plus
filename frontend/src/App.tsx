@@ -476,6 +476,9 @@ export default function App() {
   const [gasResult, setGasResult] = useState<DsmcResult | null>(null);
   // 実行中の進捗 (started/progress メッセージから更新。未実行/完了後は null)
   const [gasProgress, setGasProgress] = useState<{ step: number; nSteps: number; nParticles: number } | null>(null);
+  // DSMC の実効スレッド数 (started で受信)。設定が実際に動いているバックエンドへ
+  // 届いているかの確認用 (旧サイドカー残留の切り分けにも使える)
+  const [gasThreads, setGasThreads] = useState<number | null>(null);
   // 実行中のライブ粒子位置 (progress の間引き座標。実行中のみ非null、完了後は結果フィールド
   // 表示に切り替わるため null に戻す、prompts/66)
   const [gasLiveParticles, setGasLiveParticles] = useState<Point[] | null>(null);
@@ -716,6 +719,7 @@ export default function App() {
   const makeDsmcCallbacks = (): DsmcClientCallbacks => ({
     onStarted: (msg) => {
       setGasProgress({ step: 0, nSteps: msg.n_steps, nParticles: msg.n_particles });
+      setGasThreads(msg.threads ?? null);
     },
     onProgress: (msg) => {
       setGasProgress({ step: msg.step, nSteps: msg.n_steps, nParticles: msg.n_particles });
@@ -2132,6 +2136,7 @@ export default function App() {
                 onContinue={runDsmcContinue}
                 continueDisabledByProjectChange={gasProjectChangedSinceRun}
                 progress={gasProgress}
+                lastThreads={gasThreads}
                 result={gasResult}
                 error={gasError}
                 resultField={gasResultField}
@@ -2158,6 +2163,7 @@ export default function App() {
                 onContinue={runDsmcContinue}
                 continueDisabledByProjectChange={gasProjectChangedSinceRun}
                 progress={gasProgress}
+                lastThreads={gasThreads}
                 result={gasResult}
                 error={gasError}
                 resultField={gasResultField}

@@ -138,6 +138,8 @@ interface Props {
   // (PicPanel の continueDisabledByProjectChange 参照)
   continueDisabledByProjectChange: boolean;
   progress: GasProgress | null;
+  // 直近実行の実効スレッド数 (started 由来、未実行/旧バックエンドは null)
+  lastThreads: number | null;
   result: DsmcResult | null;
   error: string | null;
   resultField: GasResultField;
@@ -168,6 +170,7 @@ export default function GasPanel({
   onContinue,
   continueDisabledByProjectChange,
   progress,
+  lastThreads,
   result,
   error,
   resultField,
@@ -511,6 +514,11 @@ export default function GasPanel({
               onCommit={(v) => onChange({ ...dsmc, threads: Math.max(1, Math.round(v)) })}
             />
           </div>
+          <p className="hint">
+            walk・NTC衝突の並列スレッド数
+            {lastThreads != null ? ` (前回実行: ${lastThreads}スレッド)` : ""}。
+            前回実行の値が設定と一致しない場合、古いバックエンドに接続している可能性があります
+          </p>
           <p className="hint">
             walk 探索の並列スレッド数。結果は1と完全一致。CPUコア数程度まで
           </p>
