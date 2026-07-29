@@ -236,6 +236,10 @@ export interface DsmcSettings {
   // 隣接セル拡散による統計ノイズ平滑化の回数 (0=無効、prompts/67)。総量
   // (質量・運動量・エネルギー) は保存され、結果表示と PIC 連成の両方に適用される
   smoothing_passes: number;
+  // DSMC 専用メッシュの寸法係数 (1〜20、既定1、prompts/89)。FEM メッシュ寸法 (mesh.size・
+  // local_sizes) × この係数で DSMC 専用の粗いメッシュを生成する。walk コストはセル寸法に
+  // 反比例するため、粗化係数分だけ直接軽くなる。1.0 = 従来どおり FEM と同一メッシュ
+  mesh_scale: number;
 }
 
 // POST /dsmc のレスポンス (定常時間平均のガス場)

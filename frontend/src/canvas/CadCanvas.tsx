@@ -104,8 +104,14 @@ interface Props {
   // 長さの表示単位 (mm/µm)。project 内部は常に m のまま (カーソル座標・ルーラー目盛りの表示に使う)
   lengthUnit: LengthUnit;
   result: SolveResult | null;
-  // Mesh ボタン (解析なし) で生成したメッシュ。result がある間は result 側の表示を優先する
+  // Mesh ボタン (解析なし) で生成したメッシュ。result/picFrame がある間は通常そちら側の
+  // 表示を優先するが、meshResultIsLatest が true の間 (直近の操作が Mesh 実行だった場合)
+  // はこちらを最優先する (prompts/89 ②: 再メッシュしてもプレビューが更新されない不具合の修正)
   meshResult: MeshResult | null;
+  // true: meshResult が result/picFrame よりも「最後に生成されたもの」であることを示し、
+  // キャンバスのベースレイヤー描画で最優先にする。Solve 完了・PIC 開始で false に戻る
+  // (App.tsx の meshPreviewFresh 参照)。未指定時は従来通り false 相当 (result/picFrame 優先)
+  meshResultIsLatest?: boolean;
   showMesh: boolean;
   tool: Tool;
   gridSnap: boolean;
@@ -360,6 +366,7 @@ export default function CadCanvas({
   lengthUnit,
   result,
   meshResult,
+  meshResultIsLatest = false,
   showMesh,
   tool,
   gridSnap,
@@ -610,12 +617,19 @@ export default function CadCanvas({
       drawColorbar(rawMin, rawMax, picFieldView.unit);
     }
 
+    // meshResult (Mesh ボタン) が result/picFrame より「後に生成された」場合は、それらより
+    // 手前でメッシュのワイヤーフレームを最優先表示する (prompts/89 ②)。result も picFrame も
+    // ジオメトリ変更等でしかクリアされず Mesh 実行では消えないため、この優先判定なしだと
+    // 「一度計算した後は再メッシュしてもプレビューが更新されない」不具合になる
+    const meshWireTakesPriority = !!meshResult && meshResultIsLatest;
+
     // PICライブ表示: 選択フィールド (電位/電子密度/イオン密度、prompts/81) を
     // picFieldView と同じ節点値/要素値・対数スケール対応の経路で描画し、
     // 粒子を点描画する (電子=シアン、イオン=オレンジ)。実行中〜done後の最終フレームまで
-    // Solve/Mesh 側の表示より優先する。フレームごとに min/max を再計算する。
-    // picFieldView (結果フィールド表示) が選択されている間はこちらは描画しない
-    if (!picFieldView && picFrame) {
+    // Solve/Mesh 側の表示より優先する (ただし meshWireTakesPriority のときは Mesh 側が勝つ)。
+    // フレームごとに min/max を再計算する。picFieldView (結果フィールド表示) が
+    // 選択されている間はこちらは描画しない
+    if (!picFieldView && !meshWireTakesPriority && picFrame) {
       const { nodes, triangles } = picFrame.mesh;
       const { values, nodeBased, log } = picFrame;
 
@@ -657,8 +671,10 @@ export default function CadCanvas({
     }
 
     // Mesh ボタンで生成したメッシュのワイヤーフレーム (解析結果がない状態でも見えるようにする)。
-    // Solve 結果がある間は Solve 側の表示 (カラーマップ) を優先する。PICライブ/結果フィールド表示中は出さない
-    if (!picFieldView && !picFrame && !result && meshResult) {
+    // 通常は Solve/PIC 側の表示 (カラーマップ) を優先するが、meshWireTakesPriority が
+    // true (= meshResult が最後に生成されたもの) の場合はこちらを優先する (prompts/89 ②)。
+    // PICライブ/結果フィールド表示中は出さない
+    if (!picFieldView && meshResult && (meshWireTakesPriority || (!picFrame && !result))) {
       const { nodes, triangles, region_of_triangle } = meshResult;
       const regionColor = (type: Region["type"]): string =>
         type === "conductor"
@@ -686,8 +702,8 @@ export default function CadCanvas({
     }
 
     // 解析結果: カラーマップ (fieldView に応じて電位 V または要素ごとの |E| を塗る)。
-    // PICライブ/結果フィールド表示中は出さない
-    if (!picFieldView && !picFrame && result) {
+    // PICライブ/結果フィールド表示中、および meshWireTakesPriority (prompts/89 ②) の間は出さない
+    if (!picFieldView && !meshWireTakesPriority && !picFrame && result) {
       const { nodes, triangles } = result.mesh;
       const { v, v_min, v_max, e_field, e_abs_max } = result;
 
@@ -1375,6 +1391,7 @@ export default function CadCanvas({
     project,
     result,
     meshResult,
+    meshResultIsLatest,
     showMesh,
     view,
     toWorld,

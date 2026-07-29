@@ -923,3 +923,216 @@ def test_dsmc_timing_phases():
     res = sim2.run()
     assert set(res.timing.keys()) == set(sim2.timing.keys())
     assert sum(v for k, v in res.timing.items() if k not in WALK_DIAG_KEYS) > 0.0
+
+
+# ---- ① DSMC専用メッシュの粗化係数 (mesh_scale、prompts/89) --------------------------
+
+
+def test_dsmc_mesh_scale_one_matches_legacy_path():
+    """mesh_scale=1.0 (既定) は generate_mesh(project) をそのまま渡す従来経路と
+    完全に同じメッシュを使い、明示的な 1.0 と省略 (デフォルト) でも結果がビット単位で
+    一致する (schema 追加によるデグレードが無いことの確認)。
+    """
+    from es_sim.meshing import generate_mesh
+
+    kwargs = {
+        "init_pressure_pa": 5.0, "init_temperature_k": 300.0, "wall_temperature_k": 300.0,
+        "n_particles": 4000, "n_steps": 30, "avg_steps": 10, "seed": 1,
+    }
+    project_explicit = _project({**kwargs, "mesh_scale": 1.0})
+    project_default = _project(kwargs)
+
+    sim_explicit = DsmcSimulation(project_explicit)
+    sim_default = DsmcSimulation(project_default)
+    direct = generate_mesh(project_default)
+
+    assert np.array_equal(sim_explicit.mesh.nodes, direct.nodes)
+    assert np.array_equal(sim_explicit.mesh.triangles, direct.triangles)
+    assert np.array_equal(sim_default.mesh.nodes, direct.nodes)
+    assert np.array_equal(sim_default.mesh.triangles, direct.triangles)
+
+    res_a = sim_explicit.run()
+    res_b = sim_default.run()
+    assert np.array_equal(res_a.n, res_b.n)
+    assert np.array_equal(res_a.t, res_b.t)
+    assert np.array_equal(res_a.u, res_b.u)
+    assert np.array_equal(res_a.p, res_b.p)
+
+
+def test_dsmc_mesh_scale_reduces_elements_and_preserves_equilibrium():
+    """mesh_scale=3.0: 要素数が概ね 1/9 に減り (辺長×3 → 面積×9)、粗いメッシュでも
+    一様平衡箱の n/T が理論値と一致する (粗くても平衡は保たれる、prompts/89)。
+    """
+    p0, t0 = 10.0, 300.0
+    base = {
+        "init_pressure_pa": p0, "init_temperature_k": t0, "wall_temperature_k": t0,
+        "n_particles": 30000, "n_steps": 600, "avg_steps": 300, "seed": 1,
+    }
+    sim1 = DsmcSimulation(_project(base))
+    sim3 = DsmcSimulation(_project({**base, "mesh_scale": 3.0}))
+
+    ratio = len(sim3.tris) / len(sim1.tris)
+    assert 1.0 / 12.0 < ratio < 1.0 / 6.0  # ≈ 1/9 のオーダー
+
+    res3 = sim3.run()
+    n0 = p0 / (KB * t0)
+    area = sim3.area
+    n_mean = float(np.sum(res3.n * area) / area.sum())
+    t_mean = float(np.sum(res3.t * res3.n * area) / np.sum(res3.n * area))
+    assert n_mean == pytest.approx(n0, rel=0.05)
+    assert t_mean == pytest.approx(t0, rel=0.05)
+
+
+def test_dsmc_mesh_scale_mapping_spot_check():
+    """PIC 連成の要素重心マッピング (prompts/89): 圧力駆動チャネル (非一様、mesh_scale=2)
+    で、DSMC メッシュの要素重心そのものをターゲット点としてマッピングすると、
+    その要素自身の n/T/u がそのまま返る (点位置特定が対応する DSMC 要素を正しく
+    特定できていることの直接スポットチェック)。
+    """
+    from es_sim.mcc import GasField
+    from es_sim.pic import _map_gas_field_to_mesh
+
+    t0 = 300.0
+    project = _project(
+        {
+            "boundaries": [
+                {"edges": [3], "type": "inlet", "pressure_pa": 20.0, "temperature_k": t0},
+                {"edges": [1], "type": "outlet", "pressure_pa": 5.0, "temperature_k": t0},
+            ],
+            "init_pressure_pa": 12.0,
+            "init_temperature_k": t0,
+            "wall_temperature_k": t0,
+            "n_particles": 40000,
+            "n_steps": 1500,
+            "avg_steps": 500,
+            "seed": 3,
+            "mesh_scale": 2.0,
+        }
+    )
+    sim = DsmcSimulation(project)
+    res = sim.run()
+    field = GasField(
+        n_g=res.n, t_g=res.t, u_g=res.u,
+        src_nodes=sim.mesh.nodes, src_triangles=sim.mesh.triangles,
+    )
+
+    centroids = sim.mesh.nodes[sim.tris].mean(axis=1)
+    rng = np.random.default_rng(0)
+    idx = rng.choice(len(sim.tris), size=8, replace=False)
+    mapped = _map_gas_field_to_mesh(field, centroids[idx])
+    assert np.array_equal(mapped.n_g, res.n[idx])
+    assert np.array_equal(mapped.t_g, res.t[idx])
+    assert np.array_equal(mapped.u_g, res.u[idx])
+
+
+def test_dsmc_mesh_scale_pic_coupling_smoke():
+    """mesh_scale>1 で DSMC 専用メッシュ (≠ PIC メッシュ) になっても、use_dsmc_gas の
+    PIC が要素重心マッピングを介して正常に起動・実行できる (PICスモーク、prompts/89)。
+    """
+    from starlette.testclient import TestClient
+
+    from es_sim import server as srv
+
+    c = TestClient(srv.app)
+    base_geom = {
+        "geometry": {
+            "domain": {"polygon": [[0, 0], [L, 0], [L, H], [0, H]]},
+            "boundaries": [
+                {"edges": [3], "type": "dirichlet", "voltage": 0.0},
+                {"edges": [1], "type": "dirichlet", "voltage": 0.0},
+            ],
+        },
+        "mesh": {"size": 1.5e-3},
+    }
+    dsmc_project = base_geom | {
+        "dsmc": {
+            "boundaries": [
+                {"edges": [0], "type": "inlet", "pressure_pa": 10.0},
+                {"edges": [2], "type": "outlet", "pressure_pa": 3.0},
+            ],
+            "init_pressure_pa": 6.0,
+            "n_particles": 10000,
+            "n_steps": 300,
+            "avg_steps": 100,
+            "seed": 4,
+            "mesh_scale": 3.0,
+        }
+    }
+    r = c.post("/dsmc", json=dsmc_project)
+    assert r.status_code == 200, r.text
+    assert srv._last_dsmc is not None
+    n_dsmc_elems = srv._last_dsmc["n_elems"]
+
+    pic_project = Project.model_validate(
+        base_geom
+        | {
+            "pic": {
+                "initial_plasma": {
+                    "density": 1e14, "te_ev": 2.0, "ti_ev": 0.03,
+                    "ion_mass_amu": 40.0, "seed": 5,
+                },
+                "n_macro": 2000,
+                "dt": 5e-11,
+                "n_steps": 5,
+                "frame_every": 100,
+                "mcc": {
+                    "gas": {"name": "Ar", "pressure_pa": 6.0, "temperature_k": 300.0},
+                    "electron_processes": [
+                        {
+                            "kind": "elastic", "label": "syn", "threshold_ev": 0.0,
+                            "mass_ratio": 1.36e-5,
+                            "energy_ev": [0.0, 100.0], "sigma_m2": [1e-19, 1e-19],
+                        }
+                    ],
+                    "seed": 7,
+                    "use_dsmc_gas": True,
+                },
+            }
+        }
+    )
+    sim = PicSimulation(pic_project, srv._last_dsmc["field"])
+    # mesh_scale=3 で DSMC メッシュの要素数が PIC 側 (FEM共有メッシュ) と分離できている確認
+    assert n_dsmc_elems != len(sim.tris)
+    assert sim.mcc is not None and sim.mcc.field is not None
+    assert len(sim.mcc.field.n_g) == len(sim.tris)  # マッピング後は PIC メッシュへ揃っている
+    for _ in range(5):
+        sim.step()
+    assert np.all(np.isfinite(sim.species["electron"].v))
+
+
+def test_dsmc_mesh_scale_sccm_mass_balance():
+    """mesh_scale=2.0 の粗化メッシュでも sccm 流量指定の質量収支
+    (流入レートの換算値一致・定常流出釣り合い) が成立する (prompts/89)。
+    """
+    from es_sim.dsmc import SCCM_TO_PER_S
+
+    sccm = 10.0
+    project = _project(
+        {
+            "gas": {"d_ref_m": 1e-15},  # 無衝突 (輸送を単純化)
+            "boundaries": [
+                {"edges": [3], "type": "inlet", "flow_sccm": sccm},
+                {"edges": [1], "type": "outlet"},  # 真空排気
+                {"edges": [0], "type": "symmetry"},
+                {"edges": [2], "type": "symmetry"},
+            ],
+            "init_pressure_pa": 0.01,
+            "init_temperature_k": 300.0,
+            "n_particles": 30000,
+            "n_steps": 1500,
+            "avg_steps": 500,
+            "seed": 7,
+            "mesh_scale": 2.0,
+        }
+    )
+    sim = DsmcSimulation(project)
+    res = sim.run()
+
+    ndot_expected = sccm * SCCM_TO_PER_S
+    t_avg = 500 * sim.dt
+    inflow_rate = res.inflow / t_avg
+    assert inflow_rate == pytest.approx(ndot_expected, rel=0.02)
+    assert res.outflow == pytest.approx(res.inflow, rel=0.10)
+    area = sim.area
+    ux_mean = float(np.sum(res.u[:, 0] * res.n * area) / np.sum(res.n * area))
+    assert ux_mean > 0.0

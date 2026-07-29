@@ -161,12 +161,21 @@ def trace_endpoint(project: Project) -> TraceResult:
 _last_dsmc: dict | None = None
 
 
-def _store_dsmc_result(res) -> None:
-    """DSMC 結果を PIC (mcc.use_dsmc_gas) 用の保持スロットへ格納する。"""
+def _store_dsmc_result(sim: DsmcSimulation, res) -> None:
+    """DSMC 結果を PIC (mcc.use_dsmc_gas) 用の保持スロットへ格納する。
+
+    GasField に DSMC が実際に使ったメッシュ (sim.mesh の節点・要素) を同梱する
+    (prompts/89)。mesh_scale=1.0 なら PIC 側のメッシュと要素数が一致するため
+    使われず (従来のビット不変経路)、mesh_scale>1 で要素数が食い違う場合のみ
+    PicSimulation 側がこれを使って要素重心マッピングを行う
+    """
     global _last_dsmc
     _last_dsmc = {
         "n_elems": len(res.n),
-        "field": GasField(n_g=res.n, t_g=res.t, u_g=res.u),
+        "field": GasField(
+            n_g=res.n, t_g=res.t, u_g=res.u,
+            src_nodes=sim.mesh.nodes, src_triangles=sim.mesh.triangles,
+        ),
     }
 
 
@@ -202,7 +211,7 @@ def dsmc_endpoint(project: Project) -> DsmcResultModel:
         res = sim.run()
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    _store_dsmc_result(res)
+    _store_dsmc_result(sim, res)
     return _dsmc_result_model(sim, res)
 
 
@@ -310,7 +319,7 @@ async def _stream_dsmc(ws: WebSocket, sim: DsmcSimulation) -> None:
                 continue
             await ws.send_json(item)
         res = await run_task
-        _store_dsmc_result(res)
+        _store_dsmc_result(sim, res)
         await ws.send_json(
             {"type": "done", "result": _dsmc_result_model(sim, res).model_dump()}
         )

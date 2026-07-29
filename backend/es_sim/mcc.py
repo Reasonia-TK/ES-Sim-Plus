@@ -54,11 +54,21 @@ class GasField:
     ν_max,c = ν_max·n_g(x)/n_max で行い (prompts/83 ②)、採択判定の分母にも
     同じ局所密度比を使う (非一様密度でも null-collision は厳密)。
     t_g / u_g が None の場合は一様温度 (gas.temperature_k)・静止ガスとして扱う。
+
+    src_nodes/src_triangles (prompts/89): DSMC 専用メッシュ (mesh_scale>1) を使った
+    場合、この場を生成した DSMC メッシュの節点・要素を保持する。PIC 側のメッシュと
+    要素数が一致しない (= mesh_scale>1 で別メッシュになった) 場合、PicSimulation が
+    これを使って PIC 要素重心を DSMC メッシュ上で点位置特定し、n_g/t_g/u_g を PIC
+    メッシュへ引き写す (pic.py の _map_gas_field_to_mesh 参照)。要素数が一致する
+    (mesh_scale=1.0 の従来経路) 場合はこの情報を使わず、フィールドをそのまま使う
+    (ビット不変)。None なら要素数の不一致はエラーにする (従来のエラーメッセージ)
     """
 
     n_g: np.ndarray            # (M,) 要素ごとの数密度 [m^-3]
     t_g: np.ndarray | None = None  # (M,) 温度 [K]
     u_g: np.ndarray | None = None  # (M, 2) 面内流速 [m/s]
+    src_nodes: np.ndarray | None = None       # (N, 2) 生成元 (DSMC) メッシュの節点座標
+    src_triangles: np.ndarray | None = None   # (M, 3) 生成元 (DSMC) メッシュの要素 → 節点
 
 
 @dataclass

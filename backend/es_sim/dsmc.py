@@ -38,7 +38,7 @@ from .particles import (
     _solid_elements,
     _walk_step,
 )
-from .schema import DsmcSettings, Project
+from .schema import DsmcSettings, LocalSize, Project
 
 KB = 1.380649e-23     # ボルツマン定数 [J/K]
 AMU = 1.66053906660e-27  # 原子質量単位 [kg]
@@ -95,8 +95,22 @@ class DsmcSimulation:
         self.ridx = _radial_index(project.coord)
         self.rz = self.ridx is not None
 
-        # ---- メッシュ (particles.py のインフラを再利用) ----------------------
-        self.mesh = generate_mesh(project)
+        # ---- メッシュ (particles.py のインフラを再利用、DSMC 専用粗化は prompts/89) -----
+        # mesh_scale > 1 は「FEM メッシュ寸法 (mesh.size・local_sizes) × 係数」の DSMC
+        # 専用メッシュを使う (walk コストはセル寸法に反比例するため直接効く。構造格子
+        # モードも mesh.size を経由するので同様に効く)。1.0 は project をそのまま
+        # generate_mesh へ渡す従来経路をたどり、結果をビット不変に保つ
+        scale = float(self.s.mesh_scale)
+        if scale != 1.0:
+            mesh_project = project.model_copy(deep=True)
+            mesh_project.mesh.size = project.mesh.size * scale
+            mesh_project.mesh.local_sizes = [
+                LocalSize(region=ls.region, size=ls.size * scale)
+                for ls in project.mesh.local_sizes
+            ]
+            self.mesh = generate_mesh(mesh_project)
+        else:
+            self.mesh = generate_mesh(project)
         self.tris = self.mesh.triangles
         self.coeffs = _barycentric_coeffs(self.mesh.nodes, self.tris)
         self._packed = _pack_coeffs(self.coeffs)

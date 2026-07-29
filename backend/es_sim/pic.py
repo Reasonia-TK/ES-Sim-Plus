@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import scipy.sparse.linalg as spla
+from scipy.spatial import cKDTree
 
 from . import _numba_kernels
 from .fem import EPS0, _material_arrays, _radial_index, assemble
@@ -141,6 +142,36 @@ def _effective_thread_count(
     if n_particles_per_species < AUTO_THREAD_MIN_PARTICLES:
         return 1
     return min(_auto_thread_cap(cores), cores)
+
+
+def _map_gas_field_to_mesh(field: GasField, dst_centroids: np.ndarray) -> GasField:
+    """DSMC 専用メッシュ (mesh_scale>1、prompts/89) の GasField を PIC メッシュへ写す。
+
+    PIC メッシュの各要素重心 (dst_centroids) を DSMC メッシュ (field.src_nodes/
+    src_triangles) 上で点位置特定し、対応する DSMC 要素の n_g/t_g/u_g をそのまま
+    引き写す (DSMC はセル定数値なので P1 補間はせず要素値をコピーする)。
+
+    点位置特定は cKDTree で最も近い DSMC 要素重心を初期値にし、particles.py の
+    walk (_walk_step) で重心座標により実際に内包する要素へ確定する
+    (postprocess.py の総当たり方式は要素数×要素数のオーダーで大メッシュには
+    重いため、既存の walk 探索インフラを流用する)。ドメイン外に出た
+    (absorbed=True) 場合、_walk_step は最後に内側にいた要素をそのまま返す仕様
+    なので、追加のフォールバック処理なしで「境界に最も近い要素」に自然に収まる。
+    """
+    assert field.src_nodes is not None and field.src_triangles is not None
+    nodes, tris = field.src_nodes, field.src_triangles
+    src_centroids = nodes[tris].mean(axis=1)
+    _, guess = cKDTree(src_centroids).query(dst_centroids)
+    coeffs = _barycentric_coeffs(nodes, tris)
+    adjacency = _adjacency(tris)
+    elem, _absorbed, _b_elem, _b_loc = _walk_step(
+        coeffs, adjacency, guess.astype(np.int64), dst_centroids, packed=_pack_coeffs(coeffs)
+    )
+    return GasField(
+        n_g=field.n_g[elem],
+        t_g=field.t_g[elem] if field.t_g is not None else None,
+        u_g=field.u_g[elem] if field.u_g is not None else None,
+    )
 
 
 def _eval_waveform(phase, v, freq_hz: float, t):
@@ -546,12 +577,20 @@ class PicSimulation:
 
         # ---- MCC (モンテカルロ衝突、prompts/19) ------------------------------
         # mcc=null なら無効 (従来の無衝突動作と完全一致)。
-        # gas_field あり (prompts/54) なら要素数の整合を検査して MCC へ渡す
+        # gas_field あり (prompts/54) なら要素数の整合を検査して MCC へ渡す。
+        # DSMC 専用メッシュ (mesh_scale>1、prompts/89) で要素数が一致しない場合は、
+        # 付随する DSMC メッシュ (src_nodes/src_triangles) があれば PIC メッシュへ
+        # 一度だけマッピングする (O(N_pic要素)。mesh_scale=1.0 の従来経路では要素数が
+        # 必ず一致するのでこの分岐に入らず、結果はビット不変)
         if gas_field is not None and len(gas_field.n_g) != len(self.tris):
-            raise ValueError(
-                f"ガス場の要素数 ({len(gas_field.n_g)}) がメッシュの要素数 "
-                f"({len(self.tris)}) と一致しません (DSMC を再実行してください)"
-            )
+            if gas_field.src_nodes is None or gas_field.src_triangles is None:
+                raise ValueError(
+                    f"ガス場の要素数 ({len(gas_field.n_g)}) がメッシュの要素数 "
+                    f"({len(self.tris)}) と一致しません (DSMC を再実行してください)"
+                )
+            centroids = self.mesh.nodes[self.tris].mean(axis=1)
+            gas_field = _map_gas_field_to_mesh(gas_field, centroids)
+            self.gas_field = gas_field
         self.mcc = (
             MccModel(self.pic.mcc, self.m_ion, gas_field)
             if self.pic.mcc is not None

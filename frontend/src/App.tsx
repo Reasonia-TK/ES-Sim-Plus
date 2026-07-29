@@ -345,6 +345,12 @@ export default function App() {
   const [solveElapsedS, setSolveElapsedS] = useState<number | null>(null);
   // Mesh ボタン (解析なしでメッシュ生成のみ) の結果。Solve 結果とは独立に保持する
   const [meshResult, setMeshResult] = useState<MeshResult | null>(null);
+  // meshResult が Solve 結果 (result) / PIC ライブ表示 (picFrame) より「後に生成された」か
+  // どうか (prompts/89 ②)。result/picFrame はジオメトリ変更等でしかクリアされず Mesh 実行
+  // 単体では消えないため、これが無いと「一度計算した後は再メッシュしてもキャンバスの
+  // メッシュプレビューが更新されない」不具合になる。Mesh 実行で true、Solve 完了・PIC
+  // 開始 (start/continue) で false に戻す (CadCanvas の meshResultIsLatest 参照)
+  const [meshPreviewFresh, setMeshPreviewFresh] = useState(false);
   const [showMesh, setShowMesh] = useState(false);
   // キャンバスオーバーレイの表示切替 (ツールバーの表示トグル群)。コレクタ・ガス境界は
   // 配置済みでも常時表示だと混み合うため、個別に消せるようにする (既定は表示)
@@ -664,6 +670,7 @@ export default function App() {
     setBusy(true);
     setError(null);
     setMeshResult(null); // Solve 実行時は Mesh のみの結果を破棄し、Solve 側の表示を優先する
+    setMeshPreviewFresh(false); // Mesh プレビューの優先表示も解除する (prompts/89 ②)
     const t0 = performance.now(); // 結果サマリの「計算時間」表示用。backend 変更不要のフロント側計測 (prompts/86)
     try {
       setResult(await api.solve(project));
@@ -683,6 +690,9 @@ export default function App() {
     setError(null);
     try {
       setMeshResult(await api.mesh(project));
+      // 直前の Solve/PIC 結果が残っていても、今生成したメッシュプレビューを
+      // キャンバスで最優先表示する (prompts/89 ②)
+      setMeshPreviewFresh(true);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -907,6 +917,7 @@ export default function App() {
     setPicHistory([]);
     setPicRunning(true);
     setPicContinueReady(false);
+    setMeshPreviewFresh(false); // 新しい PIC 実行のライブ表示を優先する (prompts/89 ②)
     // 新しい実行を開始したら結果フィールド表示 (前回 done の残骸) をリセットする
     setPicFields(null);
     setPicTiming(null); // 位相別プロファイル計測 (prompts/75) も前回 done の残骸を消す
@@ -942,6 +953,7 @@ export default function App() {
     setPicError(null);
     setPicRunning(true);
     setPicContinueReady(false);
+    setMeshPreviewFresh(false); // 続き実行のライブ表示を優先する (prompts/89 ②)
     // 表示状態を新規実行と同様にリセットする。描画優先順位が
     // 「周期アニメ > 結果フィールド > ライブ」のため、前回 done の cycle / 結果フィールド
     // 選択が残っているとライブ表示が隠れ、続き実行中の画面が追従しない (不具合修正)。
@@ -2361,6 +2373,7 @@ export default function App() {
             lengthUnit={lengthUnit}
             result={onTraceResultNode && traceBackground === "none" ? null : result}
             meshResult={meshResult}
+            meshResultIsLatest={meshPreviewFresh}
             showMesh={showMesh}
             tool={tool}
             gridSnap={gridSnap}

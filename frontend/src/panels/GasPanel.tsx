@@ -66,6 +66,7 @@ export const DEFAULT_DSMC: DsmcSettings = {
   seed: 0,
   threads: 1,
   smoothing_passes: 0,
+  mesh_scale: 1.0,
 };
 
 // 「境界を追加」ボタン・キャンバスの「ガス境界」ツールが追加する新規境界の共通既定値
@@ -441,6 +442,17 @@ export default function GasPanel({
             />
           </div>
           <div className="field">
+            <span className="label">メッシュ粗化係数</span>
+            <CommitNumberInput
+              value={dsmc.mesh_scale ?? 1.0}
+              onCommit={(v) => onChange({ ...dsmc, mesh_scale: Math.min(20, Math.max(1, v)) })}
+            />
+          </div>
+          <p className="hint">
+            DSMC 用メッシュの寸法 = FEM メッシュ寸法 × 係数。walk コストは係数分軽くなります。
+            精度の目安はセル寸法 &lt; 平均自由行程/3。PIC連成時は要素重心で自動マッピングされます。
+          </p>
+          <div className="field">
             <span className="label">目標粒子数</span>
             <CommitNumberInput
               value={dsmc.n_particles}
@@ -448,10 +460,12 @@ export default function GasPanel({
             />
           </div>
           {/* 粒子数の目安 (セルあたり20個以上ないと NTC 衝突統計が粗くなる)。
-              セル数はメッシュ生成済みならその要素数、未生成ならドメイン面積と
-              メッシュサイズからの概算 (正三角形 (√3/4)·size² で割る) を使う */}
+              セル数は DSMC 実行済みならその実測メッシュ (result.mesh、DSMC が実際に使った
+              粗化後メッシュ) を最優先し、次に Mesh ボタンで生成済みの meshResult (FEM側、
+              mesh_scale 未反映) を使う。どちらも無ければドメイン面積とメッシュサイズ
+              (mesh_scale 反映後) からの概算 (正三角形 (√3/4)·size² で割る) を使う */}
           {(() => {
-            const nElemsActual = meshResult?.triangles.length ?? result?.mesh.triangles.length ?? null;
+            const nElemsActual = result?.mesh.triangles.length ?? meshResult?.triangles.length ?? null;
             let nElems = nElemsActual;
             let approx = false;
             if (nElems == null) {
@@ -463,7 +477,7 @@ export default function GasPanel({
                 area += x1 * y2 - x2 * y1;
               }
               area = Math.abs(area) / 2;
-              const size = project.mesh.size;
+              const size = project.mesh.size * (dsmc.mesh_scale ?? 1.0);
               if (area > 0 && size > 0) {
                 nElems = Math.max(1, Math.round(area / (0.433 * size * size)));
                 approx = true;

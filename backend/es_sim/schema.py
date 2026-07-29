@@ -520,6 +520,13 @@ class DsmcSettings(BaseModel):
 
     gas: DsmcGas = DsmcGas()
     boundaries: list[DsmcBoundary] = []
+    # DSMC 用メッシュの寸法係数 (prompts/89)。FEM メッシュ寸法 (mesh.size・local_sizes の
+    # 各 size) × この係数で DSMC 専用の粗いメッシュを生成する (PIC/FEM メッシュとは分離)。
+    # walk コストはセル寸法 (≈1/h) に反比例するため、粗化係数分だけ直接軽くなる。
+    # 1.0 = 従来どおり FEM と同一メッシュ (このとき経路も従来と完全一致し、結果はビット不変)。
+    # use_dsmc_gas (PIC 連成) では、mesh_scale>1 で DSMC メッシュ ≠ PIC メッシュになるため、
+    # PIC 開始時に要素重心の点位置特定でガス場を PIC メッシュへ引き写す (dsmc.py 側で解決)
+    mesh_scale: float = Field(1.0, ge=1.0, le=20.0)
     wall_temperature_k: float = Field(300.0, gt=0, description="未指定エッジ・領域輪郭の壁温 [K]")
     init_pressure_pa: float = Field(..., gt=0, description="初期充填圧 [Pa]")
     init_temperature_k: float = Field(300.0, gt=0)
