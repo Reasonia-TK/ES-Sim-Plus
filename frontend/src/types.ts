@@ -251,6 +251,7 @@ export interface DsmcResult {
   inflow: number;              // 平均区間の流入実分子数
   outflow: number;             // 平均区間の流出実分子数
   elapsed_s: number;           // run() の壁時計秒 (continue は区間分のみ、prompts/86)
+  timing: Record<string, number>; // 位相別の累積秒 (continue は区間分のみ、prompts/87)
 }
 
 // ---- DSMC WebSocket プロトコル (server→client, /ws/dsmc、prompts/58) ------------------------

@@ -614,6 +614,7 @@ class DsmcResultModel(BaseModel):
     inflow: float                     # 平均区間の流入実分子数
     outflow: float                    # 平均区間の流出実分子数
     elapsed_s: float                  # run() の壁時計秒 (continue は区間分のみ、prompts/86)
+    timing: dict[str, float]          # 位相別の累積秒 (continue は区間分のみ、prompts/87)
 
 
 class MeshResult(BaseModel):

@@ -596,6 +596,9 @@ export default function GasPanel({
                     値が無いことがあるため、実行時同様に安全側の表示にする (prompts/86) */}
                 <span>{result.elapsed_s != null ? `${result.elapsed_s.toFixed(3)} s` : "-"}</span>
               </div>
+              {/* 位相別プロファイル計測 (prompts/87)。旧形式の結果付き保存ファイル
+                  (timing 追加前) には無いことがあるため、無ければ表示を省略する */}
+              {result.timing && <DsmcTimingSection timing={result.timing} />}
 
               <div className="field">
                 <span className="label">結果表示</span>
@@ -618,6 +621,35 @@ export default function GasPanel({
       {mode === "results" && !(dsmc && result) && (
         <p className="hint">DSMC計算が未実行です。スタディ「DSMC」から実行してください。</p>
       )}
+    </>
+  );
+}
+
+// 位相別プロファイル計測 (prompts/87) の日本語ラベル。timing のキーと1対1対応させる
+// (PicPanel の TIMING_PHASE_LABELS/PicTimingSection と同じ流儀)
+const DSMC_TIMING_LABELS: Record<string, string> = {
+  inject: "流入 (リザーバ/流量注入)",
+  move: "移動 + 境界処理",
+  collide: "NTC衝突判定",
+  sample: "サンプリング蓄積",
+  other: "その他 (区間リセット・進捗コールバック等)",
+};
+
+// DSMC: 実行時間内訳。result.timing を値の大きい順に「名称 / 秒 / %」で表示する
+// (セル並列化 (prompts/87) 前後の効果測定用)。未知のキーはキー名そのままで表示する
+function DsmcTimingSection({ timing }: { timing: Record<string, number> }) {
+  const total = Object.values(timing).reduce((sum, v) => sum + v, 0);
+  const rows = Object.entries(timing).sort((a, b) => b[1] - a[1]);
+  return (
+    <>
+      {rows.map(([key, sec]) => (
+        <div className="kv" key={key}>
+          <span>{DSMC_TIMING_LABELS[key] ?? key}</span>
+          <span>
+            {sec.toFixed(3)} s ({total > 0 ? ((100 * sec) / total).toFixed(1) : "0.0"}%)
+          </span>
+        </div>
+      ))}
     </>
   );
 }

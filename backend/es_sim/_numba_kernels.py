@@ -976,6 +976,104 @@ if HAVE_NUMBA:
             pos[e] += 1
         return order
 
+    @njit(cache=True, nogil=True, parallel=True)
+    def _dsmc_collide_kernel(
+        v, order, starts, cand_starts, valid_starts,
+        r1, r2, accept_rand, sig_coef, sig_pow,
+        sigcr_max, coll_frac,
+        i1_out, i2_out, gmag_out, sigcr_out, keep_out, first,
+    ):
+        """DSMC NTC 衝突のセル並列本体 (dsmc_collide のdocstring参照、prompts/87)。
+
+        セル c ごとに:
+          1. 候補 (r1[j], r2[j]) を走査し、自己対 (r1==r2) を捨てながら相対速度
+             g_mag・断面積×g_mag (sig_cr) を計算して i1_out/gmag_out 等 (このセルの
+             valid_starts[c]..valid_starts[c+1] 区間) に書き、このセル内の最大値
+             local_max も同時に求める (dsmc.py 旧実装の np.maximum.at 相当)。
+          2. sigcr_max[c] をこのセルのバッチ内最大値で更新してから (旧実装が
+             全候補の maximum.at を accept 判定より先に行うのと同じ順序)、
+             accept_rand との比較で採択候補を集める。
+          3. 採択候補のうち同一粒子が複数回現れた場合は「最初に現れた対」だけを
+             残す (旧実装の np.minimum.at による dedup と同じ)。first[] は
+             粒子ごとの「このセル内での最初の採択位置」を持つ配列で、通し番号は
+             このセル内だけの 0 始まりでよい (ある粒子の候補は自セルにしか
+             現れないため、定数オフセット差を除いて旧実装の全体通し番号と
+             大小関係が一致する)。
+        """
+        n_tris = cand_starts.shape[0] - 1
+        for c in prange(n_tris):
+            n_cand_c = cand_starts[c + 1] - cand_starts[c]
+            if n_cand_c == 0:
+                continue
+            cs = starts[c]
+            cbase = cand_starts[c]
+            vbase = valid_starts[c]
+            vj = 0
+            local_max = 0.0
+            for j in range(n_cand_c):
+                idx = cbase + j
+                r1j = r1[idx]
+                r2j = r2[idx]
+                if r1j == r2j:
+                    continue
+                i1g = order[cs + r1j]
+                i2g = order[cs + r2j]
+                gx = v[i1g, 0] - v[i2g, 0]
+                gy = v[i1g, 1] - v[i2g, 1]
+                gz = v[i1g, 2] - v[i2g, 2]
+                g2 = (gx * gx + gy * gy) + gz * gz
+                g_mag = np.sqrt(g2)
+                # dsmc.py._sigma と同じ (c_r>0 のみ非0、係数×べき乗×g_mag の順)
+                if g_mag > 0.0:
+                    sig_cr = (sig_coef * g_mag ** sig_pow) * g_mag
+                else:
+                    sig_cr = 0.0
+                p = vbase + vj
+                i1_out[p] = i1g
+                i2_out[p] = i2g
+                gmag_out[p] = g_mag
+                sigcr_out[p] = sig_cr
+                if sig_cr > local_max:
+                    local_max = sig_cr
+                vj += 1
+
+            new_max = sigcr_max[c]
+            if local_max > new_max:
+                new_max = local_max
+            sigcr_max[c] = new_max
+            if vj == 0:
+                continue
+
+            # このセルの採択候補だけを詰めるローカル作業配列 (最大 vj 件、
+            # numba の prange 内 np.empty はスレッドごとに独立なバッファになる)
+            acc_i1 = np.empty(vj, dtype=np.int64)
+            acc_i2 = np.empty(vj, dtype=np.int64)
+            acc_p = np.empty(vj, dtype=np.int64)
+            acc_n = 0
+            for jj in range(vj):
+                p = vbase + jj
+                if accept_rand[p] * new_max >= sigcr_out[p]:
+                    continue
+                i1a = i1_out[p]
+                i2a = i2_out[p]
+                acc_i1[acc_n] = i1a
+                acc_i2[acc_n] = i2a
+                acc_p[acc_n] = p
+                if acc_n < first[i1a]:
+                    first[i1a] = acc_n
+                if acc_n < first[i2a]:
+                    first[i2a] = acc_n
+                acc_n += 1
+
+            for kk in range(acc_n):
+                i1a = acc_i1[kk]
+                i2a = acc_i2[kk]
+                if first[i1a] == kk and first[i2a] == kk:
+                    keep_out[acc_p[kk]] = True
+                else:
+                    # 複数対に選ばれて落ちた分はこのセルの次ステップ候補数へ持ち越す
+                    coll_frac[c] += 1.0
+
 
 def cell_sort_order(elem: np.ndarray, n_cells: int) -> np.ndarray:
     """粒子のセル順ソート (prompts/84) 用の安定な置換インデックスを返す。
@@ -1530,3 +1628,68 @@ def mcc_candidates(random_u: np.ndarray, probability: float) -> np.ndarray:
 def mcc_max_speed_squared(v: np.ndarray) -> float:
     """粒子群の max(vx²+vy²+vz²) を一時配列なしで返す。"""
     return float(_mcc_max_speed_squared_kernel(np.ascontiguousarray(v)))
+
+
+def dsmc_collide(
+    v: np.ndarray,
+    order: np.ndarray,
+    starts: np.ndarray,
+    cand_starts: np.ndarray,
+    valid_starts: np.ndarray,
+    r1: np.ndarray,
+    r2: np.ndarray,
+    accept_rand: np.ndarray,
+    sig_coef: float,
+    sig_pow: float,
+    sigcr_max: np.ndarray,
+    coll_frac: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """DSMC NTC 衝突の候補選定・(σc_r)_max 更新・採択・dedup をセル並列で行う (prompts/87)。
+
+    dsmc.py._collide_numba から呼ぶ。乱数 (r1・r2・accept_rand) は呼び出し側が
+    旧実装 (dsmc.py._collide_numpy) と同じ順・同じ本数だけ numpy Generator で
+    事前生成済み (このカーネルは乱数を一切生成しない)。sigcr_max・coll_frac は
+    このセルの分だけをその場で更新する in-place 引数 (呼び出し側の配列そのもの
+    が書き換わる)。
+
+    戻り値 (i1, i2, keep, g_mag) はいずれも「有効候補」(r1≠r2 を満たすもの) の
+    数 (= valid_starts[-1]) だけの長さを持つ。呼び出し側は keep でマスクした
+    (i1, i2, g_mag) から散乱後速度を計算する (この最終段は候補数が少なく
+    重くないため、旧実装のまま numpy で行う)。
+
+    セル間の書き込み非衝突性: order/starts によりセルごとの粒子は互いに素な
+    添字集合を持つため、i1/i2 (常に自セルの粒子を指す) は他セルの処理と
+    絶対に重ならない。sigcr_max[c]・coll_frac[c] もセル c 自身の要素しか
+    更新しないため、prange によるセル並列でも書き込み競合は起きない。
+    """
+    n_particles = len(v)
+    total_valid = int(valid_starts[-1])
+    i1_out = np.empty(total_valid, dtype=np.int64)
+    i2_out = np.empty(total_valid, dtype=np.int64)
+    gmag_out = np.empty(total_valid, dtype=np.float64)
+    sigcr_out = np.empty(total_valid, dtype=np.float64)
+    keep_out = np.zeros(total_valid, dtype=np.bool_)
+    # dedup の「未採択」sentinel: 任意セルの採択数はどう転んでも total_valid を
+    # 超えないので、total_valid+1 なら全セル共通で安全に「まだ採択なし」を表せる
+    first = np.full(n_particles, total_valid + 1, dtype=np.int64)
+    _dsmc_collide_kernel(
+        np.ascontiguousarray(v),
+        np.ascontiguousarray(order),
+        np.ascontiguousarray(starts),
+        np.ascontiguousarray(cand_starts),
+        np.ascontiguousarray(valid_starts),
+        np.ascontiguousarray(r1),
+        np.ascontiguousarray(r2),
+        np.ascontiguousarray(accept_rand),
+        float(sig_coef),
+        float(sig_pow),
+        sigcr_max,
+        coll_frac,
+        i1_out,
+        i2_out,
+        gmag_out,
+        sigcr_out,
+        keep_out,
+        first,
+    )
+    return i1_out, i2_out, keep_out, gmag_out

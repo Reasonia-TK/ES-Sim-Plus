@@ -183,6 +183,7 @@ def _dsmc_result_model(sim: DsmcSimulation, res) -> DsmcResultModel:
         inflow=res.inflow,
         outflow=res.outflow,
         elapsed_s=res.elapsed_s,
+        timing=res.timing,
     )
 
 

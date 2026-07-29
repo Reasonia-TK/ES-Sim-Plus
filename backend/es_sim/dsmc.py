@@ -72,6 +72,7 @@ class DsmcResult:
     inflow: float        # 平均区間の流入実分子数 (リザーバ)
     outflow: float       # 平均区間の流出実分子数 (リザーバ + 真空)
     elapsed_s: float     # この run() 呼び出しの壁時計秒 (continue は区間分のみ、prompts/86)
+    timing: dict[str, float]  # 位相別の累積秒 (この run() 呼び出し区間分、prompts/87)
 
 
 class DsmcSimulation:
@@ -202,6 +203,18 @@ class DsmcSimulation:
         # 求まるので物理計算には使わないが、PIC の step_count と同じく「今まで
         # 何ステップ進めたか」を外から参照できるように保持しておく
         self.step_count = 0
+
+        # ---- 位相別プロファイル計測 (prompts/87、PIC の prompts/75 と同じ流儀) ----
+        # 1ステップ内の主要フェーズの累積時間を常時計測する (ON/OFF切替は無し)。
+        # done メッセージ・DsmcResult で返し、continue では区間分のみ返すよう
+        # prepare_continue でリセットする
+        self.timing: dict[str, float] = {
+            "inject": 0.0,  # 流入 (圧力リザーバ・流量指定) からの粒子生成
+            "move": 0.0,    # 自由飛行 + 境界処理 (walk 含む)
+            "collide": 0.0,  # NTC 衝突判定
+            "sample": 0.0,   # 平均区間の蓄積 (bincount)
+            "other": 0.0,    # 平均区間リセット・進捗コールバックなど
+        }
 
     # ---- VHS 断面積 -----------------------------------------------------------
 
@@ -558,12 +571,26 @@ class DsmcSimulation:
         セルごとの候補対数 N_cand = ½ N(N−1) W (σc_r)_max Δt / V を端数持ち越しで
         抽選し、σ(c_r)c_r/(σc_r)_max で採択する。同一粒子が同ステップ内で複数対に
         選ばれた場合は後の衝突が上書きする近似 (候補数が少なければ影響は僅少)。
+
+        候補数・端数持ち越しの計算 (この関数の前半) はセル数程度の軽い
+        ベクトル化 numpy 処理なので変更しない。候補対の選定〜dedup〜散乱
+        (計算量が粒子数に比例して増える部分、prompts/87 でセル並列化の対象)
+        は numba があれば _collide_numba (セル単位 prange)、無ければ従来どおり
+        _collide_numpy (全セル一括ベクトル化) に委譲する。乱数は事前生成する
+        個数・順序を両実装で完全に揃えてあるため (それぞれの docstring 参照)、
+        乱数消費の観点での決定性は変わらない。
         """
         n = len(self.x)
         if n < 2:
             return
         counts = np.bincount(self.elem, minlength=len(self.tris))
-        order = np.argsort(self.elem, kind="stable")
+        # 計数ソートによる置換 (numba あり) は np.argsort(kind="stable") と
+        # 同じ安定順序を返す (_numba_kernels.cell_sort_order のdocstring参照)
+        order = (
+            _numba_kernels.cell_sort_order(self.elem, len(self.tris))
+            if _numba_kernels.HAVE_NUMBA
+            else np.argsort(self.elem, kind="stable")
+        )
         starts = np.zeros(len(self.tris) + 1, dtype=np.int64)
         np.cumsum(counts, out=starts[1:])
 
@@ -580,6 +607,26 @@ class DsmcSimulation:
         if total == 0:
             return
 
+        if _numba_kernels.HAVE_NUMBA:
+            self._collide_numba(order, starts, counts, n_cand, total)
+        else:
+            self._collide_numpy(order, starts, counts, n_cand, total)
+
+    def _collide_numpy(
+        self,
+        order: np.ndarray,
+        starts: np.ndarray,
+        counts: np.ndarray,
+        n_cand: np.ndarray,
+        total: int,
+    ) -> None:
+        """_collide の従来実装 (numba 無し環境、または ES_SIM_NO_NUMBA=1)。
+
+        全セル一括のベクトル化 numpy。候補選定・(σc_r)_max 更新・dedup の
+        アルゴリズムの「意味」は _collide_numba と同じ (docstring 参照) だが、
+        np.maximum.at/np.minimum.at/np.add.at (ufunc.at) は要素ごとの逐次処理で
+        遅いため、numba 環境ではセル並列カーネルに置き換える。
+        """
         cell = np.repeat(np.arange(len(self.tris)), n_cand)
         c_cnt = counts[cell]
         r1 = (self.rng.random(total) * c_cnt).astype(np.int64)
@@ -613,10 +660,63 @@ class DsmcSimulation:
             np.add.at(self._coll_frac, cell_a[~keep], 1.0)
             i1, i2 = i1[keep], i2[keep]
             g_mag = g_mag[keep]
+        self._scatter(i1, i2, g_mag)
+
+    def _collide_numba(
+        self,
+        order: np.ndarray,
+        starts: np.ndarray,
+        counts: np.ndarray,
+        n_cand: np.ndarray,
+        total: int,
+    ) -> None:
+        """_collide のセル並列実装 (prompts/87、_numba_kernels.dsmc_collide)。
+
+        候補対の選定・(σc_r)_max 更新・採択・dedup はいずれもセル内で完結する
+        (i1/i2 は常に自セルの粒子) ため、prange でセルごとに並列処理しても
+        _collide_numpy と同じ結果になる (詳細は _numba_kernels.dsmc_collide と
+        _dsmc_collide_kernel のdocstring参照)。乱数は _collide_numpy と全く同じ
+        順・同じ本数を numpy Generator から事前生成してからカーネルへ渡す
+        (r1・r2 は候補数 total 本、accept は有効候補数 total_valid 本。
+        いずれも実際の値 (v の中身) に依存せず求まるサイズなので、カーネル呼び
+        出し前に確定できる)。カーネルは乱数を一切生成しない。
+        """
+        cand_starts = np.zeros(len(n_cand) + 1, dtype=np.int64)
+        np.cumsum(n_cand, out=cand_starts[1:])
+        cell = np.repeat(np.arange(len(self.tris)), n_cand)
+        c_cnt = counts[cell]
+        r1 = (self.rng.random(total) * c_cnt).astype(np.int64)
+        r2 = (self.rng.random(total) * c_cnt).astype(np.int64)
+        valid = r1 != r2
+        # 有効候補 (r1≠r2) 数のセル別内訳。r1,r2 の値だけで決まり v に依存しない
+        # ので、accept 乱数のサイズをカーネル呼び出し前に確定できる
+        valid_count = np.bincount(
+            cell, weights=valid.astype(np.float64), minlength=len(self.tris)
+        ).astype(np.int64)
+        valid_starts = np.zeros(len(self.tris) + 1, dtype=np.int64)
+        np.cumsum(valid_count, out=valid_starts[1:])
+        accept_rand = self.rng.random(int(valid_starts[-1]))
+
+        i1_all, i2_all, keep, g_mag_all = _numba_kernels.dsmc_collide(
+            self.v, order, starts, cand_starts, valid_starts,
+            r1, r2, accept_rand,
+            self._sig_coef, self._sig_pow,
+            self._sigcr_max, self._coll_frac,
+        )
+        if not np.any(keep):
+            return
+        idx = np.nonzero(keep)[0]
+        self._scatter(i1_all[idx], i2_all[idx], g_mag_all[idx])
+
+    def _scatter(self, i1: np.ndarray, i2: np.ndarray, g_mag: np.ndarray) -> None:
+        """採択済み衝突対 (i1, i2, |g|) から COM 系等方散乱後の速度を書き込む。
+
+        候補数に比べて実際に採択される対の数は少なく、_collide_numpy /
+        _collide_numba の共通後処理として重くないため numpy のまま (prompts/87)。
+        """
         if len(i1) == 0:
             return
         k = len(i1)
-        # COM 系で等方散乱 (|g| 保存)
         cos_t = 1.0 - 2.0 * self.rng.random(k)
         sin_t = np.sqrt(np.maximum(1.0 - cos_t * cos_t, 0.0))
         phi = 2.0 * math.pi * self.rng.random(k)
@@ -695,9 +795,18 @@ class DsmcSimulation:
         self._samples += 1
 
     def step(self) -> None:
+        # 位相別計測 (prompts/87)。1ステップあたり数回の perf_counter 呼び出しは
+        # オーバーヘッドが無視できる (PIC の prompts/75 と同じ考え方)
+        t0 = time.perf_counter()
         self._inject()
+        t1 = time.perf_counter()
         self._move()
+        t2 = time.perf_counter()
         self._collide()
+        t3 = time.perf_counter()
+        self.timing["inject"] += t1 - t0
+        self.timing["move"] += t2 - t1
+        self.timing["collide"] += t3 - t2
 
     def _thin_positions(self) -> np.ndarray:
         """粒子位置 (self.x) を最大 MAX_CALLBACK_PARTICLES 点に間引いて返す (ライブ表示用)。
@@ -740,6 +849,9 @@ class DsmcSimulation:
         self._samples = 0
         self.inflow = 0.0
         self.outflow = 0.0
+        # 位相別計測 (prompts/87) もこの回の区間分だけを返すようリセットする
+        # (elapsed_s と同じ「continue は区間分のみ」方針、PIC の prepare_continue と同じ)
+        self.timing = {k: 0.0 for k in self.timing}
 
     def run(self, callback=None, should_stop=None) -> DsmcResult:
         """n_steps 進め、最終 avg_steps の時間平均から DsmcResult を作る。
@@ -762,6 +874,10 @@ class DsmcSimulation:
         for i in range(n_steps):
             if should_stop is not None and should_stop():
                 break
+            # 位相別計測 (prompts/87): このブロック (平均区間リセット) と末尾の
+            # 進捗コールバックは「other」、self.step() の内訳は step() 自身が
+            # 計上する (inject/move/collide)。sample() は別枠で計測する
+            t_o0 = time.perf_counter()
             if i == avg_start:
                 self._samples = 0  # 以降のステップでサンプリング
                 self._acc_cnt[:] = 0.0
@@ -769,12 +885,18 @@ class DsmcSimulation:
                 self._acc_v2[:] = 0.0
                 self.inflow = 0.0
                 self.outflow = 0.0
+            t_o1 = time.perf_counter()
             self.step()
             self.step_count += 1
+            t_step1 = time.perf_counter()
             if i >= avg_start:
                 self._sample()
+            t_sample1 = time.perf_counter()
             if callback is not None and (i + 1) % 100 == 0:
                 callback(i + 1, len(self.x), self._thin_positions())
+            t_cb1 = time.perf_counter()
+            self.timing["other"] += (t_o1 - t_o0) + (t_cb1 - t_sample1)
+            self.timing["sample"] += t_sample1 - t_step1
         if self._samples == 0:
             raise ValueError(
                 "平均区間に入る前に停止したため、ガス場の結果がありません "
@@ -810,4 +932,5 @@ class DsmcSimulation:
             inflow=self.inflow,
             outflow=self.outflow,
             elapsed_s=time.perf_counter() - t0,
+            timing=dict(self.timing),
         )
