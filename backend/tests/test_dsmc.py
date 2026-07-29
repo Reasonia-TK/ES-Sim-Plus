@@ -15,6 +15,8 @@
    400 → continue(400) の粒子状態・結果がビット単位で一致、WS continue フロー
 8. 位相別プロファイル計測・_collide のセル並列化 (prompts/87): timing のキーと
    合計の妥当性、numba のセル並列 _collide_numba が numpy 版と数値的に同等
+9. walk コスト診断 (prompts/88): timing の walk_cells_est/h_mean_m/h_min_m が
+   正の妥当な値であること、時間キーの合計 (8.) を汚染しないこと
 """
 
 import math
@@ -24,7 +26,7 @@ import numpy as np
 import pytest
 
 from es_sim import _numba_kernels
-from es_sim.dsmc import AMU, KB, DsmcSimulation
+from es_sim.dsmc import AMU, KB, WALK_DIAG_KEYS, DsmcSimulation
 from es_sim.mcc import GasField, MccModel
 from es_sim.pic import PicSimulation
 from es_sim.schema import Project
@@ -853,10 +855,12 @@ def test_dsmc_timing_phases():
     - 全キーが 0 以上
     - 各フェーズの合計が run() の実測壁時計時間 (elapsed_s) と ±計測誤差で一致する
       (step() 内外の全時間が漏れなく・二重計上なくどこかのフェーズに割り当て
-      られていることの確認)
+      られていることの確認)。walk コスト診断 (prompts/88、WALK_DIAG_KEYS) は
+      秒数ではないためこの合計からは除外する
     - inject/move/collide/sample は正の時間を計上する (このケースは流入境界・
       密な粒子分布ありなので確実に発火する)
     - continue 後は区間分のみを返す (前区間の値を引きずらない)
+    - walk_cells_est・h_mean_m・h_min_m (prompts/88) が正で、h は妥当な m オーダー
     """
     t0 = 300.0
     project = _project(
@@ -884,7 +888,9 @@ def test_dsmc_timing_phases():
         assert key in timing
         assert timing[key] >= 0.0
 
-    total = sum(timing.values())
+    # walk コスト診断 (prompts/88) は秒数ではないので、時間の合計からは除外する
+    time_keys = {k: v for k, v in timing.items() if k not in WALK_DIAG_KEYS}
+    total = sum(time_keys.values())
     assert total > 0.0
     assert timing["inject"] > 0.0
     assert timing["move"] > 0.0
@@ -895,16 +901,25 @@ def test_dsmc_timing_phases():
     # はず (下限は緩めに 50%、上限は計測誤差を見込んで少し余裕を持たせる)
     assert 0.5 * wall <= total <= wall + 0.05
 
+    # walk コスト診断 (prompts/88): 平均横断セル数の推定と代表セル寸法
+    assert timing["walk_cells_est"] > 0.0
+    assert 0.0 < timing["h_min_m"] <= timing["h_mean_m"]
+    # メッシュ寸法 (~1.5e-3 m 刻み) から妥当な m オーダーであること
+    assert 1e-6 < timing["h_mean_m"] < 1.0
+
     # continue 後は区間分のみを返す (前区間の値を引きずらない)
     sim.prepare_continue(60)
     for key in timing:
         assert sim.timing[key] == 0.0
     sim.run()
-    total2 = sum(sim.timing.values())
+    total2 = sum(v for k, v in sim.timing.items() if k not in WALK_DIAG_KEYS)
     assert total2 > 0.0
+    # continue 後も walk コスト診断キーは再設定される
+    assert sim.timing["walk_cells_est"] > 0.0
+    assert sim.timing["h_mean_m"] > 0.0
 
     # DsmcResult.timing にも同じキーが載る (エンドポイント/保存ファイル用)
     sim2 = DsmcSimulation(project)
     res = sim2.run()
     assert set(res.timing.keys()) == set(sim2.timing.keys())
-    assert sum(res.timing.values()) > 0.0
+    assert sum(v for k, v in res.timing.items() if k not in WALK_DIAG_KEYS) > 0.0

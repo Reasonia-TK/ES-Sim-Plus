@@ -57,6 +57,10 @@ _B_VACUUM = 3     # outlet (圧力なし): 吸収のみ
 # ライブ表示用途は同程度の点数で十分なため揃えている)
 MAX_CALLBACK_PARTICLES = 2000
 
+# walk コスト診断 (prompts/88) が timing dict に追加するキー。秒数ではないため、
+# frontend の内訳表示 (%計算・合計) からはこのキー集合を除外する
+WALK_DIAG_KEYS = frozenset({"walk_cells_est", "h_mean_m", "h_min_m"})
+
 
 @dataclass
 class DsmcResult:
@@ -107,6 +111,17 @@ class DsmcSimulation:
         else:
             self.vol = self.area
         self._solid = _solid_elements(project, self.mesh)  # 誘電体 (固体) 要素 or None
+
+        # ---- walk コスト診断 (prompts/88): 代表セル寸法 ------------------------
+        # h_i = sqrt(2·A_i) (三角形の面積から逆算した代表長さ)。理想は「粒子が
+        # 実際にいる要素」の平均だが、簡易版として気体要素 (固体を除く) 全体の
+        # 単純平均 h_mean と最小 h_min を出す。h_min/h_mean が小さいほどメッシュの
+        # ローカル細分化が強いことを示す (frontend のヒント表示に使う)
+        h_all = np.sqrt(
+            2.0 * (self.area if self._solid is None else self.area[~self._solid])
+        )
+        self._h_mean = float(h_all.mean()) if len(h_all) else 0.0
+        self._h_min = float(h_all.min()) if len(h_all) else 0.0
 
         # ---- 粒子チャンク並列 (prompts/65) ------------------------------------
         # walk 探索を粒子チャンクに分けてスレッド並列化する (pic.py の
@@ -215,6 +230,13 @@ class DsmcSimulation:
             "sample": 0.0,   # 平均区間の蓄積 (bincount)
             "other": 0.0,    # 平均区間リセット・進捗コールバックなど
         }
+        # walk コスト診断 (prompts/88)。h_mean_m/h_min_m はメッシュから決まる定数
+        # (継続実行でも不変)、walk_cells_est は区間平均 (run() 終了時に確定する)
+        self.timing["h_mean_m"] = self._h_mean
+        self.timing["h_min_m"] = self._h_min
+        self.timing["walk_cells_est"] = 0.0
+        self._walk_diag_sum = 0.0  # Σ mean(|v|)·dt/h_mean (progress 間隔サンプル)
+        self._walk_diag_n = 0      # 上のサンプル数
 
     # ---- VHS 断面積 -----------------------------------------------------------
 
@@ -808,6 +830,19 @@ class DsmcSimulation:
         self.timing["move"] += t2 - t1
         self.timing["collide"] += t3 - t2
 
+    def _accum_walk_diag(self) -> None:
+        """診断 (prompts/88): 平均横断セル数の推定を進捗コールバックと同じ間隔でサンプルする。
+
+        walk コスト ∝ 粒子が1ステップに横切るセル数 ≈ mean(|v|)·dt / h_mean。
+        O(N) の numpy 演算だが 100 ステップに1回 (進捗コールバックと同じ頻度)
+        しか呼ばないためコストは無視できる (run() 側で「other」枠に計上される)。
+        """
+        if len(self.v) == 0 or self._h_mean <= 0.0:
+            return
+        v_mean = float(np.mean(np.sqrt(np.sum(self.v * self.v, axis=1))))
+        self._walk_diag_sum += v_mean * self.dt / self._h_mean
+        self._walk_diag_n += 1
+
     def _thin_positions(self) -> np.ndarray:
         """粒子位置 (self.x) を最大 MAX_CALLBACK_PARTICLES 点に間引いて返す (ライブ表示用)。
 
@@ -852,6 +887,10 @@ class DsmcSimulation:
         # 位相別計測 (prompts/87) もこの回の区間分だけを返すようリセットする
         # (elapsed_s と同じ「continue は区間分のみ」方針、PIC の prepare_continue と同じ)
         self.timing = {k: 0.0 for k in self.timing}
+        # walk コスト診断 (prompts/88) も区間分の平均に切り替える
+        # (h_mean_m/h_min_m は run() 末尾で毎回再設定するので値が消えても問題ない)
+        self._walk_diag_sum = 0.0
+        self._walk_diag_n = 0
 
     def run(self, callback=None, should_stop=None) -> DsmcResult:
         """n_steps 進め、最終 avg_steps の時間平均から DsmcResult を作る。
@@ -892,6 +931,11 @@ class DsmcSimulation:
             if i >= avg_start:
                 self._sample()
             t_sample1 = time.perf_counter()
+            if (i + 1) % 100 == 0 or i == n_steps - 1:
+                # walk コスト診断 (prompts/88): 進捗コールバックと同じ間隔でサンプルする
+                # (callback の有無に関わらず計測し、run() 全体の代表値として平均する)。
+                # n_steps < 100 の短い実行でも必ず1回サンプルされるよう最終ステップも含める
+                self._accum_walk_diag()
             if callback is not None and (i + 1) % 100 == 0:
                 callback(i + 1, len(self.x), self._thin_positions())
             t_cb1 = time.perf_counter()
@@ -902,6 +946,14 @@ class DsmcSimulation:
                 "平均区間に入る前に停止したため、ガス場の結果がありません "
                 "(avg_steps を長くするか、停止せず完走させてください)"
             )
+
+        # walk コスト診断 (prompts/88) の確定。h_mean_m/h_min_m は prepare_continue の
+        # 一律リセットで 0 になっている可能性があるためここで必ず書き戻す
+        self.timing["h_mean_m"] = self._h_mean
+        self.timing["h_min_m"] = self._h_min
+        self.timing["walk_cells_est"] = (
+            self._walk_diag_sum / self._walk_diag_n if self._walk_diag_n else 0.0
+        )
 
         # 結果組み立て直前に (蓄積配列そのものは変更せず) 平滑化する。smoothing_passes=0
         # なら acc_* をそのまま返すので既存動作と完全一致する

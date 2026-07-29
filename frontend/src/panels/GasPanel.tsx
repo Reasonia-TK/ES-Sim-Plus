@@ -664,11 +664,19 @@ const DSMC_TIMING_LABELS: Record<string, string> = {
   other: "その他 (区間リセット・進捗コールバック等)",
 };
 
+// walk コスト診断 (prompts/88) が timing dict に同居させるキー。秒数ではないため
+// 時間の内訳 (%計算・合計) からは除外し、別枠で表示する
+// (backend/es_sim/dsmc.py の WALK_DIAG_KEYS と対応させること)
+const DSMC_WALK_DIAG_KEYS = new Set(["walk_cells_est", "h_mean_m", "h_min_m"]);
+
 // DSMC: 実行時間内訳。result.timing を値の大きい順に「名称 / 秒 / %」で表示する
-// (セル並列化 (prompts/87) 前後の効果測定用)。未知のキーはキー名そのままで表示する
+// (セル並列化 (prompts/87) 前後の効果測定用)。未知のキーはキー名そのままで表示する。
+// walk コスト診断 (prompts/88) のキーは時間ではないためここには含めない
 function DsmcTimingSection({ timing }: { timing: Record<string, number> }) {
-  const total = Object.values(timing).reduce((sum, v) => sum + v, 0);
-  const rows = Object.entries(timing).sort((a, b) => b[1] - a[1]);
+  const rows = Object.entries(timing)
+    .filter(([key]) => !DSMC_WALK_DIAG_KEYS.has(key))
+    .sort((a, b) => b[1] - a[1]);
+  const total = rows.reduce((sum, [, v]) => sum + v, 0);
   return (
     <>
       {rows.map(([key, sec]) => (
@@ -679,6 +687,43 @@ function DsmcTimingSection({ timing }: { timing: Record<string, number> }) {
           </span>
         </div>
       ))}
+      <WalkDiagSection timing={timing} />
+    </>
+  );
+}
+
+// walk コスト診断 (prompts/88): 平均横断セル数の推定・代表セル寸法。
+// 時間の行 (DsmcTimingSection の秒・%表示) と混ざらないよう別枠で表示する。
+// 旧形式の結果 (診断キー追加前) には無いので、無ければ何も表示しない
+function WalkDiagSection({ timing }: { timing: Record<string, number> }) {
+  const walkCellsEst = timing.walk_cells_est;
+  const hMean = timing.h_mean_m;
+  const hMin = timing.h_min_m;
+  if (walkCellsEst == null || hMean == null || hMin == null) return null;
+  const ratio = hMean > 0 ? hMin / hMean : 1;
+  return (
+    <>
+      <div className="kv">
+        <span>平均横断セル数/ステップ</span>
+        <span>{walkCellsEst.toFixed(2)}</span>
+      </div>
+      <div className="kv">
+        <span>代表セル寸法 (平均 / 最小) [m]</span>
+        <span>
+          {hMean.toExponential(3)} / {hMin.toExponential(3)}
+        </span>
+      </div>
+      {ratio < 0.2 && (
+        <p className="hint">
+          最小/平均セル寸法比が {ratio.toFixed(2)} (&lt; 1/5) と小さく、メッシュ寸法の偏りが大きいです
+        </p>
+      )}
+      {walkCellsEst > 3 && (
+        <p className="hint">
+          walk コストが支配的な場合、DSMC ではメッシュを粗くする (計算精度の目安はセル寸法 &lt;
+          平均自由行程/3)、PIC では dt を見直すことで改善できる可能性があります
+        </p>
+      )}
     </>
   );
 }

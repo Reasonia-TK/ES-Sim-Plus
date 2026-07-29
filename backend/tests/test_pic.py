@@ -9,6 +9,8 @@ WebSocket ではなく PicSimulation.run_batch の同期 API で検証する。
    200 ステップ → NaN なし・粒子数単調非増加・RF 1周期平均の中央電位が両壁より高い
 4. 位相別プロファイル計測 (prompts/75): timing の各キーが妥当な値を持ち、
    合計が run_batch の実測壁時計時間と一致すること
+5. walk コスト診断 (prompts/88): timing の walk_cells_est_e/i・h_mean_m・h_min_m が
+   正の妥当な値であること、時間キーの合計 (4.) を汚染しないこと
 """
 
 import math
@@ -18,7 +20,7 @@ import numpy as np
 
 from es_sim.fem import EPS0
 from es_sim.particles import ME, QE
-from es_sim.pic import PicSimulation
+from es_sim.pic import WALK_DIAG_KEYS, PicSimulation
 from es_sim.schema import Project
 
 DENSITY = 1.0e14  # [m^-3]
@@ -202,9 +204,11 @@ def test_timing_phases():
     - 全キーが 0 以上
     - 各フェーズの合計 (= done メッセージの total) が run_batch の実測壁時計時間と
       ±計測誤差で一致する (step() 内の全時間が漏れなく・二重計上なくどこかの
-      フェーズに割り当てられていることの確認)
+      フェーズに割り当てられていることの確認)。walk コスト診断 (prompts/88、
+      WALK_DIAG_KEYS) は秒数ではないためこの合計からは除外する
     - 少なくとも solve/walk/deposit/mcc は正の時間を計上する
       (このケースは MCC 有効なので mcc も確実に発火する)
+    - walk_cells_est_e/i・h_mean_m・h_min_m (prompts/88) が正で、h は妥当な m オーダー
     """
     n_steps = 20
     project = Project.model_validate(
@@ -256,7 +260,8 @@ def test_timing_phases():
         assert key in timing
         assert timing[key] >= 0.0
 
-    total = sum(timing.values())
+    # walk コスト診断 (prompts/88) は秒数ではないので、時間の合計からは除外する
+    total = sum(v for k, v in timing.items() if k not in WALK_DIAG_KEYS)
     assert total > 0.0
     assert timing["solve"] > 0.0
     assert timing["walk"] > 0.0
@@ -267,13 +272,24 @@ def test_timing_phases():
     # 占めるはず (下限は緩めに 50%、上限は計測誤差を見込んで少し余裕を持たせる)
     assert 0.5 * wall <= total <= wall + 0.05
 
+    # walk コスト診断 (prompts/88): 種ごとの平均横断セル数の推定と代表セル寸法
+    assert timing["walk_cells_est_e"] > 0.0
+    assert timing["walk_cells_est_i"] > 0.0
+    assert 0.0 < timing["h_min_m"] <= timing["h_mean_m"]
+    # メッシュ寸法 (1.2e-3 m 刻み) から妥当な m オーダーであること
+    assert 1e-6 < timing["h_mean_m"] < 1.0
+
     # continue 後は区間分のみを返す (前区間の値を引きずらない)
     sim.prepare_continue(n_steps)
     for key in timing:
         assert sim.timing[key] == 0.0
     sim.run_batch()
-    total2 = sum(sim.timing.values())
+    total2 = sum(v for k, v in sim.timing.items() if k not in WALK_DIAG_KEYS)
     assert total2 > 0.0
+    # continue 後も walk コスト診断キーは再設定される
+    assert sim.timing["walk_cells_est_e"] > 0.0
+    assert sim.timing["walk_cells_est_i"] > 0.0
+    assert sim.timing["h_mean_m"] > 0.0
 
 
 # ---- 5. ライブモニタの要素密度 n_e/n_i (prompts/81) -----------------------------

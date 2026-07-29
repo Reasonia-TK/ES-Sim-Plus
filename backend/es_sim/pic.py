@@ -62,6 +62,13 @@ MERGE_MIN_GROUP = 3
 # フレーム送出時の種ごとの最大粒子数 (間引き)
 MAX_FRAME_PARTICLES = 2000
 
+# walk コスト診断 (prompts/88) が timing dict に追加するキー。秒数ではないため、
+# server.py の timing.total 集計・frontend の内訳表示 (%計算・合計) からは
+# このキー集合を除外する
+WALK_DIAG_KEYS = frozenset(
+    {"walk_cells_est_e", "walk_cells_est_i", "h_mean_m", "h_min_m"}
+)
+
 # IEDF/IADF コレクタのサンプル上限 (超過分は count/total_weight のみ計上、prompts/30)
 COLLECTOR_MAX_SAMPLES = 50000
 
@@ -222,6 +229,17 @@ class PicSimulation:
         # 誘電体 (固体) 要素のマスク: 粒子は侵入できず表面で吸収する (prompts/24)。
         # 場の計算は変更しない (εr 付き要素としてメッシュに残る)。無ければ None
         self._solid_elem = _solid_elements(project, mesh)
+
+        # ---- walk コスト診断 (prompts/88): 代表セル寸法 ----------------------
+        # h_i = sqrt(2·A_i) (三角形の面積から逆算した代表長さ)。理想は「粒子が
+        # 実際にいる要素」の平均だが、簡易版として気体要素 (固体を除く) 全体の
+        # 単純平均 h_mean と最小 h_min を出す。h_min/h_mean が小さいほどメッシュの
+        # ローカル細分化が強いことを示す (frontend のヒント表示に使う)
+        h_all = np.sqrt(
+            2.0 * (self.area if self._solid_elem is None else self.area[~self._solid_elem])
+        )
+        self._h_mean = float(h_all.mean()) if len(h_all) else 0.0
+        self._h_min = float(h_all.min()) if len(h_all) else 0.0
 
         # 誘電体 SEE (prompts/38): 固体要素ごとの γ (see_gamma > 0 の dielectric)。
         # 該当領域が無ければ None (従来経路と完全一致)
@@ -727,6 +745,14 @@ class PicSimulation:
             "other": 0.0,       # 注入・FN放出・時間平均積算・診断記録など
             "frame": 0.0,       # ライブフレーム用の密度集計・リスト変換
         }
+        # walk コスト診断 (prompts/88)。h_mean_m/h_min_m はメッシュから決まる定数
+        # (継続実行でも不変)、walk_cells_est_e/i は区間平均 (run_batch 終了時に確定する)
+        self.timing["h_mean_m"] = self._h_mean
+        self.timing["h_min_m"] = self._h_min
+        self.timing["walk_cells_est_e"] = 0.0
+        self.timing["walk_cells_est_i"] = 0.0
+        self._walk_diag_sum = {"e": 0.0, "i": 0.0}  # Σ mean(|v|)·dt_species/h_mean
+        self._walk_diag_n = {"e": 0, "i": 0}        # 上のサンプル数 (frame 間隔)
 
         # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ) --------------
         # E は vx, vy のみに作用する (vz は不変)
@@ -2551,6 +2577,29 @@ class PicSimulation:
             if st["auto"]:
                 st["e_max"] = None
         # 不動種の堆積キャッシュは維持して良い (粒子状態が変わらない限り有効)
+        # walk コスト診断 (prompts/88) も区間分の平均に切り替える
+        # (h_mean_m/h_min_m は run_batch 末尾で毎回再設定するので値が消えても問題ない)
+        self._walk_diag_sum = {"e": 0.0, "i": 0.0}
+        self._walk_diag_n = {"e": 0, "i": 0}
+
+    def _accum_walk_diag(self) -> None:
+        """診断 (prompts/88): 種ごとの平均横断セル数の推定を frame 間隔でサンプルする。
+
+        walk コスト ∝ 粒子が1ステップに横切るセル数 ≈ mean(|v|)·dt_species / h_mean。
+        イオンサブサイクル中はイオンの実効時間刻み (_sub·dt) を使う。O(N) の numpy
+        演算だが frame_every ステップに1回しか呼ばないためコストは無視できる
+        (呼び出し側で「frame」枠に計上される)。
+        """
+        if self._h_mean <= 0.0:
+            return
+        for name, key in (("electron", "e"), ("ion", "i")):
+            sp = self.species[name]
+            if len(sp.v) == 0:
+                continue
+            dt_sp = self.dt * self._sub if (name == "ion" and self._sub > 1) else self.dt
+            v_mean = float(np.mean(np.sqrt(np.sum(sp.v * sp.v, axis=1))))
+            self._walk_diag_sum[key] += v_mean * dt_sp / self._h_mean
+            self._walk_diag_n[key] += 1
 
     def _make_frame(self, phi: np.ndarray) -> dict:
         """WS 送出用フレーム (JSON 化可能な dict)。粒子は種ごと最大2000点に間引く。
@@ -2618,7 +2667,8 @@ class PicSimulation:
             )
 
         frames: list[dict] = []
-        for _ in range(self.pic.n_steps):
+        n_steps_total = self.pic.n_steps
+        for step_i in range(n_steps_total):
             if should_stop is not None and should_stop():
                 break
             phi = self.step()
@@ -2638,14 +2688,32 @@ class PicSimulation:
             if self._cycle_enabled and self.t - self.dt >= self._snap_t_start - 1e-30:
                 # ステップ開始時刻の位相ビンで、粒子位置 (ステップ終端) を保存する
                 self._snapshot_particles(self.t - self.dt)
-            if self.step_count % self.pic.frame_every == 0:
+            do_frame = self.step_count % self.pic.frame_every == 0
+            # walk コスト診断 (prompts/88): frame と同じ間隔でサンプルするが、
+            # n_steps < frame_every の短い実行でも必ず1回はサンプルされるよう
+            # ループの最終ステップでも強制的にサンプルする (フレーム自体の生成・
+            # 送出タイミングは do_frame のまま変更しない)
+            do_walk_diag = do_frame or step_i == n_steps_total - 1
+            if do_walk_diag:
                 t_frame0 = time.perf_counter()
-                frame = self._make_frame(phi)
+                if do_walk_diag:
+                    self._accum_walk_diag()
+                if do_frame:
+                    frame = self._make_frame(phi)
+                    if store_frames:
+                        frames.append(frame)
+                    if callback is not None:
+                        callback(frame)
                 self.timing["frame"] += time.perf_counter() - t_frame0
-                if store_frames:
-                    frames.append(frame)
-                if callback is not None:
-                    callback(frame)
+        # walk コスト診断 (prompts/88) の確定。h_mean_m/h_min_m は prepare_continue の
+        # 一律リセットで 0 になっている可能性があるためここで必ず書き戻す
+        self.timing["h_mean_m"] = self._h_mean
+        self.timing["h_min_m"] = self._h_min
+        for key in ("e", "i"):
+            n = self._walk_diag_n[key]
+            self.timing[f"walk_cells_est_{key}"] = (
+                self._walk_diag_sum[key] / n if n else 0.0
+            )
         self.fields = self.averaged_fields()
         self.cycle = self.cycle_data()
         self.collector_results = self._collector_data()

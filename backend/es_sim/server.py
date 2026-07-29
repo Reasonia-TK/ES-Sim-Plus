@@ -25,7 +25,7 @@ from .fem import solve
 from .lxcat import parse_lxcat
 from .meshing import generate_mesh
 from .particles import trace
-from .pic import PicSimulation
+from .pic import WALK_DIAG_KEYS, PicSimulation
 from .postprocess import sample_line
 from .dsmc import DsmcSimulation
 from .mcc import GasField
@@ -503,8 +503,10 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
             "elapsed_s": time.perf_counter() - t_run0,
         }
         # 位相別プロファイル計測 (prompts/75)。total は表示用に別途加算しておく
-        # (continue では sim.timing が区間分のみを持つので、total もその区間分になる)
-        done_msg["timing"] = {**sim.timing, "total": sum(sim.timing.values())}
+        # (continue では sim.timing が区間分のみを持つので、total もその区間分になる)。
+        # walk コスト診断 (prompts/88、WALK_DIAG_KEYS) は秒数ではないため合計から除外する
+        timing_secs = {k: v for k, v in sim.timing.items() if k not in WALK_DIAG_KEYS}
+        done_msg["timing"] = {**sim.timing, "total": sum(timing_secs.values())}
         # 時間平均フィールド (prompts/26)。平均区間を積算できていれば添付する
         if sim.fields is not None:
             done_msg["fields"] = {
