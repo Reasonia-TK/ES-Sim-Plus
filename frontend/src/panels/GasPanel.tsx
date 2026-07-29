@@ -379,41 +379,25 @@ export default function GasPanel({
                     {(b.type === "outlet" || (b.type === "inlet" && specMode === "pressure")) && (
                       <label className="rf-compact-label" title="圧力 [Pa] (outlet は空欄/0で真空排気)">
                         p
-                        <input
-                          type="text"
-                          inputMode="decimal"
+                        {/* 確定時コミット (blur/Enter)。素の input のキー毎確定だと
+                            "0.5" 入力途中の "0." が数値化→再表示で "0" になり小数点が
+                            消える (1未満の値が入力できない) ため */}
+                        <CommitNullableNumberInput
                           className="rf-compact"
-                          value={b.pressure_pa == null ? "" : String(b.pressure_pa)}
+                          value={b.pressure_pa ?? null}
                           placeholder={b.type === "outlet" ? "真空" : ""}
-                          onChange={(e) => {
-                            const raw = e.target.value;
-                            if (raw.trim() === "") {
-                              updateBoundary(i, { pressure_pa: null });
-                              return;
-                            }
-                            const n = Number(raw);
-                            if (Number.isFinite(n)) updateBoundary(i, { pressure_pa: n });
-                          }}
+                          onCommit={(v) => updateBoundary(i, { pressure_pa: v })}
                         />
                       </label>
                     )}
                     {b.type === "inlet" && specMode === "flow" && (
                       <label className="rf-compact-label" title="流量 [sccm] (1 sccm = 標準状態の1 cm³/min、奥行き1m換算)">
                         Q
-                        <input
-                          type="text"
-                          inputMode="decimal"
+                        {/* 確定時コミット。0.5 sccm など1未満の流量も指数表記も入力可能にする */}
+                        <CommitNullableNumberInput
                           className="rf-compact"
-                          value={b.flow_sccm == null ? "" : String(b.flow_sccm)}
-                          onChange={(e) => {
-                            const raw = e.target.value;
-                            if (raw.trim() === "") {
-                              updateBoundary(i, { flow_sccm: null });
-                              return;
-                            }
-                            const n = Number(raw);
-                            if (Number.isFinite(n)) updateBoundary(i, { flow_sccm: n });
-                          }}
+                          value={b.flow_sccm ?? null}
+                          onCommit={(v) => updateBoundary(i, { flow_sccm: v })}
                         />
                       </label>
                     )}
