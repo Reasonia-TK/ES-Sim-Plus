@@ -2120,6 +2120,7 @@ export default function App() {
             <div style={{ display: showGasSetupPage ? "block" : "none" }}>
               <GasPanel
                 project={project}
+                meshResult={meshResult}
                 lengthUnit={lengthUnit}
                 dsmc={project.dsmc ?? null}
                 onChange={setDsmc}
@@ -2145,6 +2146,7 @@ export default function App() {
             <div style={{ display: showGasResultsPage ? "block" : "none" }}>
               <GasPanel
                 project={project}
+                meshResult={meshResult}
                 lengthUnit={lengthUnit}
                 dsmc={project.dsmc ?? null}
                 onChange={setDsmc}

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput } from "../CommitInput";
 import { Toggle } from "../Toggle";
-import type { DsmcBoundary, DsmcBoundaryType, DsmcGas, DsmcResult, DsmcSettings, Point, Project } from "../types";
+import type { DsmcBoundary, DsmcBoundaryType, DsmcGas, DsmcResult, DsmcSettings, MeshResult, Point, Project } from "../types";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
 
@@ -121,6 +121,8 @@ export interface GasProgress {
 
 interface Props {
   project: Project;
+  // Mesh ボタンで生成済みのメッシュ (無ければ null)。粒子数の目安表示のセル数に使う
+  meshResult: MeshResult | null;
   // 長さの表示・入力単位 (mm/µm)。project 内部は常に m のまま
   lengthUnit: LengthUnit;
   dsmc: DsmcSettings | null;
@@ -154,6 +156,7 @@ interface Props {
 
 export default function GasPanel({
   project,
+  meshResult,
   lengthUnit,
   dsmc,
   onChange,
@@ -441,6 +444,40 @@ export default function GasPanel({
               onCommit={(v) => onChange({ ...dsmc, n_particles: Math.max(1, Math.round(v)) })}
             />
           </div>
+          {/* 粒子数の目安 (セルあたり20個以上ないと NTC 衝突統計が粗くなる)。
+              セル数はメッシュ生成済みならその要素数、未生成ならドメイン面積と
+              メッシュサイズからの概算 (正三角形 (√3/4)·size² で割る) を使う */}
+          {(() => {
+            const nElemsActual = meshResult?.triangles.length ?? result?.mesh.triangles.length ?? null;
+            let nElems = nElemsActual;
+            let approx = false;
+            if (nElems == null) {
+              const poly = project.geometry.domain.polygon;
+              let area = 0;
+              for (let k = 0; k < poly.length; k++) {
+                const [x1, y1] = poly[k];
+                const [x2, y2] = poly[(k + 1) % poly.length];
+                area += x1 * y2 - x2 * y1;
+              }
+              area = Math.abs(area) / 2;
+              const size = project.mesh.size;
+              if (area > 0 && size > 0) {
+                nElems = Math.max(1, Math.round(area / (0.433 * size * size)));
+                approx = true;
+              }
+            }
+            if (nElems == null) return null;
+            const perCell = dsmc.n_particles / nElems;
+            const low = perCell < 20;
+            return (
+              <p className="hint" style={low ? { color: "#e0b050" } : undefined}>
+                目安: メッシュ {approx ? "約" : ""}{nElems.toLocaleString()} セル × 20〜50 個/セル ≈{" "}
+                {(nElems * 20).toLocaleString()}〜{(nElems * 50).toLocaleString()} 粒子
+                (現在の設定は約 {perCell.toFixed(1)} 個/セル{low ? " — 統計が粗くなる可能性があります" : ""})。
+                実際のセル内粒子数は密度分布で偏るため、圧力勾配が強い場合は多めを推奨
+              </p>
+            );
+          })()}
           <div className="field">
             <span className="label">dt [s] (空欄=自動)</span>
             <CommitNullableNumberInput
