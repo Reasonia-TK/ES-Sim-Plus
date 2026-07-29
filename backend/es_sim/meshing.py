@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 import gmsh
 import numpy as np
 
-from .schema import Project, Region, VoltageWaveform, rf_components
+from .schema import EdgeMeshSize, Project, Region, VoltageWaveform, rf_components
 
 # 円形状の多角形分割数の下限・上限 (仕様書 §8 スキーマ契約参照)
 CIRCLE_SEGMENTS_MIN = 24
@@ -100,6 +100,55 @@ def _points_on_segment(pts: np.ndarray, q1: np.ndarray, q2: np.ndarray, tol: flo
     dist = np.abs(d[:, 0] * seg[1] - d[:, 1] * seg[0]) / seg_len
     t = (d[:, 0] * seg[0] + d[:, 1] * seg[1]) / (seg_len * seg_len)
     return (dist <= tol) & (t >= -1e-9) & (t <= 1.0 + 1e-9)
+
+
+def _add_edge_mesh_fields(entries: list[EdgeMeshSize], lc: float) -> None:
+    """local_edge_sizes (prompts/90) を gmsh の Distance+Threshold フィールドで実現し、
+    Min 合成した結果を Background Mesh に設定する。
+
+    - 線分ごとに size 間隔でサンプルした補助点列を作り (OCC point。曲線・フラグメントには
+      一切混ぜないため既存のジオメトリ構築・領域トポロジには影響しない)、Distance フィールドの
+      PointsList に渡す。Threshold で dist_in 以内は size、dist_out 以遠は全体特性長 lc に戻す。
+    - 複数エントリは Min フィールドで合成する。既存の領域ローカルサイズ (点への setSize、
+      Mesh.MeshSizeFromPoints 既定有効) とは独立な仕組みなので、gmsh 側で自動的に両者の
+      min が採用され (実測で確認済み)、共存できる。
+    - entries が空なら何もしない (gmsh の Field API を一切呼ばない) ため、
+      従来経路 (このフィールドが存在しない場合) と完全なビット不変になる。
+    """
+    if not entries:
+        return
+    occ = gmsh.model.occ
+    field = gmsh.model.mesh.field
+    threshold_tags: list[int] = []
+    for entry in entries:
+        p1 = np.asarray(entry.p1, dtype=np.float64)
+        p2 = np.asarray(entry.p2, dtype=np.float64)
+        seg_len = float(np.hypot(*(p2 - p1)))
+        # 線分上に (概ね) size 間隔でサンプルする (退化線分 (p1==p2) は1点のみ)
+        n = max(2, math.ceil(seg_len / entry.size) + 1) if seg_len > 0.0 else 1
+        ts = np.linspace(0.0, 1.0, n)
+        samples = p1[np.newaxis, :] + ts[:, np.newaxis] * (p2 - p1)[np.newaxis, :]
+        pt_tags = [occ.addPoint(float(x), float(y), 0.0) for x, y in samples]
+        occ.synchronize()
+
+        dist_tag = field.add("Distance")
+        field.setNumbers(dist_tag, "PointsList", pt_tags)
+        thr_tag = field.add("Threshold")
+        field.setNumber(thr_tag, "InField", dist_tag)
+        field.setNumber(thr_tag, "SizeMin", entry.size)
+        field.setNumber(thr_tag, "SizeMax", lc)
+        dist_in = entry.dist_in if entry.dist_in is not None else 2.0 * entry.size
+        dist_out = entry.dist_out if entry.dist_out is not None else 8.0 * entry.size
+        field.setNumber(thr_tag, "DistMin", dist_in)
+        field.setNumber(thr_tag, "DistMax", dist_out)
+        threshold_tags.append(thr_tag)
+
+    if len(threshold_tags) == 1:
+        bg_tag = threshold_tags[0]
+    else:
+        bg_tag = field.add("Min")
+        field.setNumbers(bg_tag, "FieldsList", threshold_tags)
+    field.setAsBackgroundMesh(bg_tag)
 
 
 def generate_mesh(project: Project) -> Mesh:
@@ -227,6 +276,9 @@ def _generate_unstructured(project: Project) -> Mesh:
         gmsh.model.mesh.setSize(gmsh.model.getEntities(0), lc)
         for pts, r_lc in region_size_pts:
             gmsh.model.mesh.setSize([(0, p) for p in pts], r_lc)
+
+        # ---- 辺 (線分) ローカルメッシュサイズ (prompts/90): Distance+Threshold フィールド ----
+        _add_edge_mesh_fields(project.mesh.local_edge_sizes, lc)
 
         # ---- 外周曲線 → domain エッジの対応付け (曲線中点がエッジ上か) --------
         if kept_curves:
@@ -511,7 +563,8 @@ def _generate_structured(project: Project) -> Mesh:
       (境界上含む、許容誤差 1e-12 相対) のうち残存要素から参照されるものを
       Dirichlet にする
     - periodic: 対辺の節点が格子で完全一致するため座標対応で periodic_map を構築
-    - local_sizes は構造格子では非対応 (指定されていても無視する)
+    - local_sizes / local_edge_sizes (prompts/90) は構造格子では非対応
+      (指定されていても無視する。gmsh フィールドを使わない独自の格子生成のため)
     """
     geo = project.geometry
     size = project.mesh.size

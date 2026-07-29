@@ -248,6 +248,9 @@ interface Props {
   deleteRegion: (id: string) => void;
   // 領域ごとのローカルメッシュサイズ [m]。null で解除 (全体サイズを使用)
   setRegionLocalSize: (id: string, size: number | null) => void;
+  // 辺 (線分) ローカルメッシュサイズ一覧の編集 (prompts/90)
+  updateEdgeMeshSize: (index: number, size: number) => void;
+  deleteEdgeMeshSize: (index: number) => void;
   result: SolveResult | null;
   // 表示するセクションの絞り込み (プロジェクトツリーの選択ノードに対応)。
   // 未指定なら従来通り全セクションを表示する (後方互換)
@@ -291,6 +294,8 @@ export default function FieldPanel({
   updateRegion,
   deleteRegion,
   setRegionLocalSize,
+  updateEdgeMeshSize,
+  deleteEdgeMeshSize,
   result,
   sections,
   edgeFilter,
@@ -461,6 +466,48 @@ export default function FieldPanel({
               円・斜め境界は要素中心判定による階段近似になります(局所サイズは無効)。
             </div>
           )}
+
+          <div className="subheading">辺ローカルサイズ</div>
+          <div className="hint">
+            キャンバスの「メッシュ細分」ツールで2点クリックでも追加できます。
+            線分近傍が指定サイズに細分化されます (非構造メッシュのみ)。
+          </div>
+          <div className="collector-list">
+            {(project.mesh.local_edge_sizes ?? []).length === 0 && (
+              <div className="muted">(辺ローカルサイズなし。キャンバスで配置してください)</div>
+            )}
+            {(project.mesh.local_edge_sizes ?? []).map((e, i) => (
+              <div key={i} className="collector-row" style={{ cursor: "default" }}>
+                <span className="collector-label-input">{`M${i + 1}`}</span>
+                <span
+                  className="collector-points"
+                  title={`(${mToUnit(e.p1[0], lengthUnit).toFixed(2)}, ${mToUnit(e.p1[1], lengthUnit).toFixed(2)}) - (${mToUnit(e.p2[0], lengthUnit).toFixed(2)}, ${mToUnit(e.p2[1], lengthUnit).toFixed(2)}) ${unitLabel}`}
+                >
+                  ({mToUnit(e.p1[0], lengthUnit).toFixed(1)},{mToUnit(e.p1[1], lengthUnit).toFixed(1)})–
+                  ({mToUnit(e.p2[0], lengthUnit).toFixed(1)},{mToUnit(e.p2[1], lengthUnit).toFixed(1)})
+                </span>
+                <CommitNumberInput
+                  className="collector-tol-input"
+                  value={mToUnit(e.size, lengthUnit)}
+                  onCommit={(v) => {
+                    if (v > 0) updateEdgeMeshSize(i, unitToM(v, lengthUnit));
+                  }}
+                />
+                <button
+                  type="button"
+                  className="danger collector-delete"
+                  onClick={() => deleteEdgeMeshSize(i)}
+                  title="この辺ローカルサイズを削除"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+          {(project.mesh.mode ?? "unstructured") === "structured" &&
+            (project.mesh.local_edge_sizes ?? []).length > 0 && (
+              <div className="hint">構造格子モードでは辺ローカルサイズは無視されます。</div>
+            )}
         </>
       )}
 

@@ -6,6 +6,7 @@ import { api } from "./api";
 import { getPort, initPort, setPort } from "./backendPort";
 import CadCanvas from "./canvas/CadCanvas";
 import type {
+  EdgeMeshSizeView,
   FieldView,
   GasBoundaryView,
   PicCollectorView,
@@ -44,6 +45,7 @@ import type {
   DsmcBoundary,
   DsmcResult,
   EdgeBcType,
+  EdgeMeshSize,
   Health,
   MeshResult,
   ParticleSettings,
@@ -211,6 +213,7 @@ const TOOL_LABELS: Record<Tool, string> = {
   collector: "コレクタ",
   gasbc: "ガス境界",
   eedfbox: "EEDF領域",
+  meshref: "メッシュ細分",
 };
 
 // 実行中の経過時間表示 (ステータスバー、prompts/86) の秒数を m:ss (1時間以上は h:mm:ss) に整形する
@@ -357,6 +360,7 @@ export default function App() {
   const [showCollectors, setShowCollectors] = useState(true);
   const [showGasBoundaries, setShowGasBoundaries] = useState(true);
   const [showEedfRegions, setShowEedfRegions] = useState(true);
+  const [showEdgeMeshSizes, setShowEdgeMeshSizes] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1015,6 +1019,36 @@ export default function App() {
     setActiveNode("study-gas");
   };
 
+  // 辺ローカルメッシュサイズ配置ツール (CadCanvas) からの確定通知。コレクタ・ガス境界と同じ
+  // 2点クリックUX (prompts/90)。既定サイズは mesh.size / 4 (領域ローカルサイズより粗めの
+  // 「まず試す」既定値。細かすぎる既定だと初回クリックで計算コストが跳ね上がるのを避ける)。
+  // project.mesh は Undo/Redo 対象の Project 本体フィールドなので commitProject 経由で反映する
+  const setEdgeMeshSizePoints = (p1: Point, p2: Point) => {
+    const p = projectRef.current;
+    const entry: EdgeMeshSize = { p1, p2, size: p.mesh.size / 4 };
+    const local_edge_sizes = [...(p.mesh.local_edge_sizes ?? []), entry];
+    commitProject({ ...p, mesh: { ...p.mesh, local_edge_sizes } });
+    setActiveNode("mesh");
+  };
+
+  // 辺ローカルメッシュサイズ一覧 (FieldPanel) の1件のサイズを更新する
+  const updateEdgeMeshSize = (index: number, size: number) => {
+    const p = projectRef.current;
+    const entries = p.mesh.local_edge_sizes ?? [];
+    if (index < 0 || index >= entries.length || !(size > 0)) return;
+    const next = entries.slice();
+    next[index] = { ...next[index], size };
+    commitProject({ ...p, mesh: { ...p.mesh, local_edge_sizes: next } });
+  };
+
+  // 辺ローカルメッシュサイズ一覧の1件を削除する
+  const deleteEdgeMeshSize = (index: number) => {
+    const p = projectRef.current;
+    const entries = p.mesh.local_edge_sizes ?? [];
+    if (index < 0 || index >= entries.length) return;
+    commitProject({ ...p, mesh: { ...p.mesh, local_edge_sizes: entries.filter((_, i) => i !== index) } });
+  };
+
   // コレクタ一覧 (PICパネル) の1件を更新する (ラベル・tol の編集)
   const updateCollector = (index: number, patch: Partial<PicCollectorSettings>) => {
     const collectors = pic.collectors ?? [];
@@ -1603,6 +1637,15 @@ export default function App() {
     .filter((b) => b.p1 != null && b.p2 != null)
     .map((b, i) => ({ p1: b.p1 as Point, p2: b.p2 as Point, label: `G${i + 1}` }));
 
+  // 配置済み辺ローカルメッシュサイズ一覧 (CadCanvas への常時オーバーレイ表示用、prompts/90)。
+  // ラベルは schema に持たせず (backend には保存しない)、コレクタ・ガス境界と同じ流儀で
+  // インデックスから "M1","M2",... を振る
+  const edgeMeshSizesList: EdgeMeshSizeView[] = (project.mesh.local_edge_sizes ?? []).map((e, i) => ({
+    p1: e.p1,
+    p2: e.p2,
+    label: `M${i + 1}`,
+  }));
+
   // コレクタ一覧の選択インデックス (範囲外・未選択なら先頭を既定選択とする)
   const selectedCollectorIndex: number | null =
     selectedCollectorIndexRaw !== null && selectedCollectorIndexRaw < collectorsList.length
@@ -1960,6 +2003,8 @@ export default function App() {
                 updateRegion={updateRegion}
                 deleteRegion={deleteRegion}
                 setRegionLocalSize={setRegionLocalSize}
+                updateEdgeMeshSize={updateEdgeMeshSize}
+                deleteEdgeMeshSize={deleteEdgeMeshSize}
                 result={result}
                 sections={fieldSections}
                 edgeFilter={activeNode === "boundary" ? edgeFilter : null}
@@ -2350,6 +2395,13 @@ export default function App() {
                 EEDF領域は最大{MAX_EEDF_REGIONS}個に達しました
               </span>
             )}
+            <button
+              className={`tool ${tool === "meshref" ? "active" : ""}`}
+              onClick={() => setTool("meshref")}
+              title="2点クリックで線分近傍のローカルメッシュ細分化を追加します (非構造メッシュのみ有効)"
+            >
+              メッシュ細分
+            </button>
             <div className="sep" />
             <Toggle label="グリッドスナップ" checked={gridSnap} onChange={setGridSnap} />
             <label className="snap">
@@ -2375,6 +2427,7 @@ export default function App() {
             <Toggle label="コレクタ" checked={showCollectors} onChange={setShowCollectors} />
             <Toggle label="ガス境界" checked={showGasBoundaries} onChange={setShowGasBoundaries} />
             <Toggle label="EEDF領域" checked={showEedfRegions} onChange={setShowEedfRegions} />
+            <Toggle label="メッシュ細分" checked={showEdgeMeshSizes} onChange={setShowEdgeMeshSizes} />
           </div>
 
           <CadCanvas
@@ -2403,6 +2456,7 @@ export default function App() {
             picFieldView={finalPicFieldView}
             gasParticles={gasRunning && gasShowParticles ? gasLiveParticles : null}
             gasBoundaries={showGasBoundaries ? gasBoundariesList : []}
+            edgeMeshSizes={showEdgeMeshSizes ? edgeMeshSizesList : []}
             onSelectRegion={selectRegionFromCanvas}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}
@@ -2414,6 +2468,7 @@ export default function App() {
             onSetCollector={setCollectorPoints}
             onSetGasBoundary={setGasBoundaryPoints}
             onSetEedfRegion={setEedfRegionPoints}
+            onSetEdgeMeshSize={setEdgeMeshSizePoints}
           />
           {showRfMonitorPanel && <RfPhaseMonitor project={project} t={picFrame!.t} />}
           {profileLine && (

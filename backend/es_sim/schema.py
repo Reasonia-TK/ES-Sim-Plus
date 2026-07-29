@@ -184,11 +184,30 @@ class LocalSize(BaseModel):
     size: float
 
 
+class EdgeMeshSize(BaseModel):
+    """線分近傍のローカルメッシュサイズ (prompts/90)。gmsh の Distance+Threshold フィールドで、
+    線分から dist_in までは size、dist_out で全体特性長 (mesh.size) へ線形に戻す。
+
+    キャンバスの「メッシュ細分」ツール (2点クリック) で追加する他、任意の電極エッジ・
+    ドメイン辺の近傍だけシース解像などの目的で細かくしたい場合に使う。
+    """
+
+    p1: Point
+    p2: Point
+    size: float = Field(..., gt=0)
+    # 遷移距離 (None は自動: dist_in = 2·size、dist_out = 8·size。meshing.py 側で解決する)
+    dist_in: float | None = Field(None, gt=0)
+    dist_out: float | None = Field(None, gt=0)
+
+
 class MeshSettings(BaseModel):
     size: float = Field(..., gt=0, description="全体特性長 [m]")
     local_sizes: list[LocalSize] = []
+    # 任意の線分近傍のローカルメッシュサイズ (prompts/90)。local_sizes (領域単位) と異なり
+    # 幾何に依存しない任意の線分を指定できる。local_sizes と同じく structured では無視される
+    local_edge_sizes: list[EdgeMeshSize] = []
     # メッシュ生成モード (prompts/34)。structured は軸平行矩形 domain 専用の
-    # 等間隔構造格子 (三角形2分割)。local_sizes は structured では無視される
+    # 等間隔構造格子 (三角形2分割)。local_sizes / local_edge_sizes は structured では無視される
     mode: Literal["unstructured", "structured"] = "unstructured"
 
 

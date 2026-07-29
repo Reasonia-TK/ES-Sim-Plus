@@ -34,7 +34,8 @@ export type Tool =
   | "emitter"
   | "collector"
   | "gasbc"
-  | "eedfbox";
+  | "eedfbox"
+  | "meshref";
 
 // カラーマップの対象: 電位 V か |E|
 export type FieldView = "v" | "e_abs";
@@ -68,6 +69,9 @@ const GAS_BOUNDARY_COLOR = "#ffb454";
 // EEDF/EEPF 集計領域の表示色 (紫系)。コレクタ・ガス境界のパレットと重ならない固定色にする (prompts/85)
 const EEDF_REGION_COLOR = "#c792ea";
 
+// 辺 (線分) ローカルメッシュサイズの表示色 (水色系)。他のオーバーレイと重ならない固定色にする (prompts/90)
+const EDGE_MESH_COLOR = "#59c2ff";
+
 // 配置済み EEDF/EEPF 集計領域 (軸平行矩形) の表示用ビュー (最大4個、常時オーバーレイ表示対象)
 export interface PicEedfRegionView {
   label: string;
@@ -77,6 +81,13 @@ export interface PicEedfRegionView {
 
 // 配置済み DSMC 線分境界のオーバーレイ表示用ビュー (p1/p2 を持つ境界のみが対象、prompts/72)
 export interface GasBoundaryView {
+  label: string;
+  p1: Point;
+  p2: Point;
+}
+
+// 配置済み辺ローカルメッシュサイズの描画用ビュー (キャンバス表示に必要な最小限のみ、prompts/90)
+export interface EdgeMeshSizeView {
   label: string;
   p1: Point;
   p2: Point;
@@ -148,6 +159,8 @@ interface Props {
   // 配置済み DSMC 線分境界 (常時オーバーレイ表示の対象、prompts/72)。エッジ指定のみの境界は
   // p1/p2 を持たないため対象外 (App 側で p1/p2 を持つものだけ抽出して渡す)
   gasBoundaries?: GasBoundaryView[];
+  // 配置済み辺ローカルメッシュサイズ (常時オーバーレイ表示の対象、prompts/90)
+  edgeMeshSizes?: EdgeMeshSizeView[];
   onSelectRegion: (id: string | null) => void;
   onDeleteRegion: (id: string) => void;
   onAddRegion: (geom: Point[] | CircleShape) => void;
@@ -162,6 +175,8 @@ interface Props {
   // EEDF/EEPF 領域配置ツールの確定通知 (矩形ツールと同じ2点クリックUX、prompts/85)。
   // p1/p2 は対角の2点 (順不同、そのまま渡す。矩形化は呼び出し側が行う)
   onSetEedfRegion: (p1: Point, p2: Point) => void;
+  // 辺ローカルメッシュサイズ配置ツールの確定通知 (コレクタ・ガス境界と同じ2点クリックUX、prompts/90)
+  onSetEdgeMeshSize: (p1: Point, p2: Point) => void;
 }
 
 interface View {
@@ -387,6 +402,7 @@ export default function CadCanvas({
   picFieldView,
   gasParticles,
   gasBoundaries = [],
+  edgeMeshSizes = [],
   onSelectRegion,
   onDeleteRegion,
   onAddRegion,
@@ -398,6 +414,7 @@ export default function CadCanvas({
   onSetCollector,
   onSetGasBoundary,
   onSetEedfRegion,
+  onSetEdgeMeshSize,
 }: Props) {
   // 軸対称 (r-z) モードかどうか。x=z(軸方向)・y=r(径方向) と読み替えて表示する
   const isRz = project.coord === "rz";
@@ -1081,6 +1098,21 @@ export default function CadCanvas({
         Math.abs(y1f - y0f) * view.scale,
       );
       ctx.setLineDash([]);
+    } else if (tool === "meshref" && drawPts.length === 1 && cursor) {
+      // 辺ローカルメッシュサイズ配置ツールのラバーバンド (水色系破線、コレクタと同じ2点クリックUX)
+      const [x0m, y0m] = drawPts[0];
+      const [x1m, y1m] = cursor;
+      ctx.strokeStyle = EDGE_MESH_COLOR;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(sx(x0m), sy(y0m));
+      ctx.lineTo(sx(x1m), sy(y1m));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = EDGE_MESH_COLOR;
+      ctx.beginPath();
+      ctx.arc(sx(x0m), sy(y0m), 3, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     // 確定済みプロファイル線のオーバーレイ (白破線 + 端点マーカー)
@@ -1201,6 +1233,36 @@ export default function CadCanvas({
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
       ctx.fillText(r.label, rx + 3, ry - 3);
+    });
+
+    // 配置済み辺ローカルメッシュサイズのオーバーレイ (常時表示、水色系破線+ラベル、prompts/90)
+    edgeMeshSizes.forEach((m) => {
+      const [xm0, ym0] = m.p1;
+      const [xm1, ym1] = m.p2;
+      ctx.strokeStyle = EDGE_MESH_COLOR;
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(sx(xm0), sy(ym0));
+      ctx.lineTo(sx(xm1), sy(ym1));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = EDGE_MESH_COLOR;
+      ctx.strokeStyle = "#1b1e24";
+      ctx.lineWidth = 1;
+      for (const [px, py] of [m.p1, m.p2]) {
+        ctx.beginPath();
+        ctx.arc(sx(px), sy(py), 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      const mx = (xm0 + xm1) / 2;
+      const my = (ym0 + ym1) / 2;
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.fillStyle = EDGE_MESH_COLOR;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(m.label, sx(mx), sy(my) - 6);
     });
 
     // 粒子軌道 (trace 結果): シアン系半透明ポリライン。粒子数が多くても見えるように線幅は細く保つ
@@ -1418,6 +1480,7 @@ export default function CadCanvas({
     picFieldView,
     gasParticles,
     gasBoundaries,
+    edgeMeshSizes,
     isRz,
     isRzX0,
     isAxisym,
@@ -1715,6 +1778,14 @@ export default function CadCanvas({
             } else {
               const p1 = drawPts[0];
               onSetEedfRegion(p1, pt);
+              setDrawPts([]);
+            }
+          } else if (tool === "meshref") {
+            if (drawPts.length === 0) {
+              setDrawPts([pt]);
+            } else {
+              const p1 = drawPts[0];
+              onSetEdgeMeshSize(p1, pt);
               setDrawPts([]);
             }
           }

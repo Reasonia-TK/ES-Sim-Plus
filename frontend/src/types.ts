@@ -4,6 +4,17 @@ export type Point = [number, number];
 
 export type RegionType = "conductor" | "dielectric" | "charge";
 
+// 線分近傍のローカルメッシュサイズ (prompts/90)。gmsh の Distance+Threshold フィールドで
+// 線分近傍を size まで細分化する (非構造メッシュのみ有効)。dist_in/dist_out は省略時
+// backend 側で自動決定 (2·size / 8·size) するため、フロントの UI では出さない
+export interface EdgeMeshSize {
+  p1: Point;
+  p2: Point;
+  size: number;
+  dist_in?: number | null;
+  dist_out?: number | null;
+}
+
 // 円領域のパラメトリック形状 (中心+半径)。メッシュ生成時にバックエンド側で多角形化する
 export interface CircleShape {
   kind: "circle";
@@ -553,6 +564,8 @@ export interface Project {
   mesh: {
     size: number;
     local_sizes?: { region: string; size: number }[];
+    // 任意の線分近傍のローカルメッシュサイズ (prompts/90)。local_sizes と同じく structured では無視される
+    local_edge_sizes?: EdgeMeshSize[];
     mode?: "unstructured" | "structured";
   };
   solver?: { backend: "numpy" | "cupy" | "auto" };
