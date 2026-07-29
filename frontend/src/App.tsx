@@ -1774,6 +1774,15 @@ export default function App() {
   // --- 下部ステータスバー ---
   // エラーは error → picError → gasError → sweepError の順で最初の非null を優先表示する
   const statusError = error ?? picError ?? gasError ?? sweepError;
+  // ステータスバーのエラーを閉じる (各エラー state を一括クリア)。パネル内の
+  // エラー表示は各パネルの error prop 経由で残したいが、実体は同じ state なので
+  // ここでは「ステータスバーに居座る」問題の解消を優先して両方消える仕様とする
+  const dismissStatusError = () => {
+    setError(null);
+    setPicError(null);
+    setGasError(null);
+    setSweepError(null);
+  };
   // スイープの完了ケース数 (進捗表示用。PIC/DSMC 単発実行と同列の優先度で表示する)
   const sweepCompletedCount = sweepCases.filter((c) => c.status === "done" || c.status === "error").length;
   // 続きから実行では frame.step が通算で進むため、区間開始オフセットを引いて計算する
@@ -2421,8 +2430,20 @@ export default function App() {
 
       {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > DSMC実行中 > 準備完了 の優先順位 */}
       <div className="statusbar">
-        {statusError ? (
-          <span className="statusbar-error">{statusError}</span>
+        {/* 実行中は進捗を最優先 (エラーが残っていても別計算の進捗を隠さない)。
+            アイドル時のエラーは×で閉じられる (居座り防止。新規実行開始でも自動クリア) */}
+        {statusError && !anyRunning ? (
+          <span className="statusbar-error">
+            {statusError}
+            <button
+              type="button"
+              className="statusbar-error-close"
+              title="エラー表示を閉じる"
+              onClick={dismissStatusError}
+            >
+              ×
+            </button>
+          </span>
         ) : busy ? (
           <span>静電場/トレース 計算中... — 経過 {formatElapsed(busyElapsedSec)}</span>
         ) : picRunning ? (

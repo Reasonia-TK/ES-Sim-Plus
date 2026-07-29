@@ -382,3 +382,10 @@ button.danger:hover { background: #b34747; }
 /* .field 内 (ラベル左端・右端2カラム) に置き換えて使う場合、Toggle 自体が隣接1行になるため
    space-between は不要。.field を使わず Toggle 単体を1行として配置する箇所が大半のため
    ここでは .field 側のCSSには触れない */
+
+/* ステータスバーのエラー閉じるボタン (居座り防止、prompts/90 相当) */
+.statusbar-error-close {
+  margin-left: 8px; padding: 0 6px; background: transparent; border: none;
+  color: inherit; cursor: pointer; font-size: 12px; line-height: 1;
+}
+.statusbar-error-close:hover { color: #fff; }
