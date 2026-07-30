@@ -12,9 +12,12 @@
 7. validator: gap_m<=0、eedf_regions 5個、use_dsmc_gas=True で ValueError
 8. プリセット: edupic_ar の断面積が閾値未満で0・閾値超で正、
    Turner Case 1 の数値 (gap, pressure, freq) が仕様通り
+9. RF 重畳 (voltage_rf、prompts/93): 電極電圧が2D と同じ式どおり、CSV サンプル波形
+   との等価性、cycle 基本周波数の優先順位 (voltage_rf 優先)、デュアル周波数の疎通
 """
 
 import json
+import math
 
 import numpy as np
 import pydantic
@@ -26,7 +29,7 @@ from es_sim.mcc import KB
 from es_sim.particles import ME, QE
 from es_sim.pic1d import Pic1dSimulation
 from es_sim.pic1d_presets import edupic_ar_processes, get_presets
-from es_sim.schema import Geometry, Domain, MeshSettings, Pic1dSettings, Project
+from es_sim.schema import Geometry, Domain, MeshSettings, Pic1dSettings, Project, VoltageWaveform
 
 # ダミーの geometry/mesh (1D PIC はこれらを一切参照しないが、Project スキーマ上必須)
 _DUMMY_GEOMETRY = Geometry(domain=Domain(polygon=[(0, 0), (1, 0), (1, 1), (0, 1)]))
@@ -272,9 +275,10 @@ def test_turner_preset_values():
     expected_pressure = n_he * KB * 300.0
     assert p["mcc"]["gas"]["pressure_pa"] == pytest.approx(expected_pressure)
 
-    left_wf = p["left"]["waveforms"][0]
-    assert left_wf["freq_hz"] == pytest.approx(13.56e6)
-    assert max(left_wf["v"]) == pytest.approx(450.0, rel=1e-2)
+    left_rf = p["left"]["voltage_rf"]
+    assert left_rf["freq_hz"] == pytest.approx(13.56e6)
+    assert left_rf["amplitude"] == pytest.approx(450.0)
+    assert left_rf["phase_deg"] == pytest.approx(0.0)
 
     expected_amu = 6.67e-27 / 1.66054e-27
     assert p["ion_mass_amu"] == pytest.approx(expected_amu)
@@ -287,9 +291,9 @@ def test_edupic_preset_values():
     assert p["gap_m"] == pytest.approx(0.025)
     assert p["mcc"]["gas"]["pressure_pa"] == pytest.approx(10.0)
     assert p["mcc"]["gas"]["temperature_k"] == pytest.approx(350.0)
-    left_wf = p["left"]["waveforms"][0]
-    assert left_wf["freq_hz"] == pytest.approx(13.56e6)
-    assert max(left_wf["v"]) == pytest.approx(250.0, rel=1e-2)
+    left_rf = p["left"]["voltage_rf"]
+    assert left_rf["freq_hz"] == pytest.approx(13.56e6)
+    assert left_rf["amplitude"] == pytest.approx(250.0)
     assert len(p["mcc"]["electron_processes"]) == 3
     assert len(p["mcc"]["ion_processes"]) == 2
 
@@ -365,3 +369,109 @@ def test_ws_pic1d_continue_without_state_errors():
         msg = ws.receive_json()
         assert msg["type"] == "error"
         assert "保持" in msg["detail"] or "start" in msg["detail"]
+
+
+# ---- 9. RF 重畳 (voltage_rf, prompts/93) ------------------------------------------
+
+
+def test_electrode_voltage_rf_matches_2d_formula():
+    """V(t) = v_dc + Σ amplitude·sin(2π·freq_hz·t + phase_deg·π/180) (pic.py の
+    _dirichlet_values と完全に同じ式) どおりの値になることを t=0, T/4, T で確認する。
+    """
+    amp, freq, phase_deg = 100.0, 5.0e6, 30.0
+    s = Pic1dSettings(
+        gap_m=0.01, n_cells=10, init_density_m3=1.0e10, n_macro=1, dt=1e-9, n_steps=1,
+        left={"v_dc": 10.0, "voltage_rf": {"amplitude": amp, "freq_hz": freq, "phase_deg": phase_deg}},
+        right={"v_dc": 0.0},
+    )
+    sim = Pic1dSimulation(_project(s))
+    period = 1.0 / freq
+    for t in (0.0, period / 4.0, period):
+        expected = 10.0 + amp * math.sin(2.0 * math.pi * freq * t + math.radians(phase_deg))
+        assert sim._electrode_voltage(sim.s.left, t) == pytest.approx(expected, rel=1e-12, abs=1e-9)
+
+
+def test_voltage_rf_matches_sampled_waveform_profile():
+    """voltage_rf {A, f, phase=0} と、同じ正弦を2000点サンプルした VoltageWaveform とで、
+    短い実行の時間平均プロファイルが近いこと (rtol 緩め、線形補間誤差分) を確認する。
+    """
+    freq = 13.56e6
+    amp = 50.0
+    n = 2000
+    phase = (np.arange(n) / n).tolist()
+    v = (amp * np.sin(2.0 * np.pi * np.arange(n) / n)).tolist()
+    wf = VoltageWaveform(freq_hz=freq, phase=phase, v=v)
+
+    def make(left_electrode: dict) -> Pic1dSettings:
+        return Pic1dSettings(
+            gap_m=0.01, n_cells=32, init_density_m3=1.0e14, n_macro=1000,
+            dt=1.0 / (400.0 * freq), n_steps=400, frame_every=400, seed=3,
+            left=left_electrode, right={"v_dc": 0.0},
+        )
+
+    s_rf = make({"v_dc": 0.0, "voltage_rf": {"amplitude": amp, "freq_hz": freq, "phase_deg": 0.0}})
+    s_wf = make({"v_dc": 0.0, "waveforms": [wf.model_dump()]})
+
+    sim_rf = Pic1dSimulation(_project(s_rf))
+    sim_wf = Pic1dSimulation(_project(s_wf))
+    sim_rf.run_batch()
+    sim_wf.run_batch()
+
+    assert sim_rf.fields is not None and sim_wf.fields is not None
+    for key in ("phi", "n_e", "n_i"):
+        np.testing.assert_allclose(
+            sim_rf.fields[key], sim_wf.fields[key], rtol=1e-3, atol=1e-6
+        )
+
+
+def test_cycle_freq_prefers_voltage_rf_over_waveform():
+    """cycle 基本周波数は voltage_rf を優先する (pic1d.py の Pic1dSimulation.__init__
+    のコメント参照)。voltage_rf のみ指定でも cycle が有効になり freq_hz が一致すること、
+    および voltage_rf と異なる周波数の waveform が同時にあっても voltage_rf 側が
+    優先されることを確認する。
+    """
+    rf_freq = 27.12e6
+    wf_freq = 1.0e6
+    n = 100
+    wf = VoltageWaveform(
+        freq_hz=wf_freq,
+        phase=(np.arange(n) / n).tolist(),
+        v=(10.0 * np.sin(2.0 * np.pi * np.arange(n) / n)).tolist(),
+    )
+    s = Pic1dSettings(
+        gap_m=0.01, n_cells=16, init_density_m3=1.0e12, n_macro=200,
+        dt=1e-10, n_steps=20, frame_every=20, phase_bins=8,
+        left={
+            "v_dc": 0.0,
+            "voltage_rf": {"amplitude": 20.0, "freq_hz": rf_freq, "phase_deg": 0.0},
+            "waveforms": [wf.model_dump()],
+        },
+        right={"v_dc": 0.0},
+    )
+    sim = Pic1dSimulation(_project(s))
+    assert sim._cycle_enabled
+    assert sim._cycle_freq == pytest.approx(rf_freq)
+    sim.run_batch()
+    assert sim.cycle is not None
+    assert sim.cycle["freq_hz"] == pytest.approx(rf_freq)
+
+
+def test_dual_frequency_voltage_rf_runs():
+    """voltage_rf をリスト2成分 (デュアル周波数) で指定して実行できること (有限値チェック)。"""
+    s = Pic1dSettings(
+        gap_m=0.01, n_cells=16, init_density_m3=1.0e12, n_macro=200,
+        dt=1e-10, n_steps=50, frame_every=50,
+        left={
+            "v_dc": 0.0,
+            "voltage_rf": [
+                {"amplitude": 50.0, "freq_hz": 13.56e6, "phase_deg": 0.0},
+                {"amplitude": 10.0, "freq_hz": 2.0e6, "phase_deg": 45.0},
+            ],
+        },
+        right={"v_dc": 0.0},
+    )
+    sim = Pic1dSimulation(_project(s))
+    sim.run_batch()
+    assert sim.fields is not None
+    for key in ("phi", "e", "n_e", "n_i", "t_e", "ionization"):
+        assert np.all(np.isfinite(sim.fields[key])), key

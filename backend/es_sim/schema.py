@@ -483,13 +483,18 @@ class PicSettings(BaseModel):
 
 
 class Pic1dElectrode(BaseModel):
-    """1D の左右電極。電圧は v_dc + Σ waveforms(t) (既存 VoltageWaveform 合成を流用、pic.py の
-    _eval_waveform と同じ式)。2D の Region/BoundaryCondition と異なり voltage_rf (sin 成分) は
-    持たない — RF 駆動が必要な場合は正弦波をサンプルした VoltageWaveform で表現する
-    (pic1d_presets.py 参照)。
+    """1D の左右電極。電圧は v_dc + Σ RF sin + Σ waveforms(t) の合成 (prompts/93)。
+    2D の Region/BoundaryCondition の voltage_rf と同じ規約 (単一/リスト/None、
+    pic.py の _dirichlet_values と同じ式) をそのまま流用する。CSV 波形
+    (VoltageWaveform) とは併記可能 (両方指定すれば両方の寄与が加算される。
+    pic1d.py の _electrode_voltage / pic.py の _eval_waveform 参照)。
     """
 
     v_dc: float = 0.0
+    # RF 重畳 (prompts/93)。2D の BoundaryCondition.voltage_rf と同じ規約:
+    # 単一 VoltageRF / リスト (デュアル周波数など) / None。
+    # V_rf(t) = Σ amplitude·sin(2π·freq_hz·t + phase_deg·π/180)
+    voltage_rf: VoltageRF | list[VoltageRF] | None = None
     waveforms: list[VoltageWaveform] = []
     see_gamma: float = Field(0.0, ge=0.0, le=1.0, description="イオン入射あたりのSEE収率 γ")
 
@@ -526,7 +531,8 @@ class Pic1dSettings(BaseModel):
     frame_every: int = Field(20, gt=0)
     # 完了時に返す時間平均プロファイルの平均ステップ数。None なら最後の25% (2D と同じ規約)
     avg_steps: int | None = Field(None, gt=0)
-    # RF 1周期の位相分解ビン数。0=無効、RF (waveforms) が無ければ無効 (2D と同じ規約)
+    # RF 1周期の位相分解ビン数。0=無効、RF (voltage_rf/waveforms) が無ければ無効
+    # (基本周波数の決定優先順位は pic1d.py の Pic1dSimulation._cycle_freq 算出コメント参照)
     phase_bins: int = Field(40, ge=0)
     mcc: MccSettings | None = None  # 既存 MccSettings をそのまま流用 (null なら MCC 無効)
     see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]")

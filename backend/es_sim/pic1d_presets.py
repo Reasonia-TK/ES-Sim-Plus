@@ -19,7 +19,7 @@ import numpy as np
 
 from .mcc import KB
 from .particles import MP, ME
-from .schema import VoltageWaveform, XsProcess
+from .schema import VoltageRF, XsProcess
 
 # eduPIC 解析式断面積のエネルギーグリッド点数 (geomspace)。数十〜百点程度の
 # LXCat 実テーブルに対して MCC 側の np.interp コストは無視できる規模なので、
@@ -29,22 +29,15 @@ _XS_GRID_MAX_EV = 1.0e3
 _EXC_THRESHOLD_EV = 11.5
 _ION_THRESHOLD_EV = 15.8
 
-# RF 電圧波形 (VoltageWaveform) をサンプルする1周期あたりの点数。線形補間
-# (np.interp) でサイン波を近似するため、粗すぎると波形が三角波に近づいてしまう。
-# 360点 (1度刻み) なら角度2次の補間誤差は無視できる小ささになる
-_SINE_SAMPLES = 360
 
+def _sine_rf(amplitude_v: float, freq_hz: float) -> VoltageRF:
+    """振幅 amplitude_v・周波数 freq_hz・位相 0 の RF 成分 (prompts/93)。
 
-def _sine_waveform(amplitude_v: float, freq_hz: float) -> VoltageWaveform:
-    """振幅 amplitude_v・周波数 freq_hz の正弦波を VoltageWaveform としてサンプルする。
-
-    Pic1dElectrode は voltage_rf (sin 成分) を持たないため、RF 駆動は CSV インポート
-    波形と同じ機構 (pic.py の _eval_waveform、線形補間) で表現する。
+    Pic1dElectrode が voltage_rf (2D と同じ sin 成分) を持つようになったため、
+    以前のように正弦波を CSV (VoltageWaveform) としてサンプルする必要がなくなった
+    (サンプル補間誤差もなくなる、本来の表現)。
     """
-    n = _SINE_SAMPLES
-    phase = (np.arange(n) / n).tolist()
-    v = (amplitude_v * np.sin(2.0 * np.pi * np.arange(n) / n)).tolist()
-    return VoltageWaveform(freq_hz=freq_hz, phase=phase, v=v)
+    return VoltageRF(amplitude=amplitude_v, freq_hz=freq_hz, phase_deg=0.0)
 
 
 def edupic_ar_processes() -> tuple[list[XsProcess], list[XsProcess]]:
@@ -134,7 +127,7 @@ def edupic_ar_processes() -> tuple[list[XsProcess], list[XsProcess]]:
 def get_presets() -> dict:
     """GET /pic1d/presets が返す辞書。プリセット名 → {label, description, pic1d, ...}。"""
     e_procs, i_procs = edupic_ar_processes()
-    edupic_left_wf = _sine_waveform(250.0, 13.56e6)
+    edupic_left_rf = _sine_rf(250.0, 13.56e6)
 
     edupic_ar: dict = {
         "label": "eduPIC Ar base case (解析式断面積)",
@@ -148,7 +141,7 @@ def get_presets() -> dict:
         "pic1d": {
             "gap_m": 0.025,
             "n_cells": 256,
-            "left": {"v_dc": 0.0, "waveforms": [edupic_left_wf.model_dump()], "see_gamma": 0.0},
+            "left": {"v_dc": 0.0, "voltage_rf": edupic_left_rf.model_dump(), "see_gamma": 0.0},
             "right": {"v_dc": 0.0, "waveforms": [], "see_gamma": 0.0},
             "init_density_m3": 1.0e15,
             "init_te_ev": 2.0,
@@ -178,7 +171,7 @@ def get_presets() -> dict:
     n_he = 9.64e20
     pressure_he_pa = n_he * KB * 300.0
     ion_mass_amu_he = 6.67e-27 / 1.66054e-27
-    turner_left_wf = _sine_waveform(450.0, 13.56e6)
+    turner_left_rf = _sine_rf(450.0, 13.56e6)
 
     turner_he_case1: dict = {
         "label": "Turner et al. (2013) He Case 1 (断面積は要インポート)",
@@ -193,7 +186,7 @@ def get_presets() -> dict:
         "pic1d": {
             "gap_m": 0.067,
             "n_cells": 128,
-            "left": {"v_dc": 0.0, "waveforms": [turner_left_wf.model_dump()], "see_gamma": 0.0},
+            "left": {"v_dc": 0.0, "voltage_rf": turner_left_rf.model_dump(), "see_gamma": 0.0},
             "right": {"v_dc": 0.0, "waveforms": [], "see_gamma": 0.0},
             "init_density_m3": 2.56e14,
             "init_te_ev": 3.0,

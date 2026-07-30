@@ -33,14 +33,16 @@ import VoltagePreviewChart, { voltagePreviewFreqs } from "./VoltagePreviewChart"
 
 export type FieldSection = "domain" | "boundary" | "mesh" | "bfield" | "regions" | "solve";
 
-// RF重畳電圧の既定値 (13.56MHz の CCP を想定)
-const DEFAULT_VOLTAGE_RF: VoltageRf = { amplitude: 100.0, freq_hz: 13.56e6, phase_deg: 0.0 };
+// RF重畳電圧の既定値 (13.56MHz の CCP を想定)。Pic1dPanel (1D、prompts/93) からも
+// 同じ既定値で「RF重畳」トグルONの初期成分として使うため export する
+export const DEFAULT_VOLTAGE_RF: VoltageRf = { amplitude: 100.0, freq_hz: 13.56e6, phase_deg: 0.0 };
 // 2成分目以降を追加する際の既定値 (デュアル周波数の例として低周波側を想定)
 const DEFAULT_VOLTAGE_RF_2ND: VoltageRf = { amplitude: 100.0, freq_hz: 2e6, phase_deg: 0.0 };
 
 // RF重畳電圧 (単一/複数成分) の編集UI。成分ごとに振幅/周波数/位相 + 削除ボタン、
-// 末尾に成分追加ボタンを表示する。全成分削除で RF 自体を無効化 (undefined) する
-function RfComponentsEditor({
+// 末尾に成分追加ボタンを表示する。全成分削除で RF 自体を無効化 (undefined) する。
+// Pic1dPanel (1D の電極、prompts/93) からも共用する (export)
+export function RfComponentsEditor({
   components,
   onChange,
 }: {

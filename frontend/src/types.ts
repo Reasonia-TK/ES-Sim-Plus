@@ -220,11 +220,12 @@ export interface McSettings {
 // 2D FEM-PIC (PicSettings/PicSimulation 系) とは完全に独立な専用ソルバー。geometry/mesh とは
 // 無関係な一様格子 (n_cells 個のセル) 上で動く。
 
-// 1D の左右電極。電圧は v_dc + Σ waveforms(t) (2D の VoltageWaveform 合成と同じ式)。
-// 2D の Region/BoundaryCondition と異なり voltage_rf (sin 成分) は持たない — RF 駆動が
-// 必要な場合は正弦波をサンプルした VoltageWaveform で表現する (pic1d_presets.py 参照)
+// 1D の左右電極。電圧は v_dc + Σ RF sin + Σ waveforms(t) の合成 (prompts/93)。
+// voltage_rf は 2D の Region/BoundaryCondition と同じ VoltageRf 型を流用する
+// (単一成分/複数成分リスト/未指定)。CSV 波形 (waveforms) とは併記可
 export interface Pic1dElectrode {
   v_dc?: number;
+  voltage_rf?: VoltageRf | VoltageRf[]; // RF重畳 (未指定なら直流+CSV波形のみ。複数成分でデュアル周波数)
   waveforms?: VoltageWaveform[];
   see_gamma?: number; // イオン入射あたりのSEE収率 γ
 }
@@ -254,7 +255,8 @@ export interface Pic1dSettings {
   frame_every?: number;
   // 完了時に返す時間平均プロファイルの平均ステップ数。null なら最後の25%
   avg_steps?: number | null;
-  // RF 1周期の位相分解ビン数。0=無効、RF (waveforms) が無ければ無効
+  // RF 1周期の位相分解ビン数。0=無効、RF (voltage_rf/waveforms) が無ければ無効
+  // (基本周波数の優先順位は Pic1dPanel/pic1d.py と同じ: voltage_rf 優先 → waveforms)
   phase_bins?: number;
   mcc?: McSettings | null; // 既存 McSettings をそのまま流用 (null なら MCC 無効)。
   // ただし 1D は DSMC 連成 (mcc.use_dsmc_gas) に未対応 (backend の validator が拒否する)。

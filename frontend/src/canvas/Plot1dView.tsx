@@ -6,6 +6,7 @@ import { saveTextFile } from "../saveFile";
 import { arrayMax, arrayMin } from "../mathUtils";
 import { mToUnit } from "../units";
 import type { LengthUnit } from "../units";
+import { rfComponents } from "../types";
 import type {
   Pic1dCycle,
   Pic1dElectrode,
@@ -28,8 +29,10 @@ import type {
  *
  * 既存 PicPanel の EedfChart はデータ形状 (label/e_centers/f/...) が2D/1Dで同一のため
  * そのまま流用する (export 済み)。RF波形は 2D の RfPhaseMonitor と異なりデータモデルが
- * 異なる (Pic1dElectrode は v_dc + 複数波形の和、2D は BC単位の RF成分+単一CSV波形) ため、
- * 見た目 (配色・レイアウト) だけ揃えた専用実装にする (evalPic1dVoltage 参照)。
+ * 異なる (Pic1dElectrode は v_dc + 複数 RF 成分 + 複数波形の和、2D は BC単位の RF成分+
+ * 単一CSV波形) ため、見た目 (配色・レイアウト) だけ揃えた専用実装にする
+ * (evalPic1dVoltage 参照。RF 成分の評価式は VoltagePreviewChart の evalVoltage / pic.py の
+ * _eval_rf と完全に一致させる、prompts/93)。
  */
 
 interface Props {
@@ -72,10 +75,17 @@ function interpLinear(xp: number[], fp: number[], x: number): number {
   return fp[lo] + frac * (fp[hi] - fp[lo]);
 }
 
-// V(t) = v_dc + Σ waveforms(t)。各波形の評価式は pic.py の _eval_waveform / VoltagePreviewChart の
-// evalWaveform と同じ (位相を frac(t·freq_hz) で求め、1周期ループの折返しを補って線形補間する)
+// V(t) = v_dc + Σ RF sin + Σ waveforms(t) (prompts/93)。RF 成分の評価式は
+// VoltagePreviewChart の evalVoltage / pic.py の _eval_rf と完全に同じ
+// (Σ amplitude·sin(2π·freq_hz·t + phase_deg·π/180))。CSV 波形の評価式は
+// pic.py の _eval_waveform / VoltagePreviewChart の evalWaveform と同じ
+// (位相を frac(t·freq_hz) で求め、1周期ループの折返しを補って線形補間する)。
+// voltage_rf が未指定 (rfComponents が空配列) なら寄与0で従来 (waveforms のみ) と数値不変
 function evalPic1dVoltage(electrode: Pic1dElectrode, t: number): number {
   let v = electrode.v_dc ?? 0;
+  for (const c of rfComponents(electrode.voltage_rf)) {
+    v += c.amplitude * Math.sin(2 * Math.PI * c.freq_hz * t + (c.phase_deg * Math.PI) / 180);
+  }
   for (const wf of electrode.waveforms ?? []) {
     v += evalPic1dWaveform(wf, t);
   }
@@ -295,11 +305,19 @@ function Pic1dScatterChart({ x, y, height = 140 }: { x: number[]; y: number[]; h
 
 // 左電極の RF波形モニタ (仕様通り左電極のみ)。既存 RfPhaseMonitor (2D) と見た目 (配色・
 // ヘッダ+キャンバスの2段レイアウト) は揃えるが、データモデルが異なる (Pic1dElectrode は
-// project.geometry を経由しない) ため直接の流用はできず、専用実装にする
+// project.geometry を経由しない) ため直接の流用はできず、専用実装にする。
+// voltage_rf 追加 (prompts/93) 後は RF 成分・CSV 波形のどちらの周波数からも
+// プレビュー周期を決められる (evalPic1dVoltage 参照)
 function Pic1dRfMonitor({ electrode, t }: { electrode: Pic1dElectrode; t: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const waveforms = electrode.waveforms ?? [];
-  const freqs = waveforms.map((w) => w.freq_hz).filter((f) => f > 0);
+  // プレビュー窓の周期は「存在する周波数のうち最低」(VoltagePreviewChart の
+  // voltagePreviewFreqs と同じ考え方。RF成分とCSV波形をあわせて集める)。
+  // voltage_rf があれば (waveforms が空でも) ここで freqs が非空になり波形が表示される
+  const freqs = [
+    ...rfComponents(electrode.voltage_rf).map((c) => c.freq_hz),
+    ...waveforms.map((w) => w.freq_hz),
+  ].filter((f) => f > 0);
   const fMin = freqs.length > 0 ? arrayMin(freqs) : 0;
   const period = fMin > 0 ? 1 / fMin : 0;
   const N_SAMPLES = 300;
@@ -375,7 +393,8 @@ function Pic1dRfMonitor({ electrode, t }: { electrode: Pic1dElectrode; t: number
     ctx.stroke();
   }, [series, period, phaseFrac]);
 
-  // 波形が空 (DC のみ) はプレビューする周期が定まらないため何も表示しない (仕様通り)
+  // RF (voltage_rf) も CSV 波形 (waveforms) も無い (DC のみ) 場合はプレビューする周期が
+  // 定まらないため何も表示しない (prompts/93: 「RF か CSV のどちらかがあれば表示」の判定)
   if (period <= 0 || !series) return null;
 
   return (

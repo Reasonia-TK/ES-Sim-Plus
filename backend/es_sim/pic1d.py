@@ -52,8 +52,8 @@ from scipy.linalg import solve_banded
 from .fem import EPS0
 from .mcc import MccModel
 from .particles import ME, MP, QE
-from .pic import _eval_waveform
-from .schema import Pic1dElectrode, Pic1dSettings, Project
+from .pic import _eval_rf, _eval_waveform
+from .schema import Pic1dElectrode, Pic1dSettings, Project, rf_components
 
 # フレーム送出時の電子位相空間サンプルの最大点数 (pic.py の MAX_FRAME_PARTICLES と同じ趣旨)
 MAX_FRAME_PARTICLES = 2000
@@ -138,12 +138,25 @@ class Pic1dSimulation:
                     "格子がデバイ長を解像していません (n_cells を増やしてください)"
                 )
 
-        # ---- RF 1周期の位相分解 (2D の phase_bins と同じ規約) -----------------
-        # 電極 (left/right) の waveforms のうち最初に見つかったものの freq_hz を
-        # 基本周波数とする (Pic1dElectrode は voltage_rf を持たないため、RF 駆動は
-        # 正弦波をサンプルした VoltageWaveform で表現する。pic1d_presets.py 参照)
-        freqs = [wf.freq_hz for wf in s.left.waveforms] + [wf.freq_hz for wf in s.right.waveforms]
-        self._cycle_freq = min(freqs) if freqs else None
+        # ---- RF 1周期の位相分解の基本周波数 (prompts/93) -----------------------
+        # 優先順位: ①左右電極の voltage_rf 成分 (デュアル周波数含む) の freq_hz の
+        # 最小値 (= 基本波。低周波1周期に高周波の複数サイクルが収まるため、2D の
+        # _find_rf_freq と同じ考え方で min を使う) → ②voltage_rf が一つも無ければ
+        # 従来どおり CSV 波形 (waveforms) の freq_hz の最小値。voltage_rf が本来の
+        # RF 駆動の表現であり CSV 波形はその近似 (サンプル補間) or 任意波形用途な
+        # ので、両方指定された電極では voltage_rf 側の周波数を優先する
+        # (2D の _find_rf_freq は voltage_rf と waveform を区別せず全体最小を取るが、
+        # 1D では voltage_rf を優先することを明示的に選ぶ)。どちらも無ければ None
+        # (cycle 無効)。
+        rf_freqs = [
+            c.freq_hz
+            for c in (*rf_components(s.left.voltage_rf), *rf_components(s.right.voltage_rf))
+        ]
+        if rf_freqs:
+            self._cycle_freq = min(rf_freqs)
+        else:
+            wf_freqs = [wf.freq_hz for wf in s.left.waveforms] + [wf.freq_hz for wf in s.right.waveforms]
+            self._cycle_freq = min(wf_freqs) if wf_freqs else None
         self._cycle_bins = int(s.phase_bins)
         self._cycle_enabled = self._cycle_freq is not None and self._cycle_bins > 0
         self._cycle_period = 1.0 / self._cycle_freq if self._cycle_enabled else 0.0
@@ -270,8 +283,14 @@ class Pic1dSimulation:
     # ---- 場 --------------------------------------------------------------
 
     def _electrode_voltage(self, elec: Pic1dElectrode, t: float) -> float:
-        """電極電圧 V(t) = v_dc + Σ waveforms(t) (pic.py の _eval_waveform を流用)。"""
-        v = elec.v_dc
+        """電極電圧 V(t) = v_dc + Σ RF sin + Σ waveforms(t) (prompts/93)。
+
+        RF 成分は pic.py の _eval_rf (2D の _dirichlet_values と同じ式・位相規約)、
+        CSV 波形は pic.py の _eval_waveform をそのまま流用する。voltage_rf=None
+        (rf_components が空リスト) なら _eval_rf は 0.0 を返すため、waveforms のみの
+        従来経路とビット不変になる。
+        """
+        v = elec.v_dc + _eval_rf(rf_components(elec.voltage_rf), t)
         for wf in elec.waveforms:
             v += float(_eval_waveform(wf.phase, wf.v, wf.freq_hz, t))
         return float(v)

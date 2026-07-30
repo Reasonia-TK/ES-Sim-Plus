@@ -4,8 +4,9 @@ import { CommitNullableNumberInput, CommitNumberInput, CommitTextInput, formatNu
 import { Toggle } from "../Toggle";
 import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
-import { WaveformImportEditor } from "./FieldPanel";
+import { DEFAULT_VOLTAGE_RF, RfComponentsEditor, WaveformImportEditor } from "./FieldPanel";
 import { ProcessList } from "./PicPanel";
+import { rfComponents } from "../types";
 import type {
   Eedf1dRegion,
   McSettings,
@@ -58,14 +59,21 @@ const DEFAULT_ELECTRODE: Pic1dElectrode = { v_dc: 0.0, waveforms: [], see_gamma:
 
 type Pic1dPreset = { label: string; description: string; pic1d: Pic1dSettings; note?: string };
 
-// project.pic1d.left/right.waveforms から重複排除・昇順に周波数を集める (RFサイクル換算用。
-// PicPanel の collectRfFrequencies と同じ考え方だが、1D は project.geometry の境界条件では
-// なく電極 (Pic1dElectrode.waveforms) から集める点が異なる)
+// project.pic1d.left/right の voltage_rf / waveforms から重複排除・昇順に周波数を集める
+// (RFサイクル換算・位相ビン推奨ヒント用)。優先順位は backend (pic1d.py の Pic1dSimulation
+// __init__、prompts/93) と揃える: 左右電極の voltage_rf 成分の周波数があればそれを使い
+// (voltage_rf が本来の RF 駆動の表現)、無ければ従来どおり CSV 波形 (waveforms) の周波数を使う
+// (PicPanel の collectRfFrequencies と同じ「複数周波数を集めて昇順に返す」考え方だが、
+// 1D は project.geometry の境界条件ではなく電極 (Pic1dElectrode) から集める点が異なる)
 function collectPic1dFrequencies(pic1d: Pic1dSettings): number[] {
-  const freqs = new Set<number>();
-  for (const wf of pic1d.left.waveforms ?? []) if (wf.freq_hz > 0) freqs.add(wf.freq_hz);
-  for (const wf of pic1d.right.waveforms ?? []) if (wf.freq_hz > 0) freqs.add(wf.freq_hz);
-  return Array.from(freqs).sort((a, b) => a - b);
+  const rfFreqs = new Set<number>();
+  for (const c of rfComponents(pic1d.left.voltage_rf)) if (c.freq_hz > 0) rfFreqs.add(c.freq_hz);
+  for (const c of rfComponents(pic1d.right.voltage_rf)) if (c.freq_hz > 0) rfFreqs.add(c.freq_hz);
+  if (rfFreqs.size > 0) return Array.from(rfFreqs).sort((a, b) => a - b);
+  const wfFreqs = new Set<number>();
+  for (const wf of pic1d.left.waveforms ?? []) if (wf.freq_hz > 0) wfFreqs.add(wf.freq_hz);
+  for (const wf of pic1d.right.waveforms ?? []) if (wf.freq_hz > 0) wfFreqs.add(wf.freq_hz);
+  return Array.from(wfFreqs).sort((a, b) => a - b);
 }
 
 // サイクル数の表示整形 (PicPanel の formatCycles と同じ)
@@ -86,7 +94,7 @@ function nextEedf1dLabel(regions: Eedf1dRegion[]): string {
 
 const MAX_EEDF1D_REGIONS = 4;
 
-// 電極 (左/右) の DC電圧・SEE収率・波形リストの編集UI
+// 電極 (左/右) の DC電圧・RF重畳・SEE収率・波形リストの編集UI
 function ElectrodeEditor({
   title,
   electrode,
@@ -97,6 +105,7 @@ function ElectrodeEditor({
   onChange: (next: Pic1dElectrode) => void;
 }) {
   const waveforms = electrode.waveforms ?? [];
+  const rfList = rfComponents(electrode.voltage_rf);
   return (
     <>
       <p className="hint" style={{ fontWeight: 600, color: "#d8dce4" }}>{title}</p>
@@ -111,10 +120,24 @@ function ElectrodeEditor({
           onCommit={(v) => onChange({ ...electrode, see_gamma: v })}
         />
       </div>
-      {/* Pic1dElectrode.waveforms は複数波形の和 (v_dc + Σ waveforms(t)) を表す配列のため、
+      {/* RF重畳 (voltage_rf、prompts/93)。2D の FieldPanel (conductor領域/Dirichlet辺) と
+          同じ見た目・部品 (Toggle + RfComponentsEditor、振幅[V]・周波数[Hz]・位相[deg]、
+          成分の追加/削除でデュアル周波数対応) を共用する */}
+      <Toggle
+        label="RF重畳"
+        checked={rfList.length > 0}
+        onChange={(v) => onChange({ ...electrode, voltage_rf: v ? [DEFAULT_VOLTAGE_RF] : undefined })}
+      />
+      {rfList.length > 0 && (
+        <RfComponentsEditor
+          components={rfList}
+          onChange={(next) => onChange({ ...electrode, voltage_rf: next })}
+        />
+      )}
+      {/* Pic1dElectrode.waveforms は複数波形の和 (Σ waveforms(t)) を表す配列のため、
           既存の WaveformImportEditor (1個編集用、FieldPanel の共有部品) を配列の各要素と
-          末尾の「追加スロット」に割り当てて流用する (RF駆動は正弦波を1周期分サンプルした
-          CSV波形として表現する、pic1d_presets.py と同じ流儀) */}
+          末尾の「追加スロット」に割り当てて流用する。RF重畳 (voltage_rf) と併記でき、
+          両方指定すれば両方の寄与が加算される (V(t) = DC + Σ RF + Σ CSV波形) */}
       {waveforms.map((wf, i) => (
         <WaveformImportEditor
           key={i}
@@ -133,6 +156,9 @@ function ElectrodeEditor({
           if (next) onChange({ ...electrode, waveforms: [...waveforms, next] });
         }}
       />
+      {(rfList.length > 0 || waveforms.length > 0) && (
+        <p className="hint">V(t) = DC + Σ RF + CSV 波形の合成</p>
+      )}
     </>
   );
 }
