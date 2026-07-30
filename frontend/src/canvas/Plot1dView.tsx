@@ -125,14 +125,14 @@ const SHEATH_HARMONIC_COLOR = "rgba(200, 208, 220, 0.18)";
 
 // ---- canvas 直描きの汎用ラインチャート ----------------------------------------
 
-interface LineSeries {
+export interface LineSeries {
   label: string;
   values: number[];
   color: string;
 }
 
 // 縦の破線マーカー (シースエッジ等、特定の x 位置を示す補助線)
-interface ChartMarker {
+export interface ChartMarker {
   x: number;
   color: string;
   label: string;
@@ -141,8 +141,10 @@ interface ChartMarker {
 // 複数系列を重ね描きする折れ線チャート (PicPanel の PicHistoryChart/EedfChart と同じ
 // canvas 直描きスタイル: 枠 #363c48、9px 目盛りフォント、padL≈50)。
 // x/系列値はどちらも「表示用に変換済み」の生の number[] を渡す想定 (単位変換は呼び出し側で行う)。
-// markers は x 位置に縦の破線を重ね描きする (シースエッジ表示、prompts/97)
-function Pic1dLineChart({
+// markers は x 位置に縦の破線を重ね描きする (シースエッジ表示、prompts/97)。
+// pic1d 専用の見た目ではない汎用コンポーネントのため、canvas/TlPlotView.tsx (prompts/101、
+// VHF定在波) からもそのまま流用する (export 済み、EedfChart と同じ「既存部品の流用」の考え方)
+export function Pic1dLineChart({
   x,
   series,
   height = 110,

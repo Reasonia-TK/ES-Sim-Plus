@@ -28,6 +28,8 @@ import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
 import type { CyclePicField, PicLiveField, PicResultField } from "./panels/PicPanel";
 import Pic1dPanel from "./panels/Pic1dPanel";
+import TlPanel from "./panels/TlPanel";
+import TlPlotView from "./canvas/TlPlotView";
 import GasPanel, { DEFAULT_BOUNDARY, DEFAULT_DSMC, GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
 import type { GasResultField } from "./panels/GasPanel";
 import SweepPanel from "./panels/SweepPanel";
@@ -36,6 +38,8 @@ import { PicClient } from "./picClient";
 import type { PicClientCallbacks } from "./picClient";
 import { Pic1dClient } from "./pic1dClient";
 import type { Pic1dClientCallbacks } from "./pic1dClient";
+import { TlClient } from "./tlClient";
+import type { TlClientCallbacks } from "./tlClient";
 import { DsmcClient } from "./dsmcClient";
 import type { DsmcClientCallbacks } from "./dsmcClient";
 import { SweepClient } from "./sweepClient";
@@ -81,6 +85,9 @@ import type {
   SolveResult,
   SweepCaseState,
   SweepStartedMsg,
+  TlResult,
+  TlSettings,
+  TlStartedMsg,
   TraceResult,
   VoltageRf,
   VoltageWaveform,
@@ -147,6 +154,25 @@ const DEFAULT_PIC1D: Pic1dSettings = {
   see_energy_ev: 2.0,
   eedf_regions: [],
   seed: 0,
+};
+
+// VHF 定在波 (非線形径方向伝送線路モデル) 設定の既定値 (project 本体には持たず、pic1d と同じく
+// 独立 state で管理する。geometry/mesh とは無関係な専用ソルバー、prompts/101)
+const DEFAULT_TL: TlSettings = {
+  radius_m: 0.15,
+  gap_m: 0.04,
+  sheath_m: 5e-4,
+  n_e_m3: 1e16,
+  n_s_ratio: 0.4,
+  nu_m_hz: 1e8,
+  freq_hz: 100e6,
+  v0: 100.0,
+  n_r: 400,
+  n_periods: 200,
+  n_fft_periods: 32,
+  n_harm: 10,
+  dt: null,
+  sheath_law: "child",
 };
 
 // コレクタ追加数の上限 (バックエンドの validator と同じ、prompts/36/37)
@@ -246,12 +272,14 @@ const NODE_TITLES: Record<TreeNode, string> = {
   "study-trace": "スタディ — 粒子追跡",
   "study-pic": "スタディ — PIC-MCC",
   "study-pic1d": "スタディ — PIC-MCC 1D",
+  "study-tl": "スタディ — VHF定在波",
   "study-gas": "スタディ — DSMC",
   "study-sweep": "スタディ — パラメータスイープ",
   "result-fem": "結果 — 静電場",
   "result-trace": "結果 — 粒子追跡",
   "result-pic": "結果 — PIC-MCC",
   "result-pic1d": "結果 — PIC-MCC 1D",
+  "result-tl": "結果 — VHF定在波",
   "result-gas": "結果 — DSMC",
 };
 
@@ -430,6 +458,7 @@ export default function App() {
   const busyStartTimeRef = useRef<number | null>(null);
   const picStartTimeRef = useRef<number | null>(null);
   const pic1dStartTimeRef = useRef<number | null>(null);
+  const tlStartTimeRef = useRef<number | null>(null);
   const gasStartTimeRef = useRef<number | null>(null);
   const sweepStartTimeRef = useRef<number | null>(null);
   const [, setElapsedTick] = useState(0);
@@ -553,6 +582,19 @@ export default function App() {
   // 「食い違いで無効化する」概念は無い (pic1d 設定を変えても常にサーバー保持状態へ継続実行するだけ)
   const [pic1dContinueReady, setPic1dContinueReady] = useState(false);
 
+  // VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。pic1d と同様 geometry/mesh とは
+  // 無関係な独立 state (Undo/Redo 対象外)。continue が無いため pic1d の *ContinueReady に
+  // 相当する state は不要 (毎回フルの定常化をやり直すだけ、tl.py の docstring 参照)
+  const [tl, setTl] = useState<TlSettings>(DEFAULT_TL);
+  const [tlRunning, setTlRunning] = useState(false);
+  const [tlStarted, setTlStarted] = useState<TlStartedMsg | null>(null);
+  // 実行中の進捗 (started/progress メッセージ由来。GasPanel の progress と同じ設計)
+  const [tlProgress, setTlProgress] = useState<{ step: number; nSteps: number } | null>(null);
+  // done メッセージで受け取った結果一式 (settings を含み自己完結、結果付き保存にそのまま使える)
+  const [tlResult, setTlResult] = useState<TlResult | null>(null);
+  const [tlError, setTlError] = useState<string | null>(null);
+  const tlClientRef = useRef<TlClient | null>(null);
+
   // ガス流れ (DSMC) 設定は project.dsmc として project state 本体に置く (particles/pic と異なり
   // 独立 state を持たず、ジオメトリ・メッシュ設定と同様 commitProject 経由で Undo/Redo 対象になる)。
   // 実行結果・実行状態は他パネルの result 系 state と同様に App 側で保持する
@@ -595,7 +637,7 @@ export default function App() {
   // 実行経過時間のリアルタイム表示 (ステータスバー、prompts/86)。何か実行中の間だけ
   // 1秒間隔で再レンダーする (アイドル時に setInterval を張り続けて無駄な再レンダーを
   // 起こさないようにするため、実行中フラグが1つでも立っているときだけ張る)
-  const anyRunning = busy || picRunning || pic1dRunning || gasRunning || sweepRunning;
+  const anyRunning = busy || picRunning || pic1dRunning || tlRunning || gasRunning || sweepRunning;
   useEffect(() => {
     if (!anyRunning) return;
     const id = setInterval(() => setElapsedTick((t) => t + 1), 1000);
@@ -618,6 +660,7 @@ export default function App() {
     return () => {
       picClientRef.current?.close();
       pic1dClientRef.current?.close();
+      tlClientRef.current?.close();
       dsmcClientRef.current?.close();
       sweepClientRef.current?.close();
     };
@@ -1142,6 +1185,43 @@ export default function App() {
     pic1dClientRef.current?.stop();
   };
 
+  // VHF 定在波 (prompts/101) 実行中のコールバック生成。continue が無いため
+  // makePic1dCallbacks と異なり ContinueReady 系の更新は無い (常に単発の start/stop のみ)
+  const makeTlCallbacks = (): TlClientCallbacks => ({
+    onStarted: (msg) => {
+      setTlStarted(msg);
+      setTlProgress(null);
+    },
+    onProgress: (msg) => {
+      setTlProgress({ step: msg.step, nSteps: msg.n_steps });
+    },
+    onDone: (msg) => {
+      setTlResult(msg.result);
+      setTlRunning(false);
+    },
+    onError: (detail) => {
+      setTlError(detail);
+      setTlRunning(false);
+    },
+    onClose: () => setTlRunning(false),
+  });
+
+  // VHF定在波開始: WebSocket接続を張り、project.tl を送信する (2D/1D の runPicStart と同じ設計)
+  const runTlStart = () => {
+    tlStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86 相当)
+    setTlError(null);
+    setTlStarted(null);
+    setTlProgress(null);
+    setTlRunning(true);
+    const client = new TlClient(makeTlCallbacks());
+    tlClientRef.current = client;
+    client.start({ ...project, tl });
+  };
+
+  const runTlStop = () => {
+    tlClientRef.current?.stop();
+  };
+
   // エミッタ配置ツール (CadCanvas) からの確定通知。kind/n 等はそのまま維持し p1/p2 のみ更新する。
   // 線を確定したら「粒子軌道追跡」インスペクタページに切替え、プロパティがすぐ見えるようにする
   const setEmitterPoints = (p1: Point, p2: Point) => {
@@ -1659,9 +1739,9 @@ export default function App() {
   };
 
   // --- 保存/読込 ---
-  // particles / pic / pic1d は history 管理外の別 state のため、保存時にここで project へ合成する
+  // particles / pic / pic1d / tl は history 管理外の別 state のため、保存時にここで project へ合成する
   const saveProject = () => {
-    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter), pic1d };
+    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter), pic1d, tl };
     saveTextFile("project.json", JSON.stringify(toSave, null, 2), "JSON", ["json"]).catch((err) => {
       setError(String(err));
     });
@@ -1670,7 +1750,7 @@ export default function App() {
   // 結果付き保存: プロジェクトに results を同梱して1ファイルで保存する。
   // 結果 (特に PIC の cycle) は大きくなりうるため、整形なし (compact) で書き出す
   const saveProjectWithResults = () => {
-    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter), pic1d };
+    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter), pic1d, tl };
     // pic 結果は picStarted (mesh を含む) が無いと描画できないため、それが無い場合は同梱しない
     const results: ResultsBundle = {
       version: 1,
@@ -1692,6 +1772,8 @@ export default function App() {
       gas: gasResult,
       // pic1d 結果は settings を含み自己完結 (done.result そのもの) なので、そのまま同梱する
       pic1d: pic1dResult,
+      // tl 結果も同様に settings を含み自己完結 (done.result そのもの、prompts/101)
+      tl: tlResult,
     };
     saveTextFile("project_results.json", JSON.stringify({ ...toSave, results }), "JSON", ["json"]).catch((err) => {
       setError(String(err));
@@ -1736,6 +1818,9 @@ export default function App() {
     // 1D PIC設定も同様に既定値をベースに合成する (pic1d が無い旧形式ファイルは丸ごと既定値に戻す)
     const loadedPic1d = raw.pic1d;
     setPic1d(loadedPic1d ? { ...DEFAULT_PIC1D, ...loadedPic1d } : DEFAULT_PIC1D);
+    // VHF 定在波設定も同様 (tl が無い旧形式ファイルは丸ごと既定値に戻す、prompts/101)
+    const loadedTl = raw.tl;
+    setTl(loadedTl ? { ...DEFAULT_TL, ...loadedTl } : DEFAULT_TL);
     setSelectedCollectorIndexRaw(null);
     setSelectedEedfIndexRaw(null);
     setSelectedRegionId(null);
@@ -1762,6 +1847,11 @@ export default function App() {
       setPic1dFrame(null);
       setPic1dResult(results.pic1d ?? null);
       setPic1dContinueReady(false); // サーバー側に保持状態が無いため続き実行は無効にする
+      // VHF 定在波の結果 (settings を含み自己完結)。started/progress は保存対象に含めていないため
+      // 常に null に戻す (result-tl ページはこの tlResult の有無だけで結果表示に切り替わる、prompts/101)
+      setTlStarted(null);
+      setTlProgress(null);
+      setTlResult(results.tl ?? null);
       // サーバーには読込んだ状態が存在しない (このセッションで実行していない) ため、
       // 「続きから実行」は無効にし、次の新規実行を促す
       setPicContinueReady(false);
@@ -1811,7 +1901,8 @@ export default function App() {
 
   // 「結果付き保存」ボタンの有効条件: FEM/Mesh/トレース/PIC/PIC-MCC 1D/DSMC のいずれかの結果があること
   // (何も無い状態で保存しても project 部分だけの通常保存と同じになってしまうため無効化する)
-  const hasAnyResults = !!result || !!meshResult || !!traceResult || !!gasResult || !!picStarted || !!pic1dResult;
+  const hasAnyResults =
+    !!result || !!meshResult || !!traceResult || !!gasResult || !!picStarted || !!pic1dResult || !!tlResult;
 
   // 「続きから実行」ボタンの有効条件: 直前の実行が done/stop 済みで現在実行中でなく、
   // かつ前回実行以降にジオメトリが編集されていないこと (health 未接続時も不可)
@@ -2063,6 +2154,9 @@ export default function App() {
   // PIC-MCC 1D (prompts/91) 選択中は CadCanvas の代わりに Plot1dView を表示する
   // (1D は geometry/mesh と無関係なので CAD キャンバス自体が意味を持たない)
   const isPic1dNode = activeNode === "study-pic1d" || activeNode === "result-pic1d";
+  // VHF 定在波 (prompts/101) も同様に geometry/mesh と無関係な専用ソルバーなので
+  // CadCanvas の代わりに TlPlotView を表示する
+  const isTlNode = activeNode === "study-tl" || activeNode === "result-tl";
   // 「結果 — 粒子追跡」ノード選択中は背景表示 (traceBackground) を CadCanvas の
   // result/fieldView に反映する (なし=背景の色マップ・等値線・ベクトルを消す)
   const onTraceResultNode = activeNode === "result-trace";
@@ -2095,6 +2189,8 @@ export default function App() {
   // 設定パネル (Pic1dPanel) には study/result で内容差が無い。2D の setup/results 2インスタンス方式とは
   // 異なり、単一インスタンスを両ノードで共用する (表示は同じまま、選択ノードでタイトルだけ変わる)
   const showPic1dPage = activeNode === "study-pic1d" || activeNode === "result-pic1d";
+  // VHF 定在波 (prompts/101) も pic1d と同じ理由で study/result 共通の単一インスタンス
+  const showTlPage = activeNode === "study-tl" || activeNode === "result-tl";
   const showGasSetupPage = activeNode === "study-gas";
   const showGasResultsPage = activeNode === "result-gas";
   const showResultFemPage = activeNode === "result-fem";
@@ -2113,8 +2209,8 @@ export default function App() {
         : NODE_TITLES[activeNode];
 
   // --- 下部ステータスバー ---
-  // エラーは error → picError → pic1dError → gasError → sweepError の順で最初の非null を優先表示する
-  const statusError = error ?? picError ?? pic1dError ?? gasError ?? sweepError;
+  // エラーは error → picError → pic1dError → tlError → gasError → sweepError の順で最初の非null を優先表示する
+  const statusError = error ?? picError ?? pic1dError ?? tlError ?? gasError ?? sweepError;
   // ステータスバーのエラーを閉じる (各エラー state を一括クリア)。パネル内の
   // エラー表示は各パネルの error prop 経由で残したいが、実体は同じ state なので
   // ここでは「ステータスバーに居座る」問題の解消を優先して両方消える仕様とする
@@ -2122,6 +2218,7 @@ export default function App() {
     setError(null);
     setPicError(null);
     setPic1dError(null);
+    setTlError(null);
     setGasError(null);
     setSweepError(null);
   };
@@ -2141,6 +2238,8 @@ export default function App() {
     ? Math.min(100, Math.round((pic1dSegStep / pic1dStarted.n_steps) * 100))
     : 0;
   const gasPct = gasProgress && gasProgress.nSteps > 0 ? Math.round((gasProgress.step / gasProgress.nSteps) * 100) : 0;
+  // VHF 定在波 (prompts/101) は continue が無いため step は常に区間内の値そのもの (オフセット不要)
+  const tlPct = tlProgress && tlProgress.nSteps > 0 ? Math.round((tlProgress.step / tlProgress.nSteps) * 100) : 0;
 
   // 実行経過時間 (ステータスバー、prompts/86)。Date.now() を毎レンダーで直接読むことで
   // elapsedTick (1秒ごとに更新される tick state) が変わるたびに再計算される。実行中でない
@@ -2148,6 +2247,7 @@ export default function App() {
   const busyElapsedSec = busy && busyStartTimeRef.current != null ? (Date.now() - busyStartTimeRef.current) / 1000 : 0;
   const picElapsedSec = picRunning && picStartTimeRef.current != null ? (Date.now() - picStartTimeRef.current) / 1000 : 0;
   const pic1dElapsedSec = pic1dRunning && pic1dStartTimeRef.current != null ? (Date.now() - pic1dStartTimeRef.current) / 1000 : 0;
+  const tlElapsedSec = tlRunning && tlStartTimeRef.current != null ? (Date.now() - tlStartTimeRef.current) / 1000 : 0;
   const gasElapsedSec = gasRunning && gasStartTimeRef.current != null ? (Date.now() - gasStartTimeRef.current) / 1000 : 0;
   const sweepElapsedSec = sweepRunning && sweepStartTimeRef.current != null ? (Date.now() - sweepStartTimeRef.current) / 1000 : 0;
 
@@ -2267,6 +2367,11 @@ export default function App() {
             pic1dFrame={pic1dFrame}
             pic1dError={pic1dError}
             pic1dResult={pic1dResult}
+            tlRunning={tlRunning}
+            tlStarted={tlStarted}
+            tlProgressStep={tlProgress?.step ?? null}
+            tlError={tlError}
+            tlResult={tlResult}
             gasRunning={gasRunning}
             gasProgress={gasProgress}
             gasError={gasError}
@@ -2528,6 +2633,25 @@ export default function App() {
               />
             </div>
 
+            {/* VHF定在波 (prompts/101): 結果の可視化は TlPlotView (キャンバス領域) 側に
+                持たせているため、設定パネルは study-tl/result-tl で共通の単一インスタンス
+                (pic1d と同じ設計) */}
+            <div style={{ display: showTlPage ? "block" : "none" }}>
+              <TlPanel
+                lengthUnit={lengthUnit}
+                tl={tl}
+                onChange={setTl}
+                canRun={!!health}
+                running={tlRunning}
+                onStart={runTlStart}
+                onStop={runTlStop}
+                started={tlStarted}
+                progress={tlProgress}
+                pic1dResult={pic1dResult}
+                error={tlError}
+              />
+            </div>
+
             {/* study-gas (設定+実行UI) と result-gas (結果専用) は同じ props を渡す
                 GasPanel の2インスタンスで、mode だけを切り替えて表示する */}
             <div style={{ display: showGasSetupPage ? "block" : "none" }}>
@@ -2679,6 +2803,15 @@ export default function App() {
               frame={pic1dFrame}
               result={pic1dResult}
               error={pic1dError}
+            />
+          ) : isTlNode ? (
+            <TlPlotView
+              lengthUnit={lengthUnit}
+              running={tlRunning}
+              started={tlStarted}
+              progress={tlProgress}
+              result={tlResult}
+              error={tlError}
             />
           ) : (
             <>
@@ -2864,7 +2997,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > PIC-MCC 1D実行中 > DSMC実行中 > 準備完了 の優先順位 */}
+      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > PIC-MCC 1D実行中 > VHF定在波実行中 > DSMC実行中 > 準備完了 の優先順位 */}
       <div className="statusbar">
         {/* 実行中は進捗を最優先 (エラーが残っていても別計算の進捗を隠さない)。
             アイドル時のエラーは×で閉じられる (居座り防止。新規実行開始でも自動クリア) */}
@@ -2898,6 +3031,15 @@ export default function App() {
             </span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${pic1dPct}%` }} />
+            </div>
+          </>
+        ) : tlRunning ? (
+          <>
+            <span>
+              VHF定在波 実行中... {tlPct}% ({tlProgress?.step ?? 0}/{tlStarted?.n_steps ?? 0}) — 経過 {formatElapsed(tlElapsedSec)}
+            </span>
+            <div className="statusbar-progress">
+              <div className="statusbar-progress-bar" style={{ width: `${tlPct}%` }} />
             </div>
           </>
         ) : gasRunning ? (

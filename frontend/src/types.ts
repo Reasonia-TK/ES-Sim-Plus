@@ -555,6 +555,113 @@ export type DsmcClientCommand =
   // 保持中の状態から追加実行 (prompts/74)。avg_steps は null なら前回設定を踏襲
   | { cmd: "continue"; n_steps: number; avg_steps?: number | null };
 
+// ---- VHF 定在波 (非線形径方向伝送線路モデル、backend/es_sim/tl.py と手動同期、prompts/101) ----
+// 円板電極 (半径 radius_m・ギャップ gap_m)・中心給電・軸対称の径方向 1D。geometry/mesh とは
+// 無関係な専用の一様格子ソルバー (pic1d と同じ位置づけ)。
+
+export interface TlSettings {
+  radius_m: number;    // 電極半径 R [m]
+  gap_m: number;       // ギャップ l [m]
+  sheath_m: number;    // 平衡シース厚 s0 (片側、上下対称) [m]
+  n_e_m3: number;      // バルク電子密度 [m^-3]
+  n_s_ratio: number;   // シース端イオン密度比 n_s/n_e (h係数)
+  nu_m_hz: number;     // 電子運動量衝突周波数 ν_m [Hz]
+  freq_hz: number;     // 駆動周波数 f0 [Hz]
+  v0: number;          // 駆動振幅 [V]
+  n_r: number;         // 半径方向節点数
+  n_periods: number;   // 総周期数
+  n_fft_periods: number; // FFT 窓の周期数 (n_periods より小)
+  n_harm: number;      // 返す高調波次数
+  dt?: number | null;  // 秒。null なら CFL から自動
+  // シースの電荷-電圧関係 (prompts/102)。"child" (既定): Child-Langmuir 型
+  // (V_s∝q^{4/3})、対称放電でも奇数次高調波が定常的に生成される。
+  // "matrix": 行列シース (V_s∝q^2、従来モデル)。対称放電では厳密に線形化し
+  // 高調波はクリップ過渡でしか出ない (比較・線形極限検証用)。
+  sheath_law?: "child" | "matrix";
+}
+
+// n=0..n_harm の各高調波の振幅 (各節点)。n[0] は DC 成分
+export interface TlHarmonics {
+  n: number[];
+  v: number[][]; // n_harm+1 × n_r  |V_n(r)| [V]
+  j: number[][]; // 同  |J_n(r)| [A/m^2]
+}
+
+// 基本波の実効波長 (隣接する |V_1(r)| の極小 (節) 間隔 × 2 から推定。節が2つ未満なら null)
+export interface TlLambdaEff {
+  lambda_m: number | null;
+  lambda0_m: number; // 真空波長 c/f0 [m]
+  ratio: number | null; // lambda_m/lambda0_m (波長短縮率)
+}
+
+// 時間平均吸収電力密度 p(r)=⟨R_b J_z^2⟩ とその一様性指標
+export interface TlPower {
+  p: number[]; // [W/m^2]
+  max_over_min: number | null; // pがすべて0なら null
+  area_weighted_std_over_mean: number | null; // 面積(r)重み標準偏差/平均。平均0なら null
+}
+
+// プローブ点 (中心・R/2・外周) の最終2周期の V(t) 波形プレビュー
+export interface TlVProbe {
+  t: number[];
+  center: number[];
+  mid: number[];
+  edge: number[];
+}
+
+// プローブ点の振幅スペクトル (40·f0 まで)
+export interface TlSpectrumProbe {
+  freq_hz: number[];
+  center: number[];
+  mid: number[];
+  edge: number[];
+}
+
+// /ws/tl の done.result (= ResultsBundle.tl に保存する形そのもの、settings を含み自己完結)
+export interface TlResult {
+  r: number[]; // 半径方向節点 [m]
+  probe_r: { center: number; mid: number; edge: number };
+  harmonics: TlHarmonics;
+  lambda_eff: TlLambdaEff;
+  power: TlPower;
+  feed_power: number; // 時間平均給電電力 ⟨V(r_feed)·I(r_feed)⟩ [W]
+  v_probe: TlVProbe;
+  spectrum_probe: TlSpectrumProbe;
+  warnings: string[]; // シース崩壊 (クリップ) 発生等
+  dt: number;
+  n_steps: number;
+  settings: TlSettings; // 実行に使った設定 (表示単位換算に使える)
+}
+
+export interface TlStartedMsg {
+  type: "started";
+  n_steps: number;
+  dt: number;
+}
+
+export interface TlProgressMsg {
+  type: "progress";
+  step: number;
+  n_steps: number;
+  elapsed_s: number;
+}
+
+export interface TlDoneMsg {
+  type: "done";
+  result: TlResult;
+}
+
+export interface TlErrorMsg {
+  type: "error";
+  detail: string;
+}
+
+export type TlServerMessage = TlStartedMsg | TlProgressMsg | TlDoneMsg | TlErrorMsg;
+
+// client→server コマンド (/ws/tl)。continue は無い (tl.py の docstring 参照: 毎回フルの
+// 定常化をやり直す設計のため)
+export type TlClientCommand = { cmd: "start"; project: Project } | { cmd: "stop" };
+
 // 粒子マージ設定 (高速化③、prompts/77)。電離でマクロ粒子数が増え続けたときに
 // 種ごとの上限 n_max を超えたら every ステップごとにセル内保存的マージ (Vranic
 // k→2) で削減する。PicSettings.merge が null なら無効 (既定)
@@ -835,6 +942,9 @@ export interface Project {
   // 1D PIC/MCC (1d3v、prompts/91)。null/undefined なら無効。geometry/mesh とは無関係に動く
   // 専用の一様格子ソルバー (backend/es_sim/pic1d.py)。2D の pic とは完全に独立
   pic1d?: Pic1dSettings | null;
+  // VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。null/undefined なら無効。
+  // pic1d 同様 geometry/mesh とは無関係な専用ソルバー (backend/es_sim/tl.py)
+  tl?: TlSettings | null;
 }
 
 // 軸対称モード判定 (rz: 下辺 y=0 が対称軸、rz_x0: 左辺 x=0 が対称軸)。
@@ -1000,4 +1110,6 @@ export interface ResultsBundle {
   gas?: DsmcResult | null;
   // 1D PIC/MCC の完了結果一式 (prompts/91)。done.result そのもの (settings を含み自己完結)
   pic1d?: Pic1dResult | null;
+  // VHF 定在波の完了結果一式 (prompts/101)。done.result そのもの (settings を含み自己完結)
+  tl?: TlResult | null;
 }

@@ -15,6 +15,8 @@ import type {
   PicStartedMsg,
   Project,
   SolveResult,
+  TlResult,
+  TlStartedMsg,
   TraceResult,
   VoltageRf,
 } from "./types";
@@ -35,12 +37,14 @@ export type TreeNode =
   | "study-trace"
   | "study-pic"
   | "study-pic1d"
+  | "study-tl"
   | "study-gas"
   | "study-sweep"
   | "result-fem"
   | "result-trace"
   | "result-pic"
   | "result-pic1d"
+  | "result-tl"
   | "result-gas";
 
 interface Props {
@@ -73,6 +77,12 @@ interface Props {
   pic1dFrame: Pic1dFrameMsg | null;
   pic1dError: string | null;
   pic1dResult: Pic1dResult | null;
+  // VHF 定在波 (prompts/101)。continue が無いので進捗は started/progress のステップ数のみ
+  tlRunning: boolean;
+  tlStarted: TlStartedMsg | null;
+  tlProgressStep: number | null;
+  tlError: string | null;
+  tlResult: TlResult | null;
   gasRunning: boolean;
   gasProgress: { step: number; nSteps: number; nParticles: number } | null;
   gasError: string | null;
@@ -120,6 +130,11 @@ export default function ProjectTree({
   pic1dFrame,
   pic1dError,
   pic1dResult,
+  tlRunning,
+  tlStarted,
+  tlProgressStep,
+  tlError,
+  tlResult,
   gasRunning,
   gasProgress,
   gasError,
@@ -184,6 +199,15 @@ export default function ProjectTree({
     }
     if (pic1dError) return { text: "エラー", kind: "error" };
     if (pic1dResult) return { text: "✓完了", kind: "done" };
+    return { text: "未実行", kind: "idle" };
+  };
+  const tlBadge = (): { text: string; kind: BadgeKind } => {
+    if (tlRunning) {
+      const p = tlStarted ? pct(tlProgressStep ?? 0, tlStarted.n_steps) : 0;
+      return { text: `実行中 ${p}%`, kind: "busy" };
+    }
+    if (tlError) return { text: "エラー", kind: "error" };
+    if (tlResult) return { text: "✓完了", kind: "done" };
     return { text: "未実行", kind: "idle" };
   };
   const gasBadge = (): { text: string; kind: BadgeKind } => {
@@ -352,6 +376,15 @@ export default function ProjectTree({
                   <StatusBadge {...pic1dBadge()} />
                 </div>
               )}
+              {match("VHF定在波") && (
+                <div
+                  className={`tree-row ${activeNode === "study-tl" ? "active" : ""}`}
+                  onClick={() => onSelectNode("study-tl")}
+                >
+                  <span>VHF定在波</span>
+                  <StatusBadge {...tlBadge()} />
+                </div>
+              )}
               {match("DSMC") && (
                 <div
                   className={`tree-row ${activeNode === "study-gas" ? "active" : ""}`}
@@ -415,6 +448,14 @@ export default function ProjectTree({
                   onClick={() => onSelectNode("result-pic1d")}
                 >
                   PIC-MCC 1D
+                </div>
+              )}
+              {match("VHF定在波") && (
+                <div
+                  className={`tree-row ${activeNode === "result-tl" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-tl")}
+                >
+                  VHF定在波
                 </div>
               )}
               {match("DSMC") && (

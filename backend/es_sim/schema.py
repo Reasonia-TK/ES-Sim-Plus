@@ -597,6 +597,44 @@ class Pic1dSettings(BaseModel):
         return self
 
 
+# ---- VHF 定在波 (非線形径方向伝送線路モデル、prompts/101) -----------------------------
+
+
+class TlSettings(BaseModel):
+    """VHF 定在波スタディ (非線形径方向伝送線路モデル、prompts/101)。null なら無効。
+
+    円板電極 (半径 radius_m、ギャップ gap_m)・中心給電・軸対称の径方向 1D モデル
+    (tl.py 参照)。geometry/mesh とは無関係な専用の一様格子ソルバー (pic1d と同じ位置づけ)。
+    """
+
+    radius_m: float = Field(0.15, gt=0)        # 電極半径 R
+    gap_m: float = Field(0.04, gt=0)           # ギャップ l
+    sheath_m: float = Field(5e-4, gt=0)        # 平衡シース厚 s0 (片側、上下対称)
+    n_e_m3: float = Field(1e16, gt=0)          # バルク電子密度
+    n_s_ratio: float = Field(0.4, gt=0, le=1)  # シース端イオン密度比 n_s/n_e (h係数)
+    nu_m_hz: float = Field(1e8, ge=0)          # 電子運動量衝突周波数 ν_m
+    freq_hz: float = Field(100e6, gt=0)        # 駆動周波数 f0
+    v0: float = Field(100.0, gt=0)             # 駆動振幅 [V]
+    n_r: int = Field(400, ge=32, le=20000)     # 半径方向節点数
+    n_periods: int = Field(200, ge=8)          # 総周期数
+    n_fft_periods: int = Field(32, ge=4)       # FFT 窓の周期数 (n_periods より小)
+    n_harm: int = Field(10, ge=1, le=40)       # 返す高調波次数
+    dt: float | None = Field(None, gt=0)       # 秒。None なら CFL から自動
+    # シースの電荷-電圧関係 (prompts/102)。"child": Child-Langmuir 型 (V_s∝q^{4/3})、
+    # 既定。対称放電でも上下差し引きで奇数次高調波が定常生成される (tl.py 参照)。
+    # "matrix": 行列シース (V_s∝q^2、従来モデル)。対称放電では厳密に線形化し
+    # 高調波はクリップ過渡でしか出ない (比較・線形極限検証用に残す)。
+    sheath_law: Literal["child", "matrix"] = "child"
+
+    @model_validator(mode="after")
+    def _check_tl(self) -> "TlSettings":
+        if self.n_fft_periods >= self.n_periods:
+            raise ValueError("n_fft_periods は n_periods より小さくしてください")
+        if self.sheath_m * 2 >= self.gap_m:
+            raise ValueError("sheath_m の2倍は gap_m より小さくしてください (バルク厚が正である必要があります)")
+        return self
+
+
 # ---- DSMC (定常ガス流れ、prompts/54) ------------------------------------------
 
 
@@ -704,6 +742,9 @@ class Project(BaseModel):
     # 1D PIC/MCC (1d3v、prompts/91)。null なら無効。geometry/mesh とは無関係に動く
     # 専用の一様格子ソルバー (pic1d.py)。2D の pic と同時に設定しても互いに独立に扱われる
     pic1d: Pic1dSettings | None = None
+    # VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。null なら無効。
+    # pic1d 同様 geometry/mesh とは無関係な専用ソルバー (tl.py)
+    tl: TlSettings | None = None
 
     @model_validator(mode="after")
     def _check_b_field(self) -> "Project":

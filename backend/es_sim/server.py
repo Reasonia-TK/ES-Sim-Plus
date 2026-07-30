@@ -30,6 +30,7 @@ from .pic1d import Pic1dSimulation, build_pic1d_result
 from .pic1d_presets import get_presets as get_pic1d_presets
 from .postprocess import sample_line
 from .dsmc import DsmcSimulation
+from .tl import TlSimulation
 from .mcc import GasField
 from .sweep import build_sweep_cases, resolve_sweep_module, run_sweep
 from .schema import (
@@ -360,6 +361,115 @@ async def ws_dsmc(ws: WebSocket) -> None:
                         await _run_dsmc_session(ws, msg.get("project") or {})
                     else:
                         await _continue_dsmc_session(ws, msg)
+            elif cmd == "stop":
+                continue  # 実行中でなければ無視
+            else:
+                await ws.send_json(
+                    {"type": "error", "detail": f"不明なコマンドです: {cmd}"}
+                )
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+
+
+# ---- VHF 定在波 (非線形径方向伝送線路モデル、prompts/101) --------------------
+# continue には対応しない (毎回フルの定常化をやり直す設計。tl.py 参照) ため、
+# dsmc/pic1d と違って「保持中の状態」スロットは不要。start / stop のみの
+# 単純なロック付きストリーミングで足りる
+_tl_lock = asyncio.Lock()
+
+
+async def _run_tl_session(ws: WebSocket, project_dict: dict) -> None:
+    """1回の VHF 定在波実行 (start)。started → progress → done を送出する。"""
+    try:
+        project = Project.model_validate(project_dict)
+        if project.tl is None:
+            raise ValueError("project.tl が指定されていません")
+        # 格子・三重対角行列の構築も軽くはないのでスレッドで実行する
+        sim = await asyncio.to_thread(TlSimulation, project)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+
+    await ws.send_json(
+        {"type": "started", "n_steps": sim.n_steps_total, "dt": sim.dt}
+    )
+
+    loop = asyncio.get_running_loop()
+    stop = threading.Event()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+
+    def on_progress(step: int, n_steps: int, elapsed_s: float) -> None:
+        def offer_latest() -> None:
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(
+                {"type": "progress", "step": step, "n_steps": n_steps, "elapsed_s": elapsed_s}
+            )
+
+        loop.call_soon_threadsafe(offer_latest)
+
+    run_task = asyncio.create_task(
+        asyncio.to_thread(sim.run, on_progress, stop.is_set)
+    )
+
+    async def watch_stop() -> None:
+        while True:
+            try:
+                msg = json.loads(await ws.receive_text())
+            except (WebSocketDisconnect, RuntimeError):
+                stop.set()
+                return
+            if msg.get("cmd") == "stop":
+                stop.set()
+                return
+
+    stop_task = asyncio.create_task(watch_stop())
+    try:
+        while True:
+            if run_task.done() and queue.empty():
+                break
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            await ws.send_json(item)
+        result = await run_task
+        await ws.send_json({"type": "done", "result": result})
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "detail": str(exc)})
+        except Exception:
+            pass
+    finally:
+        stop.set()
+        stop_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@app.websocket("/ws/tl")
+async def ws_tl(ws: WebSocket) -> None:
+    """VHF 定在波 (非線形径方向伝送線路モデル) 実行の WebSocket (prompts/101)。
+
+    start で新規実行、stop で中断する。continue は無い (tl.py の docstring 参照:
+    毎回フルの定常化 (立ち上げランプ→FFT窓) をやり直す設計のため、途中から
+    追加実行するという概念がそもそも成立しない)。
+    """
+    await ws.accept()
+    try:
+        while True:
+            msg = json.loads(await ws.receive_text())
+            cmd = msg.get("cmd")
+            if cmd == "start":
+                if _tl_lock.locked():
+                    await ws.send_json(
+                        {"type": "error", "detail": "別の VHF 定在波実行が進行中です"}
+                    )
+                    continue
+                async with _tl_lock:
+                    await _run_tl_session(ws, msg.get("project") or {})
             elif cmd == "stop":
                 continue  # 実行中でなければ無視
             else:
