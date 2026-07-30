@@ -134,8 +134,9 @@ function parseWaveformCsv(text: string): { phase: number[]; v: number[]; freqHz:
 }
 
 // CSV波形 (voltage_waveform) の編集UI (Dirichlet辺・conductor領域で共用)。未取り込み時は
-// インポートボタン、取り込み後は周波数入力+解除ボタンを表示する。RF重畳 (voltage_rf) とは独立に併用できる
-function WaveformImportEditor({
+// インポートボタン、取り込み後は周波数入力+解除ボタンを表示する。RF重畳 (voltage_rf) とは独立に併用できる。
+// export しているのは Pic1dPanel (1D PIC の電極波形リスト編集、prompts/91) からも流用するため
+export function WaveformImportEditor({
   waveform,
   onChange,
 }: {

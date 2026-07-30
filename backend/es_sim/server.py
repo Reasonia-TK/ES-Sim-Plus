@@ -26,6 +26,8 @@ from .lxcat import parse_lxcat
 from .meshing import generate_mesh
 from .particles import trace
 from .pic import WALK_DIAG_KEYS, PicSimulation
+from .pic1d import Pic1dSimulation
+from .pic1d_presets import get_presets as get_pic1d_presets
 from .postprocess import sample_line
 from .dsmc import DsmcSimulation
 from .mcc import GasField
@@ -611,6 +613,222 @@ async def ws_pic(ws: WebSocket) -> None:
                         await _run_pic_session(ws, msg.get("project", {}))
                     else:
                         await _continue_pic_session(ws, msg)
+            elif cmd == "stop":
+                continue  # 実行中でなければ無視
+            else:
+                await ws.send_json({"type": "error", "detail": f"不明なコマンド: {cmd}"})
+    except WebSocketDisconnect:
+        pass
+
+
+# ---- 1D PIC/MCC WebSocket ストリーミング (prompts/91) --------------------------
+#
+# 2D の /ws/pic (PicSimulation) とは完全に独立したソルバー・状態を使う。
+# geometry/mesh 生成が無く軽量なので、start (メッシュ生成に相当する重い処理が
+# 無い) もそのまま同期的に構築して問題ないが、既存の流儀 (anyio/asyncio スレッド
+# オフロード) に揃えるため 2D と同じ asyncio.to_thread 経由にする。
+
+_last_sim1d: Pic1dSimulation | None = None
+_pic1d_lock = asyncio.Lock()
+
+
+@app.get("/pic1d/presets")
+def pic1d_presets_endpoint() -> dict:
+    """1D PIC/MCC のベンチマークプリセット一覧 (prompts/91)。
+
+    レスポンス形式: {プリセット名: {"label": str, "description": str,
+    "pic1d": <Pic1dSettings と同じ形の dict>, "note"?: str}}。
+    "note" は turner_he_case1 のみ (断面積が未設定であることの注意書き)。
+    """
+    return get_pic1d_presets()
+
+
+def _pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
+    """/ws/pic1d の done.result (= ResultsBundle.pic1d に格納する想定の形) を組み立てる。
+
+    2D の _build_results_bundle (batch.py) と同じ考え方: done で返す内容を
+    そのまま保存し、そのまま読み込んで復元できる自己完結な dict にする。
+    """
+    profiles = None
+    if sim.fields is not None:
+        f = sim.fields
+        profiles = {
+            "x": sim.xg.tolist(),
+            "phi": f["phi"].tolist(),
+            "e": f["e"].tolist(),
+            "n_e": f["n_e"].tolist(),
+            "n_i": f["n_i"].tolist(),
+            "t_e": f["t_e"].tolist(),
+            "ionization": f["ionization"].tolist(),
+            "avg_steps": f["avg_steps"],
+        }
+    cycle = None
+    if sim.cycle is not None:
+        c = sim.cycle
+        cycle = {
+            "bins": c["bins"],
+            "freq_hz": c["freq_hz"],
+            "phi": c["phi"].tolist(),
+            "n_e": c["n_e"].tolist(),
+            "n_i": c["n_i"].tolist(),
+        }
+    eedf: list[dict] = []
+    if sim.eedf_results is not None:
+        for r in sim.eedf_results:
+            eedf.append(
+                {
+                    "label": r["label"],
+                    "e_centers": r["e_centers"].tolist(),
+                    "f": r["f"].tolist(),
+                    "mean_energy_ev": r["mean_energy_ev"],
+                    "t_eff_ev": r["t_eff_ev"],
+                    "total_weight": r["total_weight"],
+                    "overflow_frac": r["overflow_frac"],
+                    "n_samples": r["n_samples"],
+                }
+            )
+    timing_total = sum(sim.timing.values())
+    return {
+        "history": sim.history,
+        "profiles": profiles,
+        "cycle": cycle,
+        "eedf": eedf,
+        "walls": sim.wall,
+        "elapsed_s": elapsed_s,
+        "timing": {**sim.timing, "total": timing_total},
+        "settings": sim.s.model_dump(),
+    }
+
+
+async def _run_pic1d_session(ws: WebSocket, project_dict: dict) -> None:
+    """1回の 1D PIC 実行 (start)。完了/停止後も状態を保持スロットに残す。"""
+    global _last_sim1d
+    try:
+        project = Project.model_validate(project_dict)
+        sim = await asyncio.to_thread(Pic1dSimulation, project)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+    _last_sim1d = sim  # 新しい start で保持状態を置き換える
+    await _stream_run_1d(ws, sim)
+
+
+async def _continue_pic1d_session(ws: WebSocket, msg: dict) -> None:
+    """保持中の状態から追加実行 (continue)。応答は start と同形。"""
+    sim = _last_sim1d
+    if sim is None:
+        await ws.send_json(
+            {"type": "error", "detail": "保持中の実行状態がありません (先に start してください)"}
+        )
+        return
+    try:
+        extra_steps = int(msg.get("extra_steps", sim.s.n_steps))
+        if extra_steps <= 0:
+            raise ValueError("extra_steps は正の整数を指定してください")
+        frame_every = msg.get("frame_every")
+        avg_steps = msg.get("avg_steps")
+        phase_bins = msg.get("phase_bins")
+        sim.prepare_continue(extra_steps, frame_every, avg_steps, phase_bins)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+    await _stream_run_1d(ws, sim)
+
+
+async def _stream_run_1d(ws: WebSocket, sim: Pic1dSimulation) -> None:
+    """run_batch をワーカースレッドで実行し、started → frame → done を送出する
+    (2D の _stream_run と同じ設計)。
+    """
+    loop = asyncio.get_running_loop()
+    stop = threading.Event()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+
+    await ws.send_json(
+        {
+            "type": "started",
+            "n_steps": sim.s.n_steps,
+            "step_offset": sim.step_count,
+            "dt": sim.dt,
+            "x": sim.xg.tolist(),
+            "warnings": sim.warnings,
+        }
+    )
+
+    def on_frame(frame: dict) -> None:
+        def offer_latest() -> None:
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(frame)
+
+        loop.call_soon_threadsafe(offer_latest)
+
+    t_run0 = time.perf_counter()
+    run_task = asyncio.create_task(
+        asyncio.to_thread(sim.run_batch, on_frame, stop.is_set, False)
+    )
+
+    async def watch_stop() -> None:
+        while True:
+            try:
+                msg = json.loads(await ws.receive_text())
+            except (WebSocketDisconnect, RuntimeError):
+                stop.set()
+                return
+            if msg.get("cmd") == "stop":
+                stop.set()
+                return
+
+    stop_task = asyncio.create_task(watch_stop())
+    try:
+        while True:
+            if run_task.done() and queue.empty():
+                break
+            try:
+                frame = await asyncio.wait_for(queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            await ws.send_json(frame)
+        await run_task
+        elapsed_s = time.perf_counter() - t_run0
+        await ws.send_json({"type": "done", "result": _pic1d_result(sim, elapsed_s)})
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "detail": str(exc)})
+        except Exception:
+            pass
+    finally:
+        stop.set()
+        stop_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@app.websocket("/ws/pic1d")
+async def ws_pic1d(ws: WebSocket) -> None:
+    """1D PIC/MCC 実行の WebSocket (prompts/91)。
+
+    start で新規実行、stop で中断、continue (extra_steps 指定) で保持中の状態
+    から追加実行する (完了/停止後も状態はサーバー側に保持され、新しい start で置き換わる)。
+    2D の /ws/pic とは独立したロック・保持スロットを持つため、両者は同時に実行できる。
+    """
+    await ws.accept()
+    try:
+        while True:
+            msg = json.loads(await ws.receive_text())
+            cmd = msg.get("cmd")
+            if cmd in ("start", "continue"):
+                if _pic1d_lock.locked():
+                    await ws.send_json(
+                        {"type": "error", "detail": "別の 1D PIC 実行が進行中です"}
+                    )
+                    continue
+                async with _pic1d_lock:
+                    if cmd == "start":
+                        await _run_pic1d_session(ws, msg.get("project", {}))
+                    else:
+                        await _continue_pic1d_session(ws, msg)
             elif cmd == "stop":
                 continue  # 実行中でなければ無視
             else:

@@ -475,6 +475,80 @@ class PicSettings(BaseModel):
     merge: PicMerge | None = None
 
 
+# ---- 1D PIC/MCC (1d3v、prompts/91) --------------------------------------------
+#
+# 2D FEM-PIC (上記 PicSettings/PicSimulation) とは完全に独立な専用ソルバー
+# (pic1d.py 参照)。一様格子 + 三重対角 Poisson を使う CCP ベンチマーク
+# (Turner et al. 2013 / eduPIC) 向けの軽量モジュール。
+
+
+class Pic1dElectrode(BaseModel):
+    """1D の左右電極。電圧は v_dc + Σ waveforms(t) (既存 VoltageWaveform 合成を流用、pic.py の
+    _eval_waveform と同じ式)。2D の Region/BoundaryCondition と異なり voltage_rf (sin 成分) は
+    持たない — RF 駆動が必要な場合は正弦波をサンプルした VoltageWaveform で表現する
+    (pic1d_presets.py 参照)。
+    """
+
+    v_dc: float = 0.0
+    waveforms: list[VoltageWaveform] = []
+    see_gamma: float = Field(0.0, ge=0.0, le=1.0, description="イオン入射あたりのSEE収率 γ")
+
+
+class Eedf1dRegion(BaseModel):
+    """1D の EEDF/EEPF 集計区間 [x1, x2] (2D の EedfRegion の 1D 版、prompts/85 と同じ規約)。"""
+
+    x1: float
+    x2: float
+    label: str = ""
+    bins: int = Field(100, ge=10, le=1000)
+    # None = 平均区間の最初の集計ステップで自動決定 (2D の EedfRegion.e_max_ev と同じ規約)
+    e_max_ev: float | None = Field(None, gt=0)
+
+
+class Pic1dSettings(BaseModel):
+    """1D PIC/MCC (1d3v)。null なら無効。2D の pic とは独立に実行できる (pic1d.py 参照)。
+
+    一様格子 (n_cells 個のセル、n_nodes = n_cells+1 節点) + 三重対角 Poisson。
+    メッシュ生成が無いため geometry/mesh の設定とは無関係に動作する。
+    """
+
+    gap_m: float = Field(..., gt=0, description="電極間ギャップ [m]")
+    n_cells: int = Field(128, ge=8, le=100000)
+    left: Pic1dElectrode = Pic1dElectrode()
+    right: Pic1dElectrode = Pic1dElectrode()
+    init_density_m3: float = Field(..., gt=0, description="初期プラズマ密度 (一様、準中性) [m^-3]")
+    init_te_ev: float = Field(2.0, gt=0)
+    init_ti_ev: float = Field(0.03, gt=0)
+    ion_mass_amu: float = Field(39.948, gt=0, description="イオン質量 [amu] (He: 4.0026)")
+    n_macro: int = Field(20000, gt=0, description="種ごとの初期マクロ粒子数")
+    dt: float | None = Field(None, gt=0, description="秒。None なら 0.1/ωpe (初期密度から)")
+    n_steps: int = Field(2000, gt=0)
+    frame_every: int = Field(20, gt=0)
+    # 完了時に返す時間平均プロファイルの平均ステップ数。None なら最後の25% (2D と同じ規約)
+    avg_steps: int | None = Field(None, gt=0)
+    # RF 1周期の位相分解ビン数。0=無効、RF (waveforms) が無ければ無効 (2D と同じ規約)
+    phase_bins: int = Field(40, ge=0)
+    mcc: MccSettings | None = None  # 既存 MccSettings をそのまま流用 (null なら MCC 無効)
+    see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]")
+    eedf_regions: list[Eedf1dRegion] = []  # 最大4個 (validator)
+    seed: int = 0  # 初期装荷の乱数種 (MCC は mcc.seed を使う)
+
+    @model_validator(mode="after")
+    def _check_no_dsmc(self) -> "Pic1dSettings":
+        if self.mcc is not None and self.mcc.use_dsmc_gas:
+            raise ValueError(
+                "1D PIC (pic1d) は DSMC 連成 (mcc.use_dsmc_gas) に未対応です "
+                "(1D は専用の一様格子ソルバーで、2D メッシュ/DSMC ガス場を参照できません)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_eedf_regions(self) -> "Pic1dSettings":
+        if len(self.eedf_regions) > 4:
+            raise ValueError("eedf_regions は最大 4 個までです")
+        return self
+
+
 # ---- DSMC (定常ガス流れ、prompts/54) ------------------------------------------
 
 
@@ -579,6 +653,9 @@ class Project(BaseModel):
     dsmc: DsmcSettings | None = None
     particles: ParticleSettings | None = None
     pic: PicSettings | None = None
+    # 1D PIC/MCC (1d3v、prompts/91)。null なら無効。geometry/mesh とは無関係に動く
+    # 専用の一様格子ソルバー (pic1d.py)。2D の pic と同時に設定しても互いに独立に扱われる
+    pic1d: Pic1dSettings | None = None
 
     @model_validator(mode="after")
     def _check_b_field(self) -> "Project":

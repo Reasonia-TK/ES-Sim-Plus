@@ -6,6 +6,9 @@ import { isAxisymmetric, rfComponents } from "./types";
 import type {
   DsmcResult,
   EdgeBcType,
+  Pic1dFrameMsg,
+  Pic1dResult,
+  Pic1dStartedMsg,
   PicDiag,
   PicFields,
   PicFrameMsg,
@@ -31,11 +34,13 @@ export type TreeNode =
   | "study-fem"
   | "study-trace"
   | "study-pic"
+  | "study-pic1d"
   | "study-gas"
   | "study-sweep"
   | "result-fem"
   | "result-trace"
   | "result-pic"
+  | "result-pic1d"
   | "result-gas";
 
 interface Props {
@@ -62,6 +67,12 @@ interface Props {
   picError: string | null;
   picFields: PicFields | null;
   picHistory: PicDiag[];
+  // 1D PIC/MCC (prompts/91)。2D の PIC (pic) と完全に独立の実行状態・結果を持つ
+  pic1dRunning: boolean;
+  pic1dStarted: Pic1dStartedMsg | null;
+  pic1dFrame: Pic1dFrameMsg | null;
+  pic1dError: string | null;
+  pic1dResult: Pic1dResult | null;
   gasRunning: boolean;
   gasProgress: { step: number; nSteps: number; nParticles: number } | null;
   gasError: string | null;
@@ -104,6 +115,11 @@ export default function ProjectTree({
   picError,
   picFields,
   picHistory,
+  pic1dRunning,
+  pic1dStarted,
+  pic1dFrame,
+  pic1dError,
+  pic1dResult,
   gasRunning,
   gasProgress,
   gasError,
@@ -159,6 +175,15 @@ export default function ProjectTree({
     }
     if (picError) return { text: "エラー", kind: "error" };
     if (picFields || picHistory.length > 0) return { text: "✓完了", kind: "done" };
+    return { text: "未実行", kind: "idle" };
+  };
+  const pic1dBadge = (): { text: string; kind: BadgeKind } => {
+    if (pic1dRunning) {
+      const p = pct(pic1dFrame?.step ?? 0, pic1dStarted?.n_steps ?? 0);
+      return { text: `実行中 ${p}%`, kind: "busy" };
+    }
+    if (pic1dError) return { text: "エラー", kind: "error" };
+    if (pic1dResult) return { text: "✓完了", kind: "done" };
     return { text: "未実行", kind: "idle" };
   };
   const gasBadge = (): { text: string; kind: BadgeKind } => {
@@ -318,6 +343,15 @@ export default function ProjectTree({
                   <StatusBadge {...picBadge()} />
                 </div>
               )}
+              {match("PIC-MCC 1D") && (
+                <div
+                  className={`tree-row ${activeNode === "study-pic1d" ? "active" : ""}`}
+                  onClick={() => onSelectNode("study-pic1d")}
+                >
+                  <span>PIC-MCC 1D</span>
+                  <StatusBadge {...pic1dBadge()} />
+                </div>
+              )}
               {match("DSMC") && (
                 <div
                   className={`tree-row ${activeNode === "study-gas" ? "active" : ""}`}
@@ -373,6 +407,14 @@ export default function ProjectTree({
                   onClick={() => onSelectNode("result-pic")}
                 >
                   PIC-MCC
+                </div>
+              )}
+              {match("PIC-MCC 1D") && (
+                <div
+                  className={`tree-row ${activeNode === "result-pic1d" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-pic1d")}
+                >
+                  PIC-MCC 1D
                 </div>
               )}
               {match("DSMC") && (

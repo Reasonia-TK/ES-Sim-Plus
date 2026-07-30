@@ -191,16 +191,20 @@ const DEFAULT_MCC: McSettings = {
 const DEFAULT_MERGE: PicMerge = { n_max: 100000, every: 100 };
 
 // EEDF/EEPF 領域の重ね描き用パレット (紫系を基調に、最大4個を色分け。CadCanvas の
-// 領域オーバーレイ色 #c792ea を1本目に使い、残りは識別しやすい色を添える、prompts/85)
-const EEDF_CHART_COLORS = ["#c792ea", "#7ec8e3", "#f2b880", "#8ee6a9"];
+// 領域オーバーレイ色 #c792ea を1本目に使い、残りは識別しやすい色を添える、prompts/85)。
+// export しているのは canvas/Plot1dView.tsx (1D PIC の結果 EEDF チャート、prompts/91) が
+// EedfChart と合わせて色分けを揃えて流用するため
+export const EEDF_CHART_COLORS = ["#c792ea", "#7ec8e3", "#f2b880", "#8ee6a9"];
 
-// プロセスラベルは長いことがあるので一覧表示では短縮する (title 属性でフルテキストを見せる)
-function shortLabel(label: string, max = 34): string {
+// プロセスラベルは長いことがあるので一覧表示では短縮する (title 属性でフルテキストを見せる)。
+// export しているのは Pic1dPanel (1D PIC の MCC 設定、prompts/91) からも流用するため
+export function shortLabel(label: string, max = 34): string {
   return label.length > max ? `${label.slice(0, max - 1)}…` : label;
 }
 
-// LXCatインポート済みの断面積プロセス一覧 (種別・ラベル(短縮)・閾値・点数)
-function ProcessList({ processes }: { processes: XsProcess[] }) {
+// LXCatインポート済みの断面積プロセス一覧 (種別・ラベル(短縮)・閾値・点数)。
+// export しているのは Pic1dPanel (1D PIC の MCC 設定、prompts/91) からも流用するため
+export function ProcessList({ processes }: { processes: XsProcess[] }) {
   if (processes.length === 0) return <div className="muted">(未読込)</div>;
   return (
     <div className="mcc-process-list">
@@ -1748,7 +1752,10 @@ function IaedfChart({ result, bins }: IaedfChartProps) {
 }
 
 interface EedfChartProps {
-  regions: PicEedfRegionSettings[]; // ラベル表示用 (results と同じインデックス対応)
+  // ラベル表示用 (results と同じインデックス対応)。1D (Eedf1dRegion) は x1/x2、
+  // 2D (PicEedfRegionSettings) は p1/p2 で座標の持ち方が異なるが、ここで使うのは
+  // label だけなので両者に共通する最小限の型にして canvas/Plot1dView.tsx からも流用できるようにする
+  regions: { label?: string }[];
   results: PicEedfResult[];
   mode: "eedf" | "eepf";
   logScale: boolean;
@@ -1757,8 +1764,10 @@ interface EedfChartProps {
 // EEDF/EEPF の重ね描きチャート (領域比較が本機能の主目的のため、選択領域だけでなく
 // 全領域を色分けして同時表示する、prompts/85)。HistogramChart/IaedfChart と同じ
 // canvas 直描きスタイル (枠 #363c48, 9px 目盛りフォント, padL≈44) に合わせる。
-// EEPF (= f/√E) は E=0 の点を除外する (定義上 √E で割れないため)
-function EedfChart({ regions, results, mode, logScale }: EedfChartProps) {
+// EEPF (= f/√E) は E=0 の点を除外する (定義上 √E で割れないため)。
+// export しているのは canvas/Plot1dView.tsx (1D PIC の結果 EEDF チャート、prompts/91) が
+// 結果データの形 (label/e_centers/f/...) が2Dと同一のため、そのまま流用するため
+export function EedfChart({ regions, results, mode, logScale }: EedfChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // 領域ごとの (E, y) 系列。y は EEDF ならそのまま f、EEPF なら f/√E (E>0 のみ)

@@ -202,10 +202,187 @@ export interface McSettings {
   electron_processes: XsProcess[]; // elastic/excitation/ionization
   ion_processes: XsProcess[];      // isotropic/backscat
   seed: number;                    // 乱数シード
+  // 電離の余剰エネルギー分配: "half" = 散乱電子と生成電子で等分 (Turner ベンチマーク互換、既定)、
+  // "random" = 一様乱数比で分配 (従来動作)。2D PicPanel には UI が無く既定値のみ使うが、
+  // 1D (Pic1dPanel) は Turner/eduPIC ベンチマーク再現のため選択UIを持つ (prompts/91)
+  ionization_split?: "half" | "random";
+  // イオン断面積テーブルの参照エネルギー系: "lab" = 実験室系 (既定)、
+  // "com" = 重心系エネルギー (Turner の He+/He データ用)。ionization_split と同様 1D のみ UI あり
+  ion_energy_frame?: "com" | "lab";
   // true なら直前に実行した DSMC の定常ガス場 (n・T・u) を背景として使う (prompts/54)。
-  // サーバーが保持する DSMC 結果とメッシュが一致している必要がある (未実行/不一致はサーバーがエラー)
+  // サーバーが保持する DSMC 結果とメッシュが一致している必要がある (未実行/不一致はサーバーがエラー)。
+  // 1D (pic1d) は DSMC 連成に未対応 (backend の validator が true を拒否する) ため、
+  // Pic1dPanel ではこのフィールドのトグルを出さない (常に未設定=false のまま送る)
   use_dsmc_gas?: boolean;
 }
+
+// ---- 1D PIC/MCC (1d3v、backend/es_sim/schema.py Pic1d* と手動同期、prompts/91) --------------
+// 2D FEM-PIC (PicSettings/PicSimulation 系) とは完全に独立な専用ソルバー。geometry/mesh とは
+// 無関係な一様格子 (n_cells 個のセル) 上で動く。
+
+// 1D の左右電極。電圧は v_dc + Σ waveforms(t) (2D の VoltageWaveform 合成と同じ式)。
+// 2D の Region/BoundaryCondition と異なり voltage_rf (sin 成分) は持たない — RF 駆動が
+// 必要な場合は正弦波をサンプルした VoltageWaveform で表現する (pic1d_presets.py 参照)
+export interface Pic1dElectrode {
+  v_dc?: number;
+  waveforms?: VoltageWaveform[];
+  see_gamma?: number; // イオン入射あたりのSEE収率 γ
+}
+
+// 1D の EEDF/EEPF 集計区間 [x1, x2] (2D の EedfRegion の1D版、prompts/85 と同じ規約)
+export interface Eedf1dRegion {
+  x1: number;
+  x2: number;
+  label?: string;
+  bins?: number;
+  // null/undefined = 平均区間の最初の集計ステップで自動決定 (2D の EedfRegion.e_max_ev と同じ規約)
+  e_max_ev?: number | null;
+}
+
+export interface Pic1dSettings {
+  gap_m: number;           // 電極間ギャップ [m]
+  n_cells: number;         // セル数 (節点数 = n_cells+1)
+  left: Pic1dElectrode;
+  right: Pic1dElectrode;
+  init_density_m3: number; // 初期プラズマ密度 (一様、準中性) [m^-3]
+  init_te_ev?: number;
+  init_ti_ev?: number;
+  ion_mass_amu?: number;
+  n_macro?: number;        // 種ごとの初期マクロ粒子数
+  dt?: number | null;      // 秒。null なら 0.1/ωpe (初期密度から自動)
+  n_steps?: number;
+  frame_every?: number;
+  // 完了時に返す時間平均プロファイルの平均ステップ数。null なら最後の25%
+  avg_steps?: number | null;
+  // RF 1周期の位相分解ビン数。0=無効、RF (waveforms) が無ければ無効
+  phase_bins?: number;
+  mcc?: McSettings | null; // 既存 McSettings をそのまま流用 (null なら MCC 無効)。
+  // ただし 1D は DSMC 連成 (mcc.use_dsmc_gas) に未対応 (backend の validator が拒否する)。
+  // Pic1dPanel では use_dsmc_gas のトグル自体を出さない
+  see_energy_ev?: number;  // SEE 電子の初期エネルギー [eV]
+  eedf_regions?: Eedf1dRegion[]; // 最大4個 (backend validator)
+  seed?: number;            // 初期装荷の乱数種 (MCC は mcc.seed を使う)
+}
+
+// server → client (/ws/pic1d)
+export interface Pic1dStartedMsg {
+  type: "started";
+  n_steps: number;
+  step_offset: number; // 続き実行では前回までの累計 (frame.step が通算で進む)
+  dt: number;
+  x: number[]; // 節点座標 [m] (一様格子、n_cells+1 点)
+  warnings: string[];
+}
+
+export interface Pic1dFrameMsg {
+  type: "frame";
+  step: number;
+  t: number;
+  phi: number[]; // 節点値 [V]
+  n_e: number[]; // 節点値 [m^-3]
+  n_i: number[]; // 節点値 [m^-3]
+  counts: Record<string, number>; // history の各キーの最新値 (step/t/n_e/n_i/wall_*/ion_events 等)
+  elapsed_s: number;
+  sample: { x: number[]; vx: number[] }; // 電子位相空間 (≤2000点に間引き済み)
+}
+
+// done メッセージの history (列ごとの辞書。step ごとの1行データとして扱いたい場合は
+// 呼び出し側で zip すること。2D の toDiagArray に相当する変換は不要な規模のため用意しない)
+export interface Pic1dHistoryDict {
+  step: number[];
+  t: number[];
+  n_e: number[];       // マクロ粒子数 (実粒子数ではない)
+  n_i: number[];
+  w_e: number[];       // 実粒子数の総和 (重み和)
+  w_i: number[];
+  wall_left_e: number[];
+  wall_left_i: number[];
+  wall_right_e: number[];
+  wall_right_i: number[];
+  ion_events: number[];
+  see_events: number[];
+  coll_e: number[];
+}
+
+// 完了時の時間平均プロファイル一式 (done メッセージの result.profiles)
+export interface Pic1dProfiles {
+  x: number[];
+  phi: number[];
+  e: number[];          // E = -dφ/dx [V/m] (符号付き)
+  n_e: number[];
+  n_i: number[];
+  t_e: number[];
+  ionization: number[]; // 電離レート [m^-3 s^-1]
+  avg_steps: number;    // 実際に平均したステップ数
+}
+
+// RF 1周期の位相分解データ (done メッセージの result.cycle、アニメーション用)
+export interface Pic1dCycle {
+  bins: number;
+  freq_hz: number;
+  phi: number[][];  // bins × 節点
+  n_e: number[][];
+  n_i: number[][];
+}
+
+// 指定区間の EEDF/EEPF 集計結果 (done メッセージの result.eedf、prompts/85 の1D版)
+export interface Pic1dEedfResult {
+  label: string;
+  e_centers: number[];
+  f: number[];
+  mean_energy_ev: number;
+  t_eff_ev: number;
+  total_weight: number;
+  overflow_frac: number;
+  n_samples: number;
+}
+
+export interface Pic1dWallCounts {
+  electron: number;
+  ion: number;
+}
+
+export interface Pic1dWalls {
+  left: Pic1dWallCounts;
+  right: Pic1dWallCounts;
+}
+
+// /ws/pic1d の done.result (= ResultsBundle.pic1d に保存する形そのもの)
+export interface Pic1dResult {
+  history: Pic1dHistoryDict;
+  profiles: Pic1dProfiles | null;
+  cycle: Pic1dCycle | null;
+  eedf: Pic1dEedfResult[];
+  walls: Pic1dWalls;
+  elapsed_s: number;
+  timing: Record<string, number>; // deposit/field/push/mcc/other (+ total、server 側で加算)
+  settings: Pic1dSettings; // 実行に使った設定 (グリッド再構成に使える)
+}
+
+export interface Pic1dDoneMsg {
+  type: "done";
+  result: Pic1dResult;
+}
+
+export interface Pic1dErrorMsg {
+  type: "error";
+  detail: string;
+}
+
+export type Pic1dServerMessage = Pic1dStartedMsg | Pic1dFrameMsg | Pic1dDoneMsg | Pic1dErrorMsg;
+
+// client → server コマンド (/ws/pic1d)。continue の extra_steps は 2D と異なり必須
+// (backend が保持中の n_steps をデフォルトに使うが、フロントは常に明示的に送る)
+export type Pic1dClientCommand =
+  | { cmd: "start"; project: Project }
+  | { cmd: "stop" }
+  | {
+      cmd: "continue";
+      extra_steps: number;
+      frame_every?: number;
+      avg_steps?: number | null;
+      phase_bins?: number | null;
+    };
 
 // ---- DSMC (定常ガス流れ、prompts/54、backend/es_sim/schema.py と手動同期) ----------------
 
@@ -575,6 +752,9 @@ export interface Project {
   b_field?: BField | null;
   // 定常ガス流れの DSMC 設定 (prompts/54)。null/undefined なら無効
   dsmc?: DsmcSettings | null;
+  // 1D PIC/MCC (1d3v、prompts/91)。null/undefined なら無効。geometry/mesh とは無関係に動く
+  // 専用の一様格子ソルバー (backend/es_sim/pic1d.py)。2D の pic とは完全に独立
+  pic1d?: Pic1dSettings | null;
 }
 
 // 軸対称モード判定 (rz: 下辺 y=0 が対称軸、rz_x0: 左辺 x=0 が対称軸)。
@@ -728,4 +908,6 @@ export interface ResultsBundle {
     elapsed_s?: number;
   } | null;
   gas?: DsmcResult | null;
+  // 1D PIC/MCC の完了結果一式 (prompts/91)。done.result そのもの (settings を含み自己完結)
+  pic1d?: Pic1dResult | null;
 }

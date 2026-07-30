@@ -14,6 +14,7 @@ import type {
   PicFieldView,
   Tool,
 } from "./canvas/CadCanvas";
+import Plot1dView from "./canvas/Plot1dView";
 import ProfilePanel from "./panels/ProfilePanel";
 import RfPhaseMonitor from "./panels/RfPhaseMonitor";
 import FieldPanel, { EDGE_LABELS_RZ, EDGE_LABELS_RZ_X0, EDGE_LABELS_XY } from "./panels/FieldPanel";
@@ -23,12 +24,15 @@ import type { TreeNode } from "./ProjectTree";
 import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
 import type { CyclePicField, PicLiveField, PicResultField } from "./panels/PicPanel";
+import Pic1dPanel from "./panels/Pic1dPanel";
 import GasPanel, { DEFAULT_BOUNDARY, DEFAULT_DSMC, GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
 import type { GasResultField } from "./panels/GasPanel";
 import SweepPanel from "./panels/SweepPanel";
 import { Toggle } from "./Toggle";
 import { PicClient } from "./picClient";
 import type { PicClientCallbacks } from "./picClient";
+import { Pic1dClient } from "./pic1dClient";
+import type { Pic1dClientCallbacks } from "./pic1dClient";
 import { DsmcClient } from "./dsmcClient";
 import type { DsmcClientCallbacks } from "./dsmcClient";
 import { SweepClient } from "./sweepClient";
@@ -49,6 +53,10 @@ import type {
   Health,
   MeshResult,
   ParticleSettings,
+  Pic1dFrameMsg,
+  Pic1dResult,
+  Pic1dSettings,
+  Pic1dStartedMsg,
   PicCollectorResult,
   PicCollectorSettings,
   PicCycle,
@@ -111,6 +119,30 @@ function withInjectionEmitter(pic: PicSettings, emitter: ParticleSettings["emitt
   if (!pic.injection) return pic;
   return { ...pic, injection: { ...pic.injection, emitter } };
 }
+
+// 1D PIC/MCC 設定の既定値 (project.pic1d が未設定の場合の初期表示に使う、prompts/91)。
+// pic (2D) と同様に particles/pic とは独立の state で管理し (Undo/Redo 対象外)、
+// geometry/mesh には一切依存しない (pic1d.py は専用の一様格子ソルバー)
+const DEFAULT_PIC1D: Pic1dSettings = {
+  gap_m: 0.02,
+  n_cells: 128,
+  left: { v_dc: 0.0, waveforms: [], see_gamma: 0.0 },
+  right: { v_dc: 0.0, waveforms: [], see_gamma: 0.0 },
+  init_density_m3: 1.0e14,
+  init_te_ev: 2.0,
+  init_ti_ev: 0.03,
+  ion_mass_amu: 39.948,
+  n_macro: 20000,
+  dt: null,
+  n_steps: 2000,
+  frame_every: 20,
+  avg_steps: null,
+  phase_bins: 40,
+  mcc: null,
+  see_energy_ev: 2.0,
+  eedf_regions: [],
+  seed: 0,
+};
 
 // コレクタ追加数の上限 (バックエンドの validator と同じ、prompts/36/37)
 const MAX_COLLECTORS = 8;
@@ -194,11 +226,13 @@ const NODE_TITLES: Record<TreeNode, string> = {
   "study-fem": "スタディ — 静電場",
   "study-trace": "スタディ — 粒子追跡",
   "study-pic": "スタディ — PIC-MCC",
+  "study-pic1d": "スタディ — PIC-MCC 1D",
   "study-gas": "スタディ — DSMC",
   "study-sweep": "スタディ — パラメータスイープ",
   "result-fem": "結果 — 静電場",
   "result-trace": "結果 — 粒子追跡",
   "result-pic": "結果 — PIC-MCC",
+  "result-pic1d": "結果 — PIC-MCC 1D",
   "result-gas": "結果 — DSMC",
 };
 
@@ -370,6 +404,7 @@ export default function App() {
   // 複数同時実行 (PIC/DSMC/スイープ/busy) はそれぞれ個別の開始時刻を持つ
   const busyStartTimeRef = useRef<number | null>(null);
   const picStartTimeRef = useRef<number | null>(null);
+  const pic1dStartTimeRef = useRef<number | null>(null);
   const gasStartTimeRef = useRef<number | null>(null);
   const sweepStartTimeRef = useRef<number | null>(null);
   const [, setElapsedTick] = useState(0);
@@ -478,6 +513,21 @@ export default function App() {
   // 結果表示セレクトを切り替えてもキャンバスが切り替わらない)
   const [cycleViewActive, setCycleViewActive] = useState(false);
 
+  // 1D PIC/MCC 設定 (prompts/91)。pic (2D) と同様 Undo/Redo 履歴には積まない独立 state。
+  // 2D の pic とは完全に独立した実行状態・結果を持つ (サーバー側のロック・保持スロットも別)
+  const [pic1d, setPic1d] = useState<Pic1dSettings>(DEFAULT_PIC1D);
+  const [pic1dRunning, setPic1dRunning] = useState(false);
+  const [pic1dStarted, setPic1dStarted] = useState<Pic1dStartedMsg | null>(null);
+  const [pic1dFrame, setPic1dFrame] = useState<Pic1dFrameMsg | null>(null);
+  // done メッセージで受け取った結果一式 (settings を含み自己完結、結果付き保存にそのまま使える)
+  const [pic1dResult, setPic1dResult] = useState<Pic1dResult | null>(null);
+  const [pic1dError, setPic1dError] = useState<string | null>(null);
+  const pic1dClientRef = useRef<Pic1dClient | null>(null);
+  // 「続きから」ボタンの有効条件: 直前の実行が done/stop 済みで現在実行中でないこと。
+  // pic1d は geometry/mesh に依存しないため、2D の picProjectChangedSinceRun に相当する
+  // 「食い違いで無効化する」概念は無い (pic1d 設定を変えても常にサーバー保持状態へ継続実行するだけ)
+  const [pic1dContinueReady, setPic1dContinueReady] = useState(false);
+
   // ガス流れ (DSMC) 設定は project.dsmc として project state 本体に置く (particles/pic と異なり
   // 独立 state を持たず、ジオメトリ・メッシュ設定と同様 commitProject 経由で Undo/Redo 対象になる)。
   // 実行結果・実行状態は他パネルの result 系 state と同様に App 側で保持する
@@ -520,7 +570,7 @@ export default function App() {
   // 実行経過時間のリアルタイム表示 (ステータスバー、prompts/86)。何か実行中の間だけ
   // 1秒間隔で再レンダーする (アイドル時に setInterval を張り続けて無駄な再レンダーを
   // 起こさないようにするため、実行中フラグが1つでも立っているときだけ張る)
-  const anyRunning = busy || picRunning || gasRunning || sweepRunning;
+  const anyRunning = busy || picRunning || pic1dRunning || gasRunning || sweepRunning;
   useEffect(() => {
     if (!anyRunning) return;
     const id = setInterval(() => setElapsedTick((t) => t + 1), 1000);
@@ -542,6 +592,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       picClientRef.current?.close();
+      pic1dClientRef.current?.close();
       dsmcClientRef.current?.close();
       sweepClientRef.current?.close();
     };
@@ -984,6 +1035,64 @@ export default function App() {
 
   const runPicStop = () => {
     picClientRef.current?.stop();
+  };
+
+  // 1D PIC実行中のコールバック生成 (start/continue で共通化)。2D の makePicCallbacks と同じ設計だが、
+  // pic1d は geometry/mesh に依存しないため「続き実行時のジオメトリ食い違い」は無く、
+  // done.result がそのまま自己完結した結果一式 (history 込み) を返すので連結処理も不要
+  const makePic1dCallbacks = (): Pic1dClientCallbacks => ({
+    onStarted: (msg) => {
+      setPic1dStarted(msg);
+      setPic1dFrame(null); // ライブ表示を新しい実行区間の内容に自然に切り替える
+    },
+    onFrame: (msg) => {
+      setPic1dFrame(msg);
+    },
+    onDone: (msg) => {
+      setPic1dResult(msg.result);
+      setPic1dRunning(false);
+      setPic1dContinueReady(true); // done (stop 済みも含む) したので続き実行が可能になる
+    },
+    onError: (detail) => {
+      setPic1dError(detail);
+      setPic1dRunning(false);
+      setPic1dContinueReady(false); // エラー後の状態は不定なので続き実行は無効のままにする
+    },
+    onClose: () => setPic1dRunning(false),
+  });
+
+  // PIC 1D開始: WebSocket接続を張り、project.pic1d を送信する (2D の runPicStart と同じ設計)
+  const runPic1dStart = () => {
+    pic1dStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86 相当)
+    setPic1dError(null);
+    setPic1dStarted(null);
+    setPic1dFrame(null);
+    setPic1dRunning(true);
+    setPic1dContinueReady(false);
+    const client = new Pic1dClient(makePic1dCallbacks());
+    pic1dClientRef.current = client;
+    client.start({ ...project, pic1d });
+  };
+
+  // PIC 1D続きから実行: 保持中のシミュレーション状態 (粒子・表面電荷・時刻・乱数) を維持したまま
+  // extraSteps 分だけ追加実行する。フレーム間隔・平均ステップ数・位相ビン数は現在の pic1d 設定を使う
+  const runPic1dContinue = (extraSteps: number) => {
+    if (!pic1dClientRef.current || pic1dRunning || !pic1dContinueReady) return;
+    pic1dStartTimeRef.current = Date.now();
+    setPic1dError(null);
+    setPic1dRunning(true);
+    setPic1dContinueReady(false);
+    pic1dClientRef.current.setCallbacks(makePic1dCallbacks());
+    pic1dClientRef.current.continueRun({
+      extra_steps: extraSteps,
+      frame_every: pic1d.frame_every,
+      avg_steps: pic1d.avg_steps ?? null,
+      phase_bins: pic1d.phase_bins ?? null,
+    });
+  };
+
+  const runPic1dStop = () => {
+    pic1dClientRef.current?.stop();
   };
 
   // エミッタ配置ツール (CadCanvas) からの確定通知。kind/n 等はそのまま維持し p1/p2 のみ更新する。
@@ -1473,9 +1582,9 @@ export default function App() {
   };
 
   // --- 保存/読込 ---
-  // particles / pic は history 管理外の別 state のため、保存時にここで project へ合成する
+  // particles / pic / pic1d は history 管理外の別 state のため、保存時にここで project へ合成する
   const saveProject = () => {
-    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter) };
+    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter), pic1d };
     saveTextFile("project.json", JSON.stringify(toSave, null, 2), "JSON", ["json"]).catch((err) => {
       setError(String(err));
     });
@@ -1484,7 +1593,7 @@ export default function App() {
   // 結果付き保存: プロジェクトに results を同梱して1ファイルで保存する。
   // 結果 (特に PIC の cycle) は大きくなりうるため、整形なし (compact) で書き出す
   const saveProjectWithResults = () => {
-    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter) };
+    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter), pic1d };
     // pic 結果は picStarted (mesh を含む) が無いと描画できないため、それが無い場合は同梱しない
     const results: ResultsBundle = {
       version: 1,
@@ -1504,6 +1613,8 @@ export default function App() {
           }
         : null,
       gas: gasResult,
+      // pic1d 結果は settings を含み自己完結 (done.result そのもの) なので、そのまま同梱する
+      pic1d: pic1dResult,
     };
     saveTextFile("project_results.json", JSON.stringify({ ...toSave, results }), "JSON", ["json"]).catch((err) => {
       setError(String(err));
@@ -1545,6 +1656,9 @@ export default function App() {
     // mcc/see_energy_ev が無い旧形式のファイルでも安全に読み込めるよう、既定値をベースに合成し、
     // 旧形式 (単数 collector) のプロジェクトは collectors 配列へ移行する
     setPic(loadedPic ? normalizeCollectors({ ...DEFAULT_PIC, ...loadedPic }) : DEFAULT_PIC);
+    // 1D PIC設定も同様に既定値をベースに合成する (pic1d が無い旧形式ファイルは丸ごと既定値に戻す)
+    const loadedPic1d = raw.pic1d;
+    setPic1d(loadedPic1d ? { ...DEFAULT_PIC1D, ...loadedPic1d } : DEFAULT_PIC1D);
     setSelectedCollectorIndexRaw(null);
     setSelectedEedfIndexRaw(null);
     setSelectedRegionId(null);
@@ -1565,6 +1679,12 @@ export default function App() {
       // 結果表示セレクトは既定 (ライブ/線形) へ戻す
       setPicResultField("live");
       setPicLogScale(false);
+      // 1D PIC の結果 (settings を含み自己完結)。started/frame は保存対象に含めていないため
+      // 常に null に戻す (result-pic1d ページはこの pic1dResult の有無だけで結果表示に切り替わる)
+      setPic1dStarted(null);
+      setPic1dFrame(null);
+      setPic1dResult(results.pic1d ?? null);
+      setPic1dContinueReady(false); // サーバー側に保持状態が無いため続き実行は無効にする
       // サーバーには読込んだ状態が存在しない (このセッションで実行していない) ため、
       // 「続きから実行」は無効にし、次の新規実行を促す
       setPicContinueReady(false);
@@ -1612,13 +1732,17 @@ export default function App() {
 
   const selected = project.geometry.regions.find((r) => r.id === selectedRegionId) ?? null;
 
-  // 「結果付き保存」ボタンの有効条件: FEM/Mesh/トレース/PIC/DSMC のいずれかの結果があること
+  // 「結果付き保存」ボタンの有効条件: FEM/Mesh/トレース/PIC/PIC-MCC 1D/DSMC のいずれかの結果があること
   // (何も無い状態で保存しても project 部分だけの通常保存と同じになってしまうため無効化する)
-  const hasAnyResults = !!result || !!meshResult || !!traceResult || !!gasResult || !!picStarted;
+  const hasAnyResults = !!result || !!meshResult || !!traceResult || !!gasResult || !!picStarted || !!pic1dResult;
 
   // 「続きから実行」ボタンの有効条件: 直前の実行が done/stop 済みで現在実行中でなく、
   // かつ前回実行以降にジオメトリが編集されていないこと (health 未接続時も不可)
   const picCanContinue = !!health && picContinueReady && !picRunning && !picProjectChangedSinceRun;
+
+  // PIC-MCC 1D の「続きから」有効条件。pic1d は geometry/mesh に依存しないため、
+  // 2D のような「ジオメトリ食い違いで無効化」の判定は不要 (pic1dContinueReady のコメント参照)
+  const pic1dCanContinue = !!health && pic1dContinueReady && !pic1dRunning;
 
   // DSMC「続きから実行」ボタンの有効条件 (PIC の picCanContinue と同じ考え方)
   const gasCanContinue = !!health && gasContinueReady && !gasRunning && !gasProjectChangedSinceRun;
@@ -1769,6 +1893,9 @@ export default function App() {
   // 抑止してガス結果を優先する (不具合修正: PIC 実行後に「ガス流れ結果」を開いても
   // PIC の結果フィールドが優先チェーンで勝ち続け、DSMC の数密度等が見えなかった)
   const onGasNode = activeNode === "study-gas" || activeNode === "result-gas";
+  // PIC-MCC 1D (prompts/91) 選択中は CadCanvas の代わりに Plot1dView を表示する
+  // (1D は geometry/mesh と無関係なので CAD キャンバス自体が意味を持たない)
+  const isPic1dNode = activeNode === "study-pic1d" || activeNode === "result-pic1d";
   // 「結果 — 粒子追跡」ノード選択中は背景表示 (traceBackground) を CadCanvas の
   // result/fieldView に反映する (なし=背景の色マップ・等値線・ベクトルを消す)
   const onTraceResultNode = activeNode === "result-trace";
@@ -1797,6 +1924,10 @@ export default function App() {
   const showParticleResultsPage = activeNode === "result-trace";
   const showPicSetupPage = activeNode === "study-pic";
   const showPicResultsPage = activeNode === "result-pic";
+  // PIC-MCC 1D (prompts/91) は結果の可視化を全てキャンバス領域 (Plot1dView) 側に持たせているため、
+  // 設定パネル (Pic1dPanel) には study/result で内容差が無い。2D の setup/results 2インスタンス方式とは
+  // 異なり、単一インスタンスを両ノードで共用する (表示は同じまま、選択ノードでタイトルだけ変わる)
+  const showPic1dPage = activeNode === "study-pic1d" || activeNode === "result-pic1d";
   const showGasSetupPage = activeNode === "study-gas";
   const showGasResultsPage = activeNode === "result-gas";
   const showResultFemPage = activeNode === "result-fem";
@@ -1815,14 +1946,15 @@ export default function App() {
         : NODE_TITLES[activeNode];
 
   // --- 下部ステータスバー ---
-  // エラーは error → picError → gasError → sweepError の順で最初の非null を優先表示する
-  const statusError = error ?? picError ?? gasError ?? sweepError;
+  // エラーは error → picError → pic1dError → gasError → sweepError の順で最初の非null を優先表示する
+  const statusError = error ?? picError ?? pic1dError ?? gasError ?? sweepError;
   // ステータスバーのエラーを閉じる (各エラー state を一括クリア)。パネル内の
   // エラー表示は各パネルの error prop 経由で残したいが、実体は同じ state なので
   // ここでは「ステータスバーに居座る」問題の解消を優先して両方消える仕様とする
   const dismissStatusError = () => {
     setError(null);
     setPicError(null);
+    setPic1dError(null);
     setGasError(null);
     setSweepError(null);
   };
@@ -1835,6 +1967,12 @@ export default function App() {
   const picPct = picStarted && picStarted.n_steps > 0
     ? Math.min(100, Math.round((picSegStep / picStarted.n_steps) * 100))
     : 0;
+  // PIC-MCC 1D も続き実行で step が通算するため同じ考え方で区間内ステップを求める
+  const pic1dStepOffset = pic1dStarted?.step_offset ?? 0;
+  const pic1dSegStep = Math.max(0, (pic1dFrame?.step ?? pic1dStepOffset) - pic1dStepOffset);
+  const pic1dPct = pic1dStarted && pic1dStarted.n_steps > 0
+    ? Math.min(100, Math.round((pic1dSegStep / pic1dStarted.n_steps) * 100))
+    : 0;
   const gasPct = gasProgress && gasProgress.nSteps > 0 ? Math.round((gasProgress.step / gasProgress.nSteps) * 100) : 0;
 
   // 実行経過時間 (ステータスバー、prompts/86)。Date.now() を毎レンダーで直接読むことで
@@ -1842,6 +1980,7 @@ export default function App() {
   // 場合や開始時刻が未記録の場合は 0 (該当ブランチ自体が表示されないので使われない)
   const busyElapsedSec = busy && busyStartTimeRef.current != null ? (Date.now() - busyStartTimeRef.current) / 1000 : 0;
   const picElapsedSec = picRunning && picStartTimeRef.current != null ? (Date.now() - picStartTimeRef.current) / 1000 : 0;
+  const pic1dElapsedSec = pic1dRunning && pic1dStartTimeRef.current != null ? (Date.now() - pic1dStartTimeRef.current) / 1000 : 0;
   const gasElapsedSec = gasRunning && gasStartTimeRef.current != null ? (Date.now() - gasStartTimeRef.current) / 1000 : 0;
   const sweepElapsedSec = sweepRunning && sweepStartTimeRef.current != null ? (Date.now() - sweepStartTimeRef.current) / 1000 : 0;
 
@@ -1956,6 +2095,11 @@ export default function App() {
             picError={picError}
             picFields={picFields}
             picHistory={picHistory}
+            pic1dRunning={pic1dRunning}
+            pic1dStarted={pic1dStarted}
+            pic1dFrame={pic1dFrame}
+            pic1dError={pic1dError}
+            pic1dResult={pic1dResult}
             gasRunning={gasRunning}
             gasProgress={gasProgress}
             gasError={gasError}
@@ -2185,6 +2329,26 @@ export default function App() {
               />
             </div>
 
+            {/* PIC-MCC 1D (prompts/91): 結果の可視化は Plot1dView (キャンバス領域) 側に
+                持たせているため、設定パネルは study-pic1d/result-pic1d で共通の単一インスタンス
+                (2D PicPanel のような setup/results 2インスタンス分割はしない) */}
+            <div style={{ display: showPic1dPage ? "block" : "none" }}>
+              <Pic1dPanel
+                lengthUnit={lengthUnit}
+                pic1d={pic1d}
+                onChange={setPic1d}
+                canRun={!!health}
+                running={pic1dRunning}
+                onStart={runPic1dStart}
+                onStop={runPic1dStop}
+                canContinue={pic1dCanContinue}
+                onContinue={runPic1dContinue}
+                started={pic1dStarted}
+                frame={pic1dFrame}
+                error={pic1dError}
+              />
+            </div>
+
             {/* study-gas (設定+実行UI) と result-gas (結果専用) は同じ props を渡す
                 GasPanel の2インスタンスで、mode だけを切り替えて表示する */}
             <div style={{ display: showGasSetupPage ? "block" : "none" }}>
@@ -2323,8 +2487,22 @@ export default function App() {
           title="ドラッグで幅を変更 / ダブルクリックで既定幅"
         />
 
-        {/* 右カラム: キャンバスツールバー + CadCanvas */}
+        {/* 右カラム: キャンバスツールバー + CadCanvas (PIC-MCC 1D 選択時は Plot1dView に差し替え、
+            prompts/91)。1D は geometry/mesh と無関係なので CAD 編集ツールバー自体を出さない
+            (レイアウト構造 <div className="canvas-col"> ... </div> 自体は崩さない) */}
         <div className="canvas-col">
+          {isPic1dNode ? (
+            <Plot1dView
+              lengthUnit={lengthUnit}
+              pic1d={pic1d}
+              running={pic1dRunning}
+              started={pic1dStarted}
+              frame={pic1dFrame}
+              result={pic1dResult}
+              error={pic1dError}
+            />
+          ) : (
+            <>
           <div className="tool-toolbar">
             <button className={`tool ${tool === "select" ? "active" : ""}`} onClick={() => setTool("select")}>
               選択
@@ -2480,10 +2658,12 @@ export default function App() {
               onClose={() => setProfileLine(null)}
             />
           )}
+            </>
+          )}
         </div>
       </div>
 
-      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > DSMC実行中 > 準備完了 の優先順位 */}
+      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > PIC-MCC 1D実行中 > DSMC実行中 > 準備完了 の優先順位 */}
       <div className="statusbar">
         {/* 実行中は進捗を最優先 (エラーが残っていても別計算の進捗を隠さない)。
             アイドル時のエラーは×で閉じられる (居座り防止。新規実行開始でも自動クリア) */}
@@ -2508,6 +2688,15 @@ export default function App() {
             </span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${picPct}%` }} />
+            </div>
+          </>
+        ) : pic1dRunning ? (
+          <>
+            <span>
+              PIC-MCC 1D 実行中... {pic1dPct}% ({pic1dSegStep}/{pic1dStarted?.n_steps ?? 0}) — 経過 {formatElapsed(pic1dElapsedSec)}
+            </span>
+            <div className="statusbar-progress">
+              <div className="statusbar-progress-bar" style={{ width: `${pic1dPct}%` }} />
             </div>
           </>
         ) : gasRunning ? (

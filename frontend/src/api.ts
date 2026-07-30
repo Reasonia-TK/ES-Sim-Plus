@@ -1,4 +1,4 @@
-import type { DsmcResult, Health, MeshResult, Point, Project, ProfileResult, SolveResult, TraceResult, XsProcess } from "./types";
+import type { DsmcResult, Health, MeshResult, Pic1dSettings, Point, Project, ProfileResult, SolveResult, TraceResult, XsProcess } from "./types";
 import { getPort } from "./backendPort";
 
 // リクエストの都度ポート番号を組み立てる (GUIでの変更を即座に反映するため、定数 BASE は使わない)
@@ -31,6 +31,10 @@ export const api = {
   // LXCat形式テキストを断面積プロセス列にパースする (MCC設定のインポート用)
   lxcatParse: (text: string, species: "electron" | "ion"): Promise<{ processes: XsProcess[]; warnings: string[] }> =>
     post("/lxcat/parse", { text, species }),
+  // 1D PIC/MCC のベンチマークプリセット一覧 (prompts/91)。project 不要な GET のみの単純なエンドポイント
+  pic1dPresets: (): Promise<
+    Record<string, { label: string; description: string; pic1d: Pic1dSettings; note?: string }>
+  > => fetch(`${base()}/pic1d/presets`).then((r) => r.json()),
   // パラメータスイープ (prompts/79): ケース i の結果付きJSONを取得する (loadProject と
   // 同じ形式。project 本体 + results)。未完了/失敗は 404 (呼び出し側で catch すること)
   sweepResult: async (i: number): Promise<unknown> => {

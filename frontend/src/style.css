@@ -383,6 +383,34 @@ button.danger:hover { background: #b34747; }
    space-between は不要。.field を使わず Toggle 単体を1行として配置する箇所が大半のため
    ここでは .field 側のCSSには触れない */
 
+/* 1D PIC/MCC ビュー (canvas/Plot1dView.tsx、prompts/91)。CadCanvas の代わりに
+   study-pic1d/result-pic1d 選択時に canvas-col へ表示する。ヘッダは CAD ツールバーの
+   代わりの簡素な帯、本体は複数チャートを縦に並べるスクロール領域にする
+   (CadCanvas の単一 canvas 全面描画とは異なり、多数の折れ線/散布図を積む構成のため) */
+.pic1d-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.pic1d-toolbar { justify-content: space-between; }
+.pic1d-toolbar-title { font-weight: 600; }
+.pic1d-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 14px; font-size: 13px; }
+.pic1d-body h3 { font-size: 13px; color: var(--muted); margin: 12px 0 6px; font-weight: 600; }
+.pic1d-body h3:first-child { margin-top: 0; }
+.pic1d-body .kv { display: flex; justify-content: space-between; padding: 2px 0; }
+.pic1d-body .kv span:last-child { font-variant-numeric: tabular-nums; }
+.pic1d-body .field { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 0; max-width: 360px; }
+.pic1d-body .field span.label { color: var(--muted); font-size: 12px; }
+.pic1d-body input[type="number"], .pic1d-body input[type="text"], .pic1d-body select {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 3px; padding: 3px 6px; font-size: 12px; width: 140px;
+}
+.pic1d-body .hint { color: var(--muted); font-size: 11px; margin: 2px 0 6px; line-height: 1.4; }
+.pic1d-body .error { color: #e07070; word-break: break-all; }
+.pic1d-row-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }
+.pic1d-row-header h3 { margin: 0; }
+.pic1d-error { margin-bottom: 8px; }
+.pic1d-chart { display: block; width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; margin-bottom: 2px; }
+/* RF波形モニタ (Pic1dRfMonitor) は既存 .rf-phase-monitor を流用するが、
+   canvas-col 直下ではなく pic1d-body 内のスクロール領域に置くため高さ固定をやや小さくする */
+.pic1d-rf-monitor { height: 110px; margin-top: 10px; border: 1px solid var(--border); border-top: 1px solid var(--border); }
+
 /* ステータスバーのエラー閉じるボタン (居座り防止、prompts/90 相当) */
 .statusbar-error-close {
   margin-left: 8px; padding: 0 6px; background: transparent; border: none;
