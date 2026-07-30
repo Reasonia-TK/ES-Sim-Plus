@@ -89,6 +89,21 @@ def set_by_path(obj: dict, path: str, value: float) -> None:
         raise ValueError(f"パス {path!r}: 終端の手前が dict/list ではありません")
 
 
+def resolve_sweep_module(param_path: str, requested: str | None) -> str:
+    """スイープ対象の module ("pic"/"pic1d") を解決する (prompts/96)。
+
+    requested (GUI で明示指定された値) があればそれを最優先する — 自動判定に頼らず
+    UI 確定値をそのまま使うことで、pic/pic1d 双方の設定を同時に持つプロジェクトでも
+    ユーザーの意図どおりに実行できる。requested が None (未指定) のときのみ
+    param_path の接頭辞で判定する: "pic1d." で始まれば "pic1d"、それ以外は
+    従来互換で "pic" (2D は module という概念が無かったため、既存の GUI/API 利用者に
+    影響が出ないよう既定を "pic" のままにする)。
+    """
+    if requested in ("pic", "pic1d"):
+        return requested
+    return "pic1d" if param_path.startswith("pic1d.") else "pic"
+
+
 def build_sweep_cases(base_project: dict, param_path: str, values: list[float]) -> list[dict]:
     """ベース project (dict) から N ケースを生成する (deepcopy + set_by_path)。
 
@@ -110,8 +125,16 @@ def run_sweep(
     out_dir: str,
     on_event: Callable[[dict], None],
     should_stop: Callable[[], bool],
+    module: str = "pic",
 ) -> None:
     """N ケースを (最大 parallel 並列で) 実行し、進捗を on_event へ通知する。
+
+    module ("pic"/"pic1d"、既定 "pic") は全ケース共通で _worker にそのまま渡す
+    (prompts/96)。呼び出し側 (server.py の ws_sweep) が resolve_sweep_module で
+    既に解決済みの値を渡す想定 — ここでは対象パスの意味を解釈しない (set_by_path と
+    同じ「backend はパスの意味を解釈しない」方針を module にも適用する)。
+    既定値 "pic" により、module を指定しない既存呼び出しは常に従来どおり 2D PIC を
+    実行する (ビット不変)。
 
     batch.run_files と同じケース管理ループ構造だが、GUI 向けに以下2点を変更している:
     - 標準出力の代わりに on_event コールバックで進捗/完了を通知する (server.py が
@@ -149,7 +172,7 @@ def run_sweep(
     reported: set[int] = set()
 
     def _launch(job: dict[str, Any]) -> None:
-        p = ctx.Process(target=_worker, args=(job["in"], job["out"], str(job["index"]), progress_q))
+        p = ctx.Process(target=_worker, args=(job["in"], job["out"], str(job["index"]), progress_q, module))
         p.start()
         running[job["index"]] = p
 

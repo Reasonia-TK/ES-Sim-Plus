@@ -53,6 +53,7 @@ import type {
   Health,
   MeshResult,
   ParticleSettings,
+  Pic1dElectrode,
   Pic1dFrameMsg,
   Pic1dResult,
   Pic1dSettings,
@@ -851,10 +852,17 @@ export default function App() {
     dsmcClientRef.current?.stop();
   };
 
-  // パラメータスイープに渡すプロジェクト (particles/pic は独立 state のためここで合成する。
-  // saveProject/runPicStart と同じ合成方法。b_field/dsmc/pic の候補パスや現在値のプレビューは
-  // このオブジェクトを基準に組み立てるため、常に最新の pic/particles を反映させる)
-  const projectForSweep: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter) };
+  // パラメータスイープに渡すプロジェクト (particles/pic/pic1d は独立 state のためここで合成する。
+  // saveProject/runPicStart と同じ合成方法。b_field/dsmc/pic/pic1d の候補パスや現在値のプレビューは
+  // このオブジェクトを基準に組み立てるため、常に最新の pic/pic1d/particles を反映させる。
+  // pic1d は geometry/mesh に依存しない独立設定だが、1D スイープ (prompts/96) の候補生成・
+  // 現在値プレビューのために合成しておく必要がある)
+  const projectForSweep: Project = {
+    ...project,
+    particles,
+    pic: withInjectionEmitter(pic, particles.emitter),
+    pic1d,
+  };
 
   // スイープ実行中のコールバック生成 (PIC/DSMC の makePicCallbacks/makeDsmcCallbacks と同じ考え方)
   const makeSweepCallbacks = (): SweepClientCallbacks => ({
@@ -907,7 +915,21 @@ export default function App() {
     }
   };
 
-  const runSweepStart = (paramPath: string, values: number[], parallel: number) => {
+  // pic1d 電極の voltage_rf を単一オブジェクトからリスト形式へ正規化する (1D スイープ、prompts/96)。
+  // SweepPanel の 1D RF プリセットは常に "pic1d.<side>.voltage_rf.0.<field>" 形式のパスを使う
+  // (2D の候補と違い、単一/リストいずれの現在値でも同じパス表現で扱えるようにするため) ので、
+  // 現在値が単一オブジェクトのままだと配列インデックス 0 を解決できず set_by_path が失敗する。
+  // ensureSweepPath と同じ「送信直前に足りない形を実体化する」流儀で [obj] へ包み直す
+  // (値そのものは変えないので、正規化してもスイープ前の実行結果には影響しない)
+  const normalizePic1dVoltageRf = (pic1d: Pic1dSettings): Pic1dSettings => {
+    const normSide = (side: Pic1dElectrode): Pic1dElectrode =>
+      side.voltage_rf != null && !Array.isArray(side.voltage_rf)
+        ? { ...side, voltage_rf: [side.voltage_rf] }
+        : side;
+    return { ...pic1d, left: normSide(pic1d.left), right: normSide(pic1d.right) };
+  };
+
+  const runSweepStart = (paramPath: string, values: number[], parallel: number, module: "pic" | "pic1d") => {
     sweepStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setSweepError(null);
     setSweepStarted(null);
@@ -918,8 +940,9 @@ export default function App() {
     sweepClientRef.current = client;
     // 深いコピーに対して終端キーを実体化してから送る (元の project state は汚さない)
     const proj = JSON.parse(JSON.stringify(projectForSweep)) as typeof projectForSweep;
+    if (proj.pic1d) proj.pic1d = normalizePic1dVoltageRf(proj.pic1d);
     ensureSweepPath(proj, paramPath);
-    client.start(proj, paramPath, values, parallel);
+    client.start(proj, paramPath, values, parallel, module);
   };
 
   const runSweepStop = () => {

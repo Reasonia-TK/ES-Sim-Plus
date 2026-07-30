@@ -858,6 +858,9 @@ export interface SweepStartedMsg {
   n_cases: number;
   param_path: string;
   values: number[];
+  // 解決済みの実行対象 ("pic"=2D FEM-PIC / "pic1d"=1D PIC-MCC)。未指定リクエストでも
+  // server 側 (resolve_sweep_module) が必ず解決して返す (表示用、prompts/96)
+  module: "pic" | "pic1d";
 }
 
 // 数百ms〜数秒間隔でケースごとに届く進捗 (batch.py の間引きに準じる)
@@ -899,9 +902,16 @@ export type SweepServerMessage =
   | SweepDoneMsg
   | SweepErrorMsg;
 
-// client→server コマンド
+// client→server コマンド。module は自動判定に頼らず UI 確定値を明示送信する (prompts/96)
 export type SweepClientCommand =
-  | { cmd: "start"; project: Project; param_path: string; values: number[]; parallel: number }
+  | {
+      cmd: "start";
+      project: Project;
+      param_path: string;
+      values: number[];
+      parallel: number;
+      module: "pic" | "pic1d";
+    }
   | { cmd: "stop" };
 
 // フロント側でケースごとに保持する表示用状態 (SweepPanel のケース一覧、App が WS

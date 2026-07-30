@@ -856,3 +856,69 @@ class Pic1dSimulation:
             st["hist"] = None if st["auto"] else np.zeros(st["bins"])
             if st["auto"]:
                 st["e_max"] = None
+
+
+# ---- 結果バンドル組み立て (server.py / batch.py 共通、prompts/96) -----------------------
+#
+# /ws/pic1d の done.result と batch/sweep の ResultsBundle.pic1d は同じ形にする必要がある
+# (フロントの Pic1dResult 型・applyLoadedProject の復元経路を両方から使い回すため)。
+# 循環 import を避けるため (server.py は pic1d.py を import するが逆はしない)、
+# ビルダー本体をここに置き server.py / batch.py の双方から import する。
+
+
+def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
+    """done.result (= ResultsBundle.pic1d に格納する想定の形) を組み立てる。
+
+    2D の _build_results_bundle (batch.py) と同じ考え方: done で返す内容を
+    そのまま保存し、そのまま読み込んで復元できる自己完結な dict にする。
+    """
+    profiles = None
+    if sim.fields is not None:
+        f = sim.fields
+        profiles = {
+            "x": sim.xg.tolist(),
+            "phi": f["phi"].tolist(),
+            "e": f["e"].tolist(),
+            "n_e": f["n_e"].tolist(),
+            "n_i": f["n_i"].tolist(),
+            "t_e": f["t_e"].tolist(),
+            "ionization": f["ionization"].tolist(),
+            "avg_steps": f["avg_steps"],
+        }
+    cycle = None
+    if sim.cycle is not None:
+        c = sim.cycle
+        cycle = {
+            "bins": c["bins"],
+            "freq_hz": c["freq_hz"],
+            "phi": c["phi"].tolist(),
+            "n_e": c["n_e"].tolist(),
+            "n_i": c["n_i"].tolist(),
+        }
+    eedf: list[dict] = []
+    if sim.eedf_results is not None:
+        for r in sim.eedf_results:
+            eedf.append(
+                {
+                    "label": r["label"],
+                    "e_centers": r["e_centers"].tolist(),
+                    "f": r["f"].tolist(),
+                    "mean_energy_ev": r["mean_energy_ev"],
+                    "t_eff_ev": r["t_eff_ev"],
+                    "total_weight": r["total_weight"],
+                    "overflow_frac": r["overflow_frac"],
+                    "n_samples": r["n_samples"],
+                }
+            )
+    timing_total = sum(sim.timing.values())
+    return {
+        "history": sim.history,
+        "profiles": profiles,
+        "cycle": cycle,
+        "eedf": eedf,
+        "walls": sim.wall,
+        "fn": sim.fn,  # FN 電界放出サマリ (prompts/95)。両電極とも fn 未設定なら None
+        "elapsed_s": elapsed_s,
+        "timing": {**sim.timing, "total": timing_total},
+        "settings": sim.s.model_dump(),
+    }

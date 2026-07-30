@@ -85,7 +85,46 @@ export function buildSweepCandidates(project: Project): Candidate[] {
     }
   }
 
+  // 1D PIC/MCC (pic1d、prompts/91) の候補パス (prompts/96)。RF振幅/周波数は常に
+  // 配列インデックス0形式 ("pic1d.<side>.voltage_rf.0.<field>") で組み立てる —
+  // 現在値が単一オブジェクトでもリストでも同じパス表現で扱えるようにするため、
+  // 実際に送信する直前 (App.tsx の runSweepStart) で単一オブジェクトをリストへ正規化する
+  // (ensureSweepPath の「不足キーの実体化」と同じ流儀)
+  if (project.pic1d) {
+    const p1d = project.pic1d;
+    candidates.push({ label: "1D: ギャップ長 [m]", path: "pic1d.gap_m" });
+    candidates.push({ label: "1D: 初期密度 [m^-3]", path: "pic1d.init_density_m3" });
+    candidates.push({ label: "1D: マクロ粒子数", path: "pic1d.n_macro" });
+    if (p1d.mcc) {
+      candidates.push({ label: "1D: MCC ガス圧 [Pa]", path: "pic1d.mcc.gas.pressure_pa" });
+    }
+    (["left", "right"] as const).forEach((side) => {
+      const sideLabel = side === "left" ? "左電極" : "右電極";
+      const elec = p1d[side];
+      candidates.push({ label: `1D: ${sideLabel} 直流電圧 [V]`, path: `pic1d.${side}.v_dc` });
+      if (elec.voltage_rf) {
+        candidates.push({
+          label: `1D: ${sideLabel} RF振幅 [V]`, path: `pic1d.${side}.voltage_rf.0.amplitude`,
+        });
+        candidates.push({
+          label: `1D: ${sideLabel} RF周波数 [Hz]`, path: `pic1d.${side}.voltage_rf.0.freq_hz`,
+        });
+      }
+      if (elec.fn) {
+        candidates.push({ label: `1D: ${sideLabel} FN β`, path: `pic1d.${side}.fn.beta` });
+        candidates.push({ label: `1D: ${sideLabel} FN 仕事関数 [eV]`, path: `pic1d.${side}.fn.phi_ev` });
+      }
+    });
+  }
+
   return candidates;
+}
+
+// 対象パラメータパスから実行モジュールを判定する (prompts/96)。
+// backend の resolve_sweep_module と同じ規則 (pic1d. で始まれば "pic1d"、それ以外は "pic")。
+// フロントは自動判定に頼らずこの結果を module として明示送信する
+export function sweepModuleForPath(path: string): "pic" | "pic1d" {
+  return path.startsWith("pic1d.") ? "pic1d" : "pic";
 }
 
 // ドット区切りパスで project から現在値を読む (プレビュー表示用)。数値でなければ undefined
@@ -144,11 +183,12 @@ const STATUS_BADGE_KIND: Record<SweepCaseState["status"], string> = {
 };
 
 interface Props {
-  // App 側で particles/pic (エミッタ同期済み) を合成済みのプロジェクト
+  // App 側で particles/pic/pic1d (エミッタ同期済み) を合成済みのプロジェクト
   project: Project;
   canRun: boolean;
   running: boolean;
-  onStart: (paramPath: string, values: number[], parallel: number) => void;
+  // module は自動判定に頼らず、選択パスから決定した値をここで明示送信する (prompts/96)
+  onStart: (paramPath: string, values: number[], parallel: number, module: "pic" | "pic1d") => void;
   onStop: () => void;
   started: SweepStartedMsg | null;
   cases: SweepCaseState[];
@@ -197,6 +237,8 @@ export default function SweepPanel({
   const picThreads = project.pic?.threads ?? 1;
   const totalThreads = parallel * picThreads;
   const canStart = canRun && !running && paramPath !== "" && values.length > 0;
+  // 選択パスから実行対象を判定する (自動判定に頼らず、開始時にこの値を明示送信する、prompts/96)
+  const targetModule = sweepModuleForPath(paramPath);
 
   return (
     <>
@@ -236,6 +278,7 @@ export default function SweepPanel({
         <span>現在の値</span>
         <span>{currentValue !== undefined ? currentValue : "- (パスが無効か数値ではありません)"}</span>
       </div>
+      {targetModule === "pic1d" && <p className="hint">対象: PIC-MCC 1D</p>}
 
       <h3>値リスト</h3>
       <div className="field">
@@ -296,7 +339,7 @@ export default function SweepPanel({
       </p>
 
       <div className="actions">
-        <button onClick={() => onStart(paramPath, values, parallel)} disabled={!canStart}>
+        <button onClick={() => onStart(paramPath, values, parallel, targetModule)} disabled={!canStart}>
           {running ? "実行中..." : "スイープ実行"}
         </button>
         <button className="secondary" onClick={onStop} disabled={!running}>

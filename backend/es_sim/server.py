@@ -26,12 +26,12 @@ from .lxcat import parse_lxcat
 from .meshing import generate_mesh
 from .particles import trace
 from .pic import WALK_DIAG_KEYS, PicSimulation
-from .pic1d import Pic1dSimulation
+from .pic1d import Pic1dSimulation, build_pic1d_result
 from .pic1d_presets import get_presets as get_pic1d_presets
 from .postprocess import sample_line
 from .dsmc import DsmcSimulation
 from .mcc import GasField
-from .sweep import build_sweep_cases, run_sweep
+from .sweep import build_sweep_cases, resolve_sweep_module, run_sweep
 from .schema import (
     DsmcResultModel,
     ElectrodeCharge,
@@ -643,64 +643,6 @@ def pic1d_presets_endpoint() -> dict:
     return get_pic1d_presets()
 
 
-def _pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
-    """/ws/pic1d の done.result (= ResultsBundle.pic1d に格納する想定の形) を組み立てる。
-
-    2D の _build_results_bundle (batch.py) と同じ考え方: done で返す内容を
-    そのまま保存し、そのまま読み込んで復元できる自己完結な dict にする。
-    """
-    profiles = None
-    if sim.fields is not None:
-        f = sim.fields
-        profiles = {
-            "x": sim.xg.tolist(),
-            "phi": f["phi"].tolist(),
-            "e": f["e"].tolist(),
-            "n_e": f["n_e"].tolist(),
-            "n_i": f["n_i"].tolist(),
-            "t_e": f["t_e"].tolist(),
-            "ionization": f["ionization"].tolist(),
-            "avg_steps": f["avg_steps"],
-        }
-    cycle = None
-    if sim.cycle is not None:
-        c = sim.cycle
-        cycle = {
-            "bins": c["bins"],
-            "freq_hz": c["freq_hz"],
-            "phi": c["phi"].tolist(),
-            "n_e": c["n_e"].tolist(),
-            "n_i": c["n_i"].tolist(),
-        }
-    eedf: list[dict] = []
-    if sim.eedf_results is not None:
-        for r in sim.eedf_results:
-            eedf.append(
-                {
-                    "label": r["label"],
-                    "e_centers": r["e_centers"].tolist(),
-                    "f": r["f"].tolist(),
-                    "mean_energy_ev": r["mean_energy_ev"],
-                    "t_eff_ev": r["t_eff_ev"],
-                    "total_weight": r["total_weight"],
-                    "overflow_frac": r["overflow_frac"],
-                    "n_samples": r["n_samples"],
-                }
-            )
-    timing_total = sum(sim.timing.values())
-    return {
-        "history": sim.history,
-        "profiles": profiles,
-        "cycle": cycle,
-        "eedf": eedf,
-        "walls": sim.wall,
-        "fn": sim.fn,  # FN 電界放出サマリ (prompts/95)。両電極とも fn 未設定なら None
-        "elapsed_s": elapsed_s,
-        "timing": {**sim.timing, "total": timing_total},
-        "settings": sim.s.model_dump(),
-    }
-
-
 async def _run_pic1d_session(ws: WebSocket, project_dict: dict) -> None:
     """1回の 1D PIC 実行 (start)。完了/停止後も状態を保持スロットに残す。"""
     global _last_sim1d
@@ -794,7 +736,7 @@ async def _stream_run_1d(ws: WebSocket, sim: Pic1dSimulation) -> None:
             await ws.send_json(frame)
         await run_task
         elapsed_s = time.perf_counter() - t_run0
-        await ws.send_json({"type": "done", "result": _pic1d_result(sim, elapsed_s)})
+        await ws.send_json({"type": "done", "result": build_pic1d_result(sim, elapsed_s)})
     except Exception as exc:
         try:
             await ws.send_json({"type": "error", "detail": str(exc)})
@@ -862,12 +804,16 @@ async def _run_sweep_session(ws: WebSocket, msg: dict) -> None:
     param_path = msg.get("param_path")
     values = msg.get("values")
     parallel = msg.get("parallel", 1)
+    requested_module = msg.get("module")  # "pic"|"pic1d"|None (未指定は param_path から自動判定)
 
     if not isinstance(param_path, str) or param_path == "":
         await ws.send_json({"type": "error", "detail": "param_path を指定してください"})
         return
     if not isinstance(values, list) or len(values) == 0:
         await ws.send_json({"type": "error", "detail": "values (値リスト) を指定してください"})
+        return
+    if requested_module is not None and requested_module not in ("pic", "pic1d"):
+        await ws.send_json({"type": "error", "detail": "module は 'pic' または 'pic1d' を指定してください"})
         return
     try:
         parallel = max(1, int(parallel))
@@ -876,20 +822,27 @@ async def _run_sweep_session(ws: WebSocket, msg: dict) -> None:
         await ws.send_json({"type": "error", "detail": "parallel/values の型が不正です"})
         return
 
+    # module の解決 (prompts/96): UI 確定値を最優先し、未指定時のみ param_path から判定する。
+    # _worker には常にこの確定済みの値だけを渡す (auto のまま渡さない)
+    module = resolve_sweep_module(param_path, requested_module)
+
     # use_dsmc_gas はバッチ実行 (_worker) 同様プロセス間で DSMC 結果を共有できないため、
-    # ケースを1つも起動せず開始時点でエラーにする (batch.py の _worker と同じ制約)
-    pic = project_dict.get("pic") if isinstance(project_dict, dict) else None
-    if isinstance(pic, dict):
-        mcc = pic.get("mcc")
-        if isinstance(mcc, dict) and mcc.get("use_dsmc_gas"):
-            await ws.send_json(
-                {
-                    "type": "error",
-                    "detail": "pic.mcc.use_dsmc_gas はスイープでは未対応です "
-                    "(DSMC結果はプロセス間で共有されないため)",
-                }
-            )
-            return
+    # ケースを1つも起動せず開始時点でエラーにする (batch.py の _worker と同じ制約)。
+    # 1D (pic1d) はこの制約と無関係 (schema の validator が use_dsmc_gas 自体を拒否する) なので
+    # module=="pic" のときのみ検査する
+    if module == "pic":
+        pic = project_dict.get("pic") if isinstance(project_dict, dict) else None
+        if isinstance(pic, dict):
+            mcc = pic.get("mcc")
+            if isinstance(mcc, dict) and mcc.get("use_dsmc_gas"):
+                await ws.send_json(
+                    {
+                        "type": "error",
+                        "detail": "pic.mcc.use_dsmc_gas はスイープでは未対応です "
+                        "(DSMC結果はプロセス間で共有されないため)",
+                    }
+                )
+                return
 
     try:
         cases = build_sweep_cases(project_dict, param_path, values)
@@ -902,7 +855,13 @@ async def _run_sweep_session(ws: WebSocket, msg: dict) -> None:
     tmp_dir = _sweep_tmp_dir  # このセッション実行中に他の start で差し替わらないようローカルへ固定
 
     await ws.send_json(
-        {"type": "started", "n_cases": len(cases), "param_path": param_path, "values": values}
+        {
+            "type": "started",
+            "n_cases": len(cases),
+            "param_path": param_path,
+            "values": values,
+            "module": module,  # 解決済みの値をフロントへ返す (表示用、prompts/96)
+        }
     )
 
     loop = asyncio.get_running_loop()
@@ -915,7 +874,13 @@ async def _run_sweep_session(ws: WebSocket, msg: dict) -> None:
 
     run_task = asyncio.create_task(
         asyncio.to_thread(
-            run_sweep, cases, parallel=parallel, out_dir=tmp_dir, on_event=on_event, should_stop=stop.is_set
+            run_sweep,
+            cases,
+            parallel=parallel,
+            out_dir=tmp_dir,
+            on_event=on_event,
+            should_stop=stop.is_set,
+            module=module,
         )
     )
 
@@ -967,6 +932,8 @@ async def ws_sweep(ws: WebSocket) -> None:
     start で新規スイープを開始する (同時実行は1つのみ、別接続からの start は拒否する)。
     stop は実行中セッション内の watch_stop タスクが処理する (PIC/DSMC と同じ設計)。
     continue には対応しない (スイープは毎回フルの N ケースを実行する)。
+    リクエストに optional な module ("pic"/"pic1d") を指定すると 1D/2D どちらの
+    ソルバーで実行するかを明示できる (未指定は param_path の接頭辞で自動判定、prompts/96)。
     """
     await ws.accept()
     try:

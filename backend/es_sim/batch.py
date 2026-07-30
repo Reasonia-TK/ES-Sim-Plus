@@ -15,6 +15,9 @@ numba/BLAS のスレッドプールもプロセスごとに独立するため、
 注意: 合計スレッド数は「--parallel × 各ケースの pic.threads」になる。CPU コア数を
 大きく超えるとスレッドの奪い合いで逆に遅くなるので、--parallel × threads がコア数
 以下になるように調整すること。
+
+1D PIC/MCC (pic1d.py、prompts/91) にも対応する (prompts/96)。--module で
+"pic"/"pic1d"/"auto" (既定、project.pic の有無で判定) を選べる。
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from typing import Any
 import numpy as np
 
 from .pic import PicSimulation
+from .pic1d import Pic1dSimulation, build_pic1d_result
 from .schema import Project
 
 # frontend/src/types.ts の PicDiag と同じキー順 (toDiagArray が組み立てる行の形に合わせる)。
@@ -166,8 +170,31 @@ def _build_results_bundle(sim: PicSimulation, step_offset: int, elapsed_s: float
     }
 
 
-def _worker(case_path: str, out_path: str, case_name: str, progress_q: "mp.Queue") -> None:
+def _resolve_module(project: Project, module: str) -> str:
+    """module="auto" を project の中身から解決する (バッチ CLI の --module auto、prompts/96)。
+
+    "pic"/"pic1d" 指定はそのまま返す (呼び出し側の明示指定を優先。GUI スイープは
+    常にこちらの経路 — サーバー側で解決済みの値をそのまま渡す)。project に両方
+    (または両方とも無い) 場合は auto では判定できないためエラーにする。
+    """
+    if module != "auto":
+        return module
+    if project.pic is not None:
+        return "pic"
+    if project.pic1d is not None:
+        return "pic1d"
+    raise ValueError("project に pic も pic1d もありません (module=auto では判定できません)")
+
+
+def _worker(
+    case_path: str, out_path: str, case_name: str, progress_q: "mp.Queue", module: str = "pic"
+) -> None:
     """1ケース分の実行本体。spawn 起動のためモジュールレベルの picklable な関数にする。
+
+    module は "pic" (既定、2D FEM-PIC。既存呼び出し・既存挙動とビット不変)・"pic1d"
+    (1D PIC/MCC、prompts/96)・"auto" (project の中身から解決、バッチ CLI の既定) の
+    いずれか。GUI スイープ (sweep.py) は常に解決済みの "pic"/"pic1d" を渡す
+    (対象パラメータパスから判定するため、project の中身だけでは判定できない場合がある)。
 
     成否・所要時間は例外にせず progress_q へ dict で通知する (親プロセスは Process の
     exitcode だけでは失敗理由が分からないため)。
@@ -178,38 +205,70 @@ def _worker(case_path: str, out_path: str, case_name: str, progress_q: "mp.Queue
             raw = json.load(f)
         project_dict = _prepare_project_dict(raw)
         project = Project.model_validate(project_dict)
-        if project.pic is None:
-            raise ValueError("pic 設定がありません (バッチ実行は PIC プロジェクト専用です)")
-        if project.pic.mcc is not None and project.pic.mcc.use_dsmc_gas:
-            # use_dsmc_gas はサーバーが保持する直前の DSMC 結果を参照する機能だが、
-            # バッチはプロセスごとに独立しておりそのような共有状態を持たないため未対応
-            raise ValueError(
-                "pic.mcc.use_dsmc_gas はバッチ実行では未対応です "
-                "(DSMC結果はプロセス間で共有されないため)"
-            )
+        resolved = _resolve_module(project, module)
 
-        sim = PicSimulation(project, gas_field=None)
-        step_offset = sim.step_count  # 新規構築直後なので常に0
-        n_steps = sim.pic.n_steps
+        if resolved == "pic1d":
+            if project.pic1d is None:
+                raise ValueError(
+                    "pic1d 設定がありません (module=pic1d を指定するには project.pic1d が必要です)"
+                )
+            # use_dsmc_gas は 1D では schema の validator が既に拒否しているため
+            # ここでの追加チェックは不要 (Project.model_validate の時点で ValueError になる)
+            sim1d = Pic1dSimulation(project)
+            n_steps_1d = sim1d.s.n_steps
+            last_sent_1d = 0.0
 
-        last_sent = 0.0
+            def on_frame_1d(frame: dict) -> None:
+                nonlocal last_sent_1d
+                now = time.perf_counter()
+                if now - last_sent_1d >= _PROGRESS_INTERVAL_S or frame["step"] >= n_steps_1d:
+                    last_sent_1d = now
+                    progress_q.put(
+                        {"case": case_name, "kind": "progress", "step": frame["step"], "n_steps": n_steps_1d}
+                    )
 
-        def on_frame(frame: dict) -> None:
-            nonlocal last_sent
-            now = time.perf_counter()
-            if now - last_sent >= _PROGRESS_INTERVAL_S or frame["step"] >= n_steps:
-                last_sent = now
-                progress_q.put(
-                    {"case": case_name, "kind": "progress", "step": frame["step"], "n_steps": n_steps}
+            t_run0 = time.perf_counter()
+            sim1d.run_batch(on_frame_1d, lambda: False, False)
+            elapsed_s = time.perf_counter() - t_run0
+            # server.py の _pic1d_result (現 build_pic1d_result) と同一の形にする
+            # (frontend の ResultsBundle.pic1d / Pic1dResult とキー構造を一致させるため)
+            bundle = {"version": 1, "pic1d": build_pic1d_result(sim1d, elapsed_s)}
+        elif resolved == "pic":
+            if project.pic is None:
+                raise ValueError("pic 設定がありません (バッチ実行は PIC プロジェクト専用です)")
+            if project.pic.mcc is not None and project.pic.mcc.use_dsmc_gas:
+                # use_dsmc_gas はサーバーが保持する直前の DSMC 結果を参照する機能だが、
+                # バッチはプロセスごとに独立しておりそのような共有状態を持たないため未対応
+                raise ValueError(
+                    "pic.mcc.use_dsmc_gas はバッチ実行では未対応です "
+                    "(DSMC結果はプロセス間で共有されないため)"
                 )
 
-        # 進捗通知にはcallbackだけを使い、巨大なライブフレーム列は結果へ保存しない。
-        # run_batch の壁時計計測 (prompts/86)。server.py の done.elapsed_s と同じ計測対象
-        # (プロジェクト読込・メッシュ生成等は含まない) にして GUI 実行との比較を可能にする
-        t_run0 = time.perf_counter()
-        sim.run_batch(on_frame, lambda: False, False)
-        elapsed_s = time.perf_counter() - t_run0
-        bundle = _build_results_bundle(sim, step_offset, elapsed_s)
+            sim = PicSimulation(project, gas_field=None)
+            step_offset = sim.step_count  # 新規構築直後なので常に0
+            n_steps = sim.pic.n_steps
+
+            last_sent = 0.0
+
+            def on_frame(frame: dict) -> None:
+                nonlocal last_sent
+                now = time.perf_counter()
+                if now - last_sent >= _PROGRESS_INTERVAL_S or frame["step"] >= n_steps:
+                    last_sent = now
+                    progress_q.put(
+                        {"case": case_name, "kind": "progress", "step": frame["step"], "n_steps": n_steps}
+                    )
+
+            # 進捗通知にはcallbackだけを使い、巨大なライブフレーム列は結果へ保存しない。
+            # run_batch の壁時計計測 (prompts/86)。server.py の done.elapsed_s と同じ計測対象
+            # (プロジェクト読込・メッシュ生成等は含まない) にして GUI 実行との比較を可能にする
+            t_run0 = time.perf_counter()
+            sim.run_batch(on_frame, lambda: False, False)
+            elapsed_s = time.perf_counter() - t_run0
+            bundle = _build_results_bundle(sim, step_offset, elapsed_s)
+        else:
+            raise ValueError(f"不明な module です: {module!r} ('pic'/'pic1d'/'auto' のいずれかを指定してください)")
+
         out_obj = {**project_dict, "results": bundle}
         # cycle の粒子スナップショット等でサイズが大きくなり得るため整形なし (compact) で書く
         # (frontend の saveProjectWithResults と同じ方針)
@@ -241,8 +300,15 @@ def run_files(
     parallel: int = 1,
     out_dir: str | None = None,
     suffix: str = "_results",
+    module: str = "auto",
 ) -> int:
-    """複数ケースを (最大 parallel 並列で) 実行し、サマリを表示する。全成功なら0、1件でも失敗があれば1を返す。"""
+    """複数ケースを (最大 parallel 並列で) 実行し、サマリを表示する。全成功なら0、1件でも失敗があれば1を返す。
+
+    module は全ファイル共通の指定 (CLI の --module、既定 "auto": ファイルごとに
+    project.pic の有無で "pic"/"pic1d" を判定する。1バッチ内に 2D/1D 混在も可)。
+    既存呼び出し (module を指定しない = "auto") でも 2D 専用プロジェクトなら常に
+    "pic" に解決されるため、既存の 2D バッチとビット不変。
+    """
     parallel = max(1, parallel)
     # spawn を明示: fork だと numba/BLAS のスレッドプール等が親プロセスの状態を引きずり、
     # 独立性が壊れる恐れがある (Windows は元々 spawn のみだが、Linux/macOS でも合わせる)
@@ -263,7 +329,7 @@ def run_files(
     t_all0 = time.perf_counter()
 
     def _launch(job: dict[str, str]) -> None:
-        p = ctx.Process(target=_worker, args=(job["in"], job["out"], job["name"], progress_q))
+        p = ctx.Process(target=_worker, args=(job["in"], job["out"], job["name"], progress_q, module))
         p.start()
         running[job["name"]] = p
 
@@ -339,13 +405,20 @@ def build_argparser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--suffix", default="_results", help='出力ファイル名サフィックス (既定 "_results" → case1_results.json)'
     )
+    run_p.add_argument(
+        "--module", choices=["auto", "pic", "pic1d"], default="auto",
+        help="実行するソルバー (既定 auto: ファイルごとに project.pic があれば pic、"
+        "無ければ pic1d を使う。両方無ければエラー。prompts/96)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_argparser().parse_args(argv)
     if args.cmd == "run":
-        return run_files(args.files, parallel=args.parallel, out_dir=args.out, suffix=args.suffix)
+        return run_files(
+            args.files, parallel=args.parallel, out_dir=args.out, suffix=args.suffix, module=args.module
+        )
     return 1  # pragma: no cover - argparse の required=True により通常到達しない
 
 

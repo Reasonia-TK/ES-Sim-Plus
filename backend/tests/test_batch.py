@@ -1,4 +1,4 @@
-"""PIC バッチ実行モードのテスト (prompts/78)。
+"""PIC バッチ実行モードのテスト (prompts/78、1D/--module 対応は prompts/96)。
 
 es_sim.batch.run_files を直接呼び出す (CLI 引数パースは build_argparser 側の薄い
 ラッパーなのでここでは検証しない)。プロセスを spawn するため実行時間がかかるので、
@@ -10,13 +10,14 @@ es_sim.batch.run_files を直接呼び出す (CLI 引数パースは build_argpa
 2. 出力 JSON から results を除いた部分が pydantic の Project として再度読めること
    (loadProject と同じ「project 本体と results を分離する」設計の検証)。
 3. 壊れた JSON を混ぜたとき exit code が非0になり、正常ケースの出力は生成されること。
+4. --module (auto/pic/pic1d、prompts/96): auto での 2D/1D 混在判定、明示指定の検証。
 """
 
 import json
 import time
 from pathlib import Path
 
-from es_sim.batch import run_files
+from es_sim.batch import build_argparser, run_files
 from es_sim.schema import Project
 
 DENSITY = 1.0e14  # [m^-3]
@@ -53,6 +54,25 @@ def _tiny_pic_project(seed: int, n_steps: int = 12) -> dict:
             "dt": 5e-10,
             "n_steps": n_steps,
             "frame_every": 4,
+        },
+    }
+
+
+def _tiny_pic1d_project(n_steps: int = 60) -> dict:
+    """test_sweep.py の縮小 1D ケースと同型 (数秒で完了する、prompts/96)。"""
+    return {
+        "geometry": {"domain": {"polygon": [[0, 0], [1, 0], [1, 1], [0, 1]]}},
+        "mesh": {"size": 0.1},
+        "pic1d": {
+            "gap_m": 0.02,
+            "n_cells": 16,
+            "init_density_m3": 1.0e14,
+            "n_macro": 500,
+            "dt": 1.0e-10,
+            "n_steps": n_steps,
+            "frame_every": 20,
+            "left": {"v_dc": 50.0},
+            "right": {"v_dc": 0.0},
         },
     }
 
@@ -182,3 +202,65 @@ def test_batch_parallel_is_not_slower_than_sequential(tmp_path: Path):
     # 2ケース逐次 (t_sequential_single ≒ 1ケース分×2) と比べ、2並列は明らかに速いはず。
     # プロセス起動オーバーヘッドがあるので緩めに「逐次の1.5倍未満」を基準にする
     assert t_parallel < t_sequential_single * 1.5
+
+
+# ---- 5. --module (auto/pic/pic1d、prompts/96) -----------------------------------
+
+
+def test_build_argparser_module_flag_default_auto_and_choices():
+    parser = build_argparser()
+    args = parser.parse_args(["run", "a.json"])
+    assert args.module == "auto"  # 既定 auto (project の中身から判定)
+
+    args_pic1d = parser.parse_args(["run", "a.json", "--module", "pic1d"])
+    assert args_pic1d.module == "pic1d"
+
+
+def test_batch_run_module_auto_mixed_pic_and_pic1d_in_one_batch(tmp_path: Path):
+    """1バッチ内に 2D (pic) / 1D (pic1d) のケースが混在しても、既定の module=auto で
+    ファイルごとに正しいソルバーへ振り分けられること (既存 2D バッチはビット不変)。
+    """
+    case_pic = _write_case(tmp_path, "case_pic", _tiny_pic_project(seed=10))
+    case_pic1d = _write_case(tmp_path, "case_pic1d", _tiny_pic1d_project())
+
+    rc = run_files([str(case_pic), str(case_pic1d)], parallel=2, out_dir=str(tmp_path))
+    assert rc == 0
+
+    obj_pic = json.loads((tmp_path / "case_pic_results.json").read_text(encoding="utf-8"))
+    assert obj_pic["results"]["pic"] is not None
+    assert "pic1d" not in obj_pic["results"] or obj_pic["results"].get("pic1d") is None
+
+    obj_pic1d = json.loads((tmp_path / "case_pic1d_results.json").read_text(encoding="utf-8"))
+    assert "pic" not in obj_pic1d["results"]
+    result1d = obj_pic1d["results"]["pic1d"]
+    assert result1d is not None
+    # server.py の _pic1d_result (build_pic1d_result) と同じキー構造 (frontend Pic1dResult と一致)
+    assert set(result1d) == {
+        "history", "profiles", "cycle", "eedf", "walls", "fn", "elapsed_s", "timing", "settings",
+    }
+    assert result1d["settings"]["n_steps"] == 60
+    assert result1d["elapsed_s"] > 0
+
+    # results を除いた部分は pydantic Project として再検証できる (1D 側も 2D 側と同じ設計)
+    project_only = {k: v for k, v in obj_pic1d.items() if k != "results"}
+    project = Project.model_validate(project_only)
+    assert project.pic1d is not None
+    assert project.pic is None
+
+
+def test_batch_run_module_explicit_pic1d_on_pic_only_project_errors(tmp_path: Path):
+    """--module pic1d を明示指定したのに project.pic1d が無ければエラーになること
+    (auto に頼らずユーザー指定を尊重した結果、意図しないソルバー不一致を検出できる)。
+    """
+    case = _write_case(tmp_path, "case1", _tiny_pic_project(seed=11))
+    rc = run_files([str(case)], parallel=1, out_dir=str(tmp_path), module="pic1d")
+    assert rc == 1
+    assert not (tmp_path / "case1_results.json").exists()
+
+
+def test_batch_run_module_auto_errors_when_project_has_neither_pic_nor_pic1d(tmp_path: Path):
+    bare = {"geometry": {"domain": {"polygon": [[0, 0], [1, 0], [1, 1], [0, 1]]}}, "mesh": {"size": 0.1}}
+    case = _write_case(tmp_path, "bare", bare)
+    rc = run_files([str(case)], parallel=1, out_dir=str(tmp_path), module="auto")
+    assert rc == 1
+    assert not (tmp_path / "bare_results.json").exists()
