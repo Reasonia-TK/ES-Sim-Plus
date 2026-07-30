@@ -982,6 +982,12 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
         # 毎ステップ計算しない理由: s は時間平均密度 (averaged_fields) にしか意味を
         # 持たない診断量であり、averaged_fields 自体が run_batch 完了時に一度しか
         # 求まらない (途中ステップでは時間平均が定義できない) ため
+        #
+        # sheath["left_s"]/["right_s"] は brinkmann_sheath_edge の戻り値をそのまま
+        # 格納しており、どちらも「各電極からの距離」(= シース厚) である。特に
+        # right_s は from_left=False の鏡映座標 d = gap − x で評価した根なので、
+        # x 座標そのものではない (frontend で x 座標として描く場合は gap − right_s
+        # の変換が必要。prompts/99: Plot1dView のマーカー変換を参照)
         sheath = _sheath_pair(sim.xg, f["n_e"], f["n_i"], sim.gap)
     cycle = None
     if sim.cycle is not None:
@@ -998,6 +1004,9 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
             "n_i": c["n_i"].tolist(),
             "sheath": {
                 "s_left": [p["left_s"] for p in cycle_sheath],
+                # s_right も左右シースエッジのペア (left_s/right_s) と同じく各電極
+                # からの距離であり、right 側は鏡映座標での根 (電極位置そのものへの
+                # x 座標ではない)。frontend 側で x 座標に戻す変換が必要 (prompts/99)
                 "s_right": [p["right_s"] for p in cycle_sheath],
             },
         }

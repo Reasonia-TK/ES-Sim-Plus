@@ -698,7 +698,11 @@ function Pic1dCyclePlayer({
     const sl = sheath.s_left[clampedBin];
     const sr = sheath.s_right[clampedBin];
     if (sl != null) markers.push({ x: mToUnit(sl, lengthUnit), color: SHEATH_MARKER_COLOR, label: "シースエッジ" });
-    if (sr != null) markers.push({ x: mToUnit(sr, lengthUnit), color: SHEATH_MARKER_COLOR, label: "シースエッジ" });
+    // s_right は backend (brinkmann_sheath_edge の from_left=False) が右電極からの
+    // 距離座標 d = gap − x へ鏡映して評価した値であり、「右電極からの距離」として
+    // 返る (prompts/99)。そのまま x 座標として描くと左端近傍に出て左側マーカーと
+    // 重なってしまうため、表示単位の gap (= xDisp の末尾) から引いて x 座標へ戻す
+    if (sr != null) markers.push({ x: xDisp[xDisp.length - 1] - mToUnit(sr, lengthUnit), color: SHEATH_MARKER_COLOR, label: "シースエッジ" });
   }
 
   return (
@@ -749,7 +753,10 @@ function Pic1dCyclePlayer({
 
       {sheath && (
         <>
-          <h3>シースエッジ s(φ) [{lengthUnit}]</h3>
+          {/* s(φ) は左右とも「各電極からの距離」(brinkmann_sheath_edge の戻り値、prompts/99) を
+              プロットしている (x 座標ではない) ため、マーカーと違って gap−s の変換は不要。
+              その旨をタイトルに明記して誤読を防ぐ */}
+          <h3>シースエッジ s(φ) (電極からの距離) [{lengthUnit}]</h3>
           <Pic1dSheathPhaseChart
             bins={cycle.bins}
             sLeft={sheath.s_left.map((v) => (v == null ? null : mToUnit(v, lengthUnit)))}
@@ -785,8 +792,15 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
     if (sheath.left_s != null) {
       sheathMarkers.push({ x: mToUnit(sheath.left_s, lengthUnit), color: SHEATH_MARKER_COLOR, label: "シースエッジ" });
     }
+    // right_s も cycle.sheath.s_right と同様、backend が右電極からの距離として
+    // 返す値 (brinkmann_sheath_edge の鏡映座標、prompts/99)。x 座標に戻すには
+    // gap (= xDisp の末尾、profiles.x の末尾と同じ) から引く必要がある
     if (sheath.right_s != null) {
-      sheathMarkers.push({ x: mToUnit(sheath.right_s, lengthUnit), color: SHEATH_MARKER_COLOR, label: "シースエッジ" });
+      sheathMarkers.push({
+        x: xDisp[xDisp.length - 1] - mToUnit(sheath.right_s, lengthUnit),
+        color: SHEATH_MARKER_COLOR,
+        label: "シースエッジ",
+      });
     }
   }
 
@@ -927,7 +941,9 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
       )}
       {sheath && (
         <div className="kv">
-          <span>シースエッジ: 左 s / 右 s</span>
+          {/* 値そのものは各電極からの距離 (= シース厚) であり従来どおり正しいが、
+              「x 座標」と誤読されないよう電極からの距離である旨をラベルに明記する (prompts/99) */}
+          <span>シースエッジ (電極からの距離): 左 s / 右 s</span>
           <span>
             {sheath.left_s != null ? `${formatNumber(mToUnit(sheath.left_s, lengthUnit))} ${lengthUnit}` : "—"}
             {" / "}
