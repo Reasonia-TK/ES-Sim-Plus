@@ -375,7 +375,7 @@ def test_ws_sweep_pic1d_two_values_full_flow_and_result_endpoint():
     pic1d_result0 = obj0["results"]["pic1d"]
     assert pic1d_result0 is not None
     assert set(pic1d_result0) == {
-        "history", "profiles", "cycle", "eedf", "walls", "fn", "elapsed_s", "timing", "settings",
+        "history", "profiles", "sheath", "cycle", "eedf", "walls", "fn", "elapsed_s", "timing", "settings",
     }
     assert pic1d_result0["settings"]["init_density_m3"] == 1.0e14  # 上書きした値が反映されている
 

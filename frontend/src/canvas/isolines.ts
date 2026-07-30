@@ -9,8 +9,10 @@ import { arrayMin, arrayMax } from "../mathUtils";
  * (呼び出し側は各線分を moveTo/lineTo で個別に描画すればよい)。
  */
 
-// 三角形の1辺上でレベルと交差する点を線形補間で求める
-function edgeCrossing(
+// 三角形の1辺上でレベルと交差する点を線形補間で求める。
+// export しているのは ../sheath.ts (2D シースエッジの準中性度等値線、prompts/98) が
+// marchingTrianglesContour で同じ辺上交差判定を使い回すため (実装を重複させない)
+export function edgeCrossing(
   pA: Point,
   vA: number,
   pB: Point,

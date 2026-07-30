@@ -17,6 +17,9 @@
 10. FN 電界放出 (prompts/95): 放出重みが実際に使われた表面電流密度の積分と一致
     (端数キャリー1個未満の誤差)、逆向き電界からは放出ゼロ、続きから実行がビット一致、
     validator (phi_ev<=0 等)
+11. Brinkmann シースエッジ検出 (prompts/97): 段差プロファイル・線形ランプの解析解
+    (後者は scipy.optimize.brentq による独立な数値根探索でも確認)、右電極の鏡映対称性、
+    プラズマ無しで None、CCP スモーク結果への搭載
 """
 
 import json
@@ -26,11 +29,12 @@ import numpy as np
 import pydantic
 import pytest
 from fastapi.testclient import TestClient
+from scipy import integrate, optimize
 
 import es_sim.server as server
 from es_sim.mcc import KB
 from es_sim.particles import ME, QE
-from es_sim.pic1d import Pic1dSimulation
+from es_sim.pic1d import Pic1dSimulation, brinkmann_sheath_edge, build_pic1d_result
 from es_sim.pic1d_presets import edupic_ar_processes, get_presets
 from es_sim.schema import Geometry, Domain, MeshSettings, Pic1dSettings, Project, VoltageWaveform
 
@@ -601,3 +605,134 @@ def test_fn_validators_raise():
         Pic1dSettings(
             gap_m=0.01, init_density_m3=1e14, left={"fn": {"macro_weight": 0.0}},
         )
+
+
+# ---- 11. Brinkmann シースエッジ検出 (prompts/97) ------------------------------------
+
+
+def test_brinkmann_step_profile_exact_root():
+    """段差プロファイル (n_i=n0 一様、n_e は d を境に 0→n0) → s=d に一致 (rtol 1e-9)。
+
+    d をセル中点に置くのがポイント: 台形則は区間の両端値の平均×幅で積分するため、
+    真の (連続な) 段差がちょうど区間の中点にあるとき、区間全体の真の面積
+    n0×(区間幅/2) と台形則の見積り (0+n0)/2×区間幅 = n0×区間幅/2 が厳密に一致する。
+    このため d が節点上になくても離散実装で厳密に d を再現でき、rtol 1e-9 の
+    厳しい比較ができる (d を区間内の任意点にすると離散化誤差が乗り、雑な近似
+    比較になってしまう)。
+    """
+    n0 = 3.0e15
+    n = 21
+    length = 0.02
+    x = np.linspace(0.0, length, n)
+    k = 7
+    d = 0.5 * (x[k] + x[k + 1])  # セル中点 (節点上には無い)
+    n_i = np.full(n, n0)
+    n_e = np.where(x < d, 0.0, n0)
+
+    s = brinkmann_sheath_edge(x, n_e, n_i, True, length)
+    assert s is not None
+    assert s == pytest.approx(d, rel=1e-9)
+
+
+def test_brinkmann_linear_ramp_matches_hand_derivation():
+    """線形ランプ n_i=n0 (一様)、n_e=n0·x/x_b (0≤x≤x_b) の根を手計算で導出し検証する。
+
+    G(s) = ∫₀ˢ n_e dx − ∫ₛ^{x_b} (n_i−n_e) dx
+         = n0 s²/(2x_b) − [ n0(x_b−s) − n0(x_b²−s²)/(2x_b) ]
+         = n0 s²/(2x_b) + n0(x_b²−s²)/(2x_b) − n0(x_b−s)
+    s² の項に着目すると n0 s²/(2x_b) − n0 s²/(2x_b) = 0 で厳密に打ち消し合うため、
+    G(s) は s の1次式になる:
+         = n0 x_b²/(2x_b) − n0(x_b−s) = n0 x_b/2 − n0 x_b + n0 s = n0 (s − x_b/2)
+    ⇒ 閉形式の根は厳密に s = x_b/2 (プロンプト中の「x_b(√2−1)」という仮の見立ては
+    誤りで、実際には s²項が打ち消し合うため単純な中点になる)。
+
+    上の手計算とは独立に、連続関数を scipy.integrate.quad で数値積分し
+    scipy.optimize.brentq で G(s)=0 を直接根探索した値でも同じ x_b/2 になることを
+    確認し (雑な近似比較にしないための二重チェック)、その上で離散実装 (台形則、
+    かつ x_b をあえて格子点からずらすケース) の結果とも突き合わせる。
+    """
+    n0 = 2.0e15
+    x_b = 0.01
+
+    def n_e_cont(xv: float) -> float:
+        return n0 * xv / x_b
+
+    def n_i_cont(_xv: float) -> float:
+        return n0
+
+    def g_cont(s: float) -> float:
+        int_e, _ = integrate.quad(n_e_cont, 0.0, s)
+        int_net, _ = integrate.quad(lambda xv: n_i_cont(xv) - n_e_cont(xv), s, x_b)
+        return int_e - int_net
+
+    s_numeric = optimize.brentq(g_cont, 1e-9 * x_b, x_b * (1.0 - 1e-9))
+    assert s_numeric == pytest.approx(x_b / 2.0, rel=1e-9)
+
+    # 離散実装: 格子は x_b を超えて延びる (x_b が節点上に無いケースも兼ねて検証)。
+    # n_e = n0·x/x_b という同一の1次式を x_b の外側までそのまま延長する (x_b 以遠は
+    # 積分に使われないので物理的な意味は不要)。これにより x_b をまたぐ区間の
+    # 内挿点でも「同一の直線」上の値になり、折れ線 (別の関数への切り替え) による
+    # 補間誤差が入らない — 台形則・線形補間はどちらも1次式に対して厳密なため
+    n = 33
+    length = 0.023
+    x = np.linspace(0.0, length, n)
+    n_i = np.full(n, n0)
+    n_e = n0 * x / x_b
+
+    s = brinkmann_sheath_edge(x, n_e, n_i, True, x_b)
+    assert s is not None
+    assert s == pytest.approx(x_b / 2.0, rel=1e-9)
+    assert s == pytest.approx(s_numeric, rel=1e-9)
+
+
+def test_brinkmann_right_electrode_mirrors_left():
+    """左のケース (段差プロファイル) を反転した配列を渡すと、右電極判定が同じ s を返す。
+
+    x が [0,L] の等間隔格子のとき x[::-1] の位置は L−x と一致するため、n_e/n_i を
+    そのまま反転した配列は「右電極からの距離で見た元のプロファイル」と同一になる。
+    brinkmann_sheath_edge(..., from_left=False) は内部で距離 d=x[-1]−x に鏡映するため、
+    反転済み配列を渡すとちょうど元の (反転前の) 配列に戻り、左電極判定と同じ根に
+    なるはずである。
+    """
+    n0 = 3.0e15
+    n = 21
+    length = 0.02
+    x = np.linspace(0.0, length, n)
+    k = 7
+    d = 0.5 * (x[k] + x[k + 1])
+    n_i = np.full(n, n0)
+    n_e = np.where(x < d, 0.0, n0)
+
+    s_left = brinkmann_sheath_edge(x, n_e, n_i, True, length)
+    s_right = brinkmann_sheath_edge(x, n_e[::-1].copy(), n_i[::-1].copy(), False, length)
+    assert s_left is not None
+    assert s_right == pytest.approx(s_left, rel=1e-9)
+
+
+def test_brinkmann_no_plasma_returns_none():
+    """n_e=n_i=0 (プラズマ未形成) は左右どちらの判定でも None を返す。"""
+    x = np.linspace(0.0, 0.02, 21)
+    zeros = np.zeros_like(x)
+    assert brinkmann_sheath_edge(x, zeros, zeros, True, 0.01) is None
+    assert brinkmann_sheath_edge(x, zeros, zeros, False, 0.01) is None
+
+
+def test_brinkmann_sheath_edge_in_ccp_result():
+    """CCP スモーク (既存の短い Ar 実行を流用) で result.sheath / cycle.sheath を確認する。"""
+    s = _edupic_smoke_settings(2400)
+    sim = Pic1dSimulation(_project(s))
+    sim.run_batch()
+    result = build_pic1d_result(sim, 0.0)
+
+    assert result["sheath"] is not None
+    half_gap = sim.gap / 2.0
+    left_s = result["sheath"]["left_s"]
+    right_s = result["sheath"]["right_s"]
+    assert left_s is not None and 0.0 < left_s < half_gap
+    assert right_s is not None and 0.0 < right_s < half_gap
+
+    if result["cycle"] is not None:
+        cyc_sheath = result["cycle"]["sheath"]
+        bins = result["cycle"]["bins"]
+        assert len(cyc_sheath["s_left"]) == bins
+        assert len(cyc_sheath["s_right"]) == bins

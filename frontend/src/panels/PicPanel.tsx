@@ -8,6 +8,7 @@ import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
 import { isAxisymmetric, rfComponents } from "../types";
 import { arrayMin, arrayMax } from "../mathUtils";
+import type { SheathLineView } from "../canvas/CadCanvas";
 import type {
   Emitter,
   FnEmission,
@@ -165,6 +166,19 @@ interface Props {
   onUpdateEedfRegion: (index: number, patch: Partial<PicEedfRegionSettings>) => void;
   onDeleteEedfRegion: (index: number) => void;
 
+  // シースエッジ評価ライン一覧 (App 側で Brinkmann 判定済みの s を計算し、キャンバス
+  // オーバーレイと共用のビュー形式で渡す、prompts/98)。ライン自体の配置/削除はキャンバスの
+  // 「シース評価線」ツール経由 (App 側 setSheathLinePoints) で行うため、ここでは
+  // ラベル編集・削除・α (準中性度閾値) の編集のみを扱う
+  sheathLines: SheathLineView[];
+  onUpdateSheathLineLabel: (index: number, label: string) => void;
+  onDeleteSheathLine: (index: number) => void;
+  // 準中性度の閾値 α (0.05〜0.95)。project へは保存しない表示専用 state (App 側で保持)
+  sheathAlpha: number;
+  onSheathAlphaChange: (v: number) => void;
+  // ライン毎の位相分解 s(φ) (全ビン、sheathLines と同順)。cycle が無い/未実行なら []
+  sheathPhaseS: (number | null)[][];
+
   // 表示モード: "all"=従来通り全表示 (既定・後方互換)、"setup"=設定/実行UIのみ、
   // "results"=結果表示のみ (結果ノード用インスペクタページで使う)
   mode?: "all" | "setup" | "results";
@@ -303,6 +317,12 @@ export default function PicPanel({
   onSelectEedfRegion,
   onUpdateEedfRegion,
   onDeleteEedfRegion,
+  sheathLines,
+  onUpdateSheathLineLabel,
+  onDeleteSheathLine,
+  sheathAlpha,
+  onSheathAlphaChange,
+  sheathPhaseS,
   mode = "all",
 }: Props) {
   // mode が "all" のときは従来通り両方表示。それ以外は該当モードのみ表示する
@@ -1036,6 +1056,80 @@ export default function PicPanel({
         </>
       )}
 
+      {/* シースエッジ (準中性度等値線 + 評価ラインの Brinkmann 判定、prompts/98)。
+          ライン自体はキャンバスの「シース評価線」ツールで配置するため、可視化専用の
+          このセクションは結果表示側にのみ出す (collectors/eedf_regions と異なり
+          シミュレーション自体には影響しない設定のため setup 側の複製は不要) */}
+      {show("results") && (
+        <>
+          <h2>PIC: シースエッジ (最大4本)</h2>
+          <p className="hint">
+            キャンバスの「シース評価線」ツールで2点クリックしてラインを追加します
+            (1点目=電極側、2点目=バルク側。Brinkmann 積分の参照点はライン終点)。
+            準中性度 n_e/n_i=α の等値線もキャンバス上に重ね描きします
+            (表示トグル「シースエッジ」)。
+          </p>
+          <div className="field">
+            <span className="label">準中性度 α ({sheathAlpha.toFixed(2)})</span>
+            <input
+              type="range"
+              min={0.05}
+              max={0.95}
+              step={0.05}
+              value={sheathAlpha}
+              onChange={(e) => onSheathAlphaChange(Number(e.target.value))}
+            />
+          </div>
+          <div className="collector-list">
+            {sheathLines.length === 0 && (
+              <div className="muted">(シース評価線なし。キャンバスで配置してください)</div>
+            )}
+            {sheathLines.map((ln, i) => (
+              <div key={i} className="collector-row" style={{ cursor: "default" }}>
+                <input
+                  type="text"
+                  className="collector-label-input"
+                  value={ln.label}
+                  onChange={(e) => onUpdateSheathLineLabel(i, e.target.value)}
+                />
+                <span
+                  className="collector-points"
+                  title={`(${mToUnit(ln.p1[0], lengthUnit).toFixed(2)}, ${mToUnit(ln.p1[1], lengthUnit).toFixed(2)}) - (${mToUnit(ln.p2[0], lengthUnit).toFixed(2)}, ${mToUnit(ln.p2[1], lengthUnit).toFixed(2)}) ${unitLabel}`}
+                >
+                  ({mToUnit(ln.p1[0], lengthUnit).toFixed(1)},{mToUnit(ln.p1[1], lengthUnit).toFixed(1)})–(
+                  {mToUnit(ln.p2[0], lengthUnit).toFixed(1)},{mToUnit(ln.p2[1], lengthUnit).toFixed(1)})
+                </span>
+                <span>
+                  s = {ln.s != null ? `${formatNumber(mToUnit(ln.s, lengthUnit))} ${unitLabel}` : "—"}
+                </span>
+                <button
+                  className="danger collector-delete"
+                  onClick={() => onDeleteSheathLine(i)}
+                  title="このラインを削除"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+          {cycle && sheathLines.length > 0 && (
+            <>
+              <h3>シースエッジ s(φ) [{unitLabel}]</h3>
+              {sheathLines.map((ln, i) => (
+                <div key={i}>
+                  <p className="hint">{ln.label}</p>
+                  <SheathPhaseChart
+                    bins={cycle.bins}
+                    values={(sheathPhaseS[i] ?? []).map((v) => (v == null ? null : mToUnit(v, lengthUnit)))}
+                    color={EEDF_CHART_COLORS[i % EEDF_CHART_COLORS.length]}
+                  />
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+
       {show("setup") && (
       <>
       <div className="actions">
@@ -1377,6 +1471,89 @@ function PicHistoryChart({ history }: { history: PicDiag[] }) {
       </div>
     </>
   );
+}
+
+// 位相 (0..1) vs シースエッジ位置 [表示単位] の折れ線チャート (prompts/98)。
+// canvas/Plot1dView.tsx の Pic1dSheathPhaseChart (1D、左右2系列固定) と同じ流儀だが、
+// こちらはライン数が可変 (最大4本、1本ずつ別チャートで描く) なので単一系列版にする。
+// null ビン (根が求まらなかったビン) は線を切る
+function SheathPhaseChart({ bins, values, color, height = 90 }: {
+  bins: number;
+  values: (number | null)[];
+  color: string;
+  height?: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = el.getBoundingClientRect();
+    el.width = rect.width * dpr;
+    el.height = rect.height * dpr;
+    const ctx = el.getContext("2d")!;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const padL = 52;
+    const padR = 8;
+    const padT = 6;
+    const padB = 16;
+    const plotW = rect.width - padL - padR;
+    const plotH = rect.height - padT - padB;
+
+    ctx.strokeStyle = "#363c48";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    if (bins < 2) return;
+    const finiteVals: number[] = [];
+    for (const v of values) if (v != null) finiteVals.push(v);
+    if (finiteVals.length === 0) return;
+
+    const yMin = arrayMin(finiteVals);
+    const yMax = arrayMax(finiteVals);
+    const yRange = yMax - yMin || 1;
+    const xOf = (frac: number) => padL + frac * plotW;
+    const yOf = (v: number) => padT + plotH - ((v - yMin) / yRange) * plotH;
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < bins; i++) {
+      const v = values[i];
+      if (v == null) {
+        started = false; // null ビン (根が求まらなかったビン) で線を切る
+        continue;
+      }
+      const px = xOf(i / (bins - 1));
+      const py = yOf(v);
+      if (!started) {
+        ctx.moveTo(px, py);
+        started = true;
+      } else {
+        ctx.lineTo(px, py);
+      }
+    }
+    ctx.stroke();
+
+    ctx.font = "9px system-ui, sans-serif";
+    ctx.fillStyle = "#8a919e";
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText("φ=0", padL, padT + plotH + 3);
+    ctx.textAlign = "right";
+    ctx.fillText("φ=1", padL + plotW, padT + plotH + 3);
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(yMax.toPrecision(3), padL - 4, padT);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(yMin.toPrecision(3), padL - 4, padT + plotH);
+  }, [bins, values, color]);
+
+  return <canvas ref={canvasRef} className="pic1d-chart" style={{ height }} />;
 }
 
 interface HistogramChartProps {

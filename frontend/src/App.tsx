@@ -12,8 +12,11 @@ import type {
   PicCollectorView,
   PicEedfRegionView,
   PicFieldView,
+  SheathDensitySource,
+  SheathLineView,
   Tool,
 } from "./canvas/CadCanvas";
+import { sheathLineEdge } from "./sheath";
 import Plot1dView from "./canvas/Plot1dView";
 import ProfilePanel from "./panels/ProfilePanel";
 import RfPhaseMonitor from "./panels/RfPhaseMonitor";
@@ -74,6 +77,7 @@ import type {
   Region,
   RegionType,
   ResultsBundle,
+  SheathLineSettings,
   SolveResult,
   SweepCaseState,
   SweepStartedMsg,
@@ -151,6 +155,9 @@ const MAX_COLLECTORS = 8;
 // EEDF/EEPF 領域追加数の上限 (バックエンドの validator と同じ、prompts/85)
 const MAX_EEDF_REGIONS = 4;
 
+// シースエッジ評価ライン追加数の上限 (バックエンドの validator と同じ、prompts/98)
+const MAX_SHEATH_LINES = 4;
+
 // 長さ表示単位の localStorage キー。プロジェクトファイルには含めない (表示設定のみ)
 const LENGTH_UNIT_STORAGE_KEY = "es-sim-length-unit";
 
@@ -174,6 +181,17 @@ function nextEedfLabel(regions: PicEedfRegionSettings[]): string {
     if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
   }
   return `E${maxN + 1}`;
+}
+
+// 次のシースエッジ評価ラインラベルを生成する ("S1", "S2", ...)。nextCollectorLabel と
+// 同じ流儀 (欠番があっても詰めない。カスタムラベルは無視する)
+function nextSheathLabel(lines: SheathLineSettings[]): string {
+  let maxN = 0;
+  for (const l of lines) {
+    const m = /^S(\d+)$/.exec(l.label ?? "");
+    if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+  }
+  return `S${maxN + 1}`;
 }
 
 // 領域マージ (prompts/63) の union 結果から共線頂点を除去する。
@@ -249,6 +267,7 @@ const TOOL_LABELS: Record<Tool, string> = {
   gasbc: "ガス境界",
   eedfbox: "EEDF領域",
   meshref: "メッシュ細分",
+  sheathline: "シース評価線",
 };
 
 // 実行中の経過時間表示 (ステータスバー、prompts/86) の秒数を m:ss (1時間以上は h:mm:ss) に整形する
@@ -396,6 +415,11 @@ export default function App() {
   const [showGasBoundaries, setShowGasBoundaries] = useState(true);
   const [showEedfRegions, setShowEedfRegions] = useState(true);
   const [showEdgeMeshSizes, setShowEdgeMeshSizes] = useState(true);
+  // シースエッジ (準中性度等値線+評価ラインマーカー) の表示トグル。既定オン (prompts/98)
+  const [showSheathEdge, setShowSheathEdge] = useState(true);
+  // 準中性度の閾値 α (n_e/n_i=α の等値線・評価ラインどちらにも使う)。α スライダの即時
+  // 反映のため project へは保存しない表示専用 state (PicPanel の結果セクションで編集)
+  const [sheathAlpha, setSheathAlpha] = useState(0.5);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1233,6 +1257,36 @@ export default function App() {
     setSelectedEedfIndexRaw((sel) => (sel === index ? null : sel));
   };
 
+  // シースエッジ評価ライン配置ツール (CadCanvas) からの確定通知 (prompts/98)。コレクタと
+  // 同じ2点クリックUX、最大 MAX_SHEATH_LINES 本、達したら追加しない。ラベルは "S1","S2",...
+  // を自動採番。collectors/eedf_regions と同じく pic (project とは独立の state) を
+  // setPic で直接更新するだけなので、commitProject を経由せず解析結果 (picFields/picCycle
+  // 等) を一切破棄しない (可視化専用の設定であることと自然に一致する)
+  const setSheathLinePoints = (p1: Point, p2: Point) => {
+    const lines = pic.sheath_lines ?? [];
+    if (lines.length < MAX_SHEATH_LINES) {
+      const label = nextSheathLabel(lines);
+      setPic({ ...pic, sheath_lines: [...lines, { p1, p2, label }] });
+    }
+    setActiveNode("study-pic");
+  };
+
+  // シースエッジ評価ライン一覧 (PICパネル) の1件のラベルを更新する
+  const updateSheathLineLabel = (index: number, label: string) => {
+    const lines = pic.sheath_lines ?? [];
+    if (index < 0 || index >= lines.length) return;
+    const next = lines.slice();
+    next[index] = { ...next[index], label };
+    setPic({ ...pic, sheath_lines: next });
+  };
+
+  // シースエッジ評価ライン一覧の1件を削除する
+  const deleteSheathLine = (index: number) => {
+    const lines = pic.sheath_lines ?? [];
+    if (index < 0 || index >= lines.length) return;
+    setPic({ ...pic, sheath_lines: lines.filter((_, i) => i !== index) });
+  };
+
   // キャンバス上で領域を選択したら「領域」インスペクタページに切替える (選択解除時は切替しない)
   const selectRegionFromCanvas = (id: string | null) => {
     setSelectedRegionId(id);
@@ -1895,6 +1949,96 @@ export default function App() {
         })()
       : null;
 
+  // シースエッジ用の n_e/n_i 密度ソース (prompts/98)。位相アニメ表示中はその現在ビン、
+  // そうでなければ時間平均フィールドを使う (picCycleView の density 版という位置づけ)。
+  // どちらも無ければ null (等値線・評価ラインの計算そのものをスキップする)
+  const sheathSource: SheathDensitySource | null =
+    cycleViewActive && picCycle && picStarted
+      ? (() => {
+          const bin = Math.min(cycleBinIndex, picCycle.bins - 1);
+          const nE = picCycle.n_e[bin];
+          const nI = picCycle.n_i[bin];
+          if (!nE || !nI) return null; // 旧バックエンド等でこのビンのデータが無い
+          return { mesh: picStarted.mesh, nE, nI };
+        })()
+      : picFields && picStarted
+        ? { mesh: picStarted.mesh, nE: picFields.n_e, nI: picFields.n_i }
+        : null;
+
+  const sheathLinesRaw = pic.sheath_lines ?? [];
+
+  // シースエッジ評価ラインの現在の s (Brinkmann 判定、prompts/98)。ビン別キャッシュ:
+  // nE 配列の参照 (picCycle.n_e[bin] はビンごとに固定の配列オブジェクト) を Map の
+  // キーにすることで、位相アニメで同じビンへ戻ってきたときは sheathLineEdge の三角形
+  // 総当たり探索をやり直さない。sheathSource 自体はビンごとに新規オブジェクトなので
+  // useMemo の依存配列比較では「同じビンへの再訪問」を検出できず、ref で自前管理する
+  const sheathCacheRef = useRef<{
+    mesh: MeshResult | null;
+    lines: SheathLineSettings[];
+    map: Map<number[], (number | null)[]>;
+  }>({ mesh: null, lines: [], map: new Map() });
+  let sheathCurrentS: (number | null)[];
+  if (!sheathSource || sheathLinesRaw.length === 0) {
+    sheathCurrentS = sheathLinesRaw.map(() => null);
+  } else {
+    const cache = sheathCacheRef.current;
+    if (cache.mesh !== sheathSource.mesh || cache.lines !== sheathLinesRaw) {
+      cache.mesh = sheathSource.mesh;
+      cache.lines = sheathLinesRaw;
+      cache.map = new Map();
+    }
+    const cached = cache.map.get(sheathSource.nE);
+    if (cached) {
+      sheathCurrentS = cached;
+    } else {
+      const { mesh, nE, nI } = sheathSource;
+      sheathCurrentS = sheathLinesRaw.map((ln) =>
+        sheathLineEdge(mesh.nodes, mesh.triangles, nE, nI, ln.p1, ln.p2),
+      );
+      cache.map.set(nE, sheathCurrentS);
+    }
+  }
+
+  // シースエッジ評価ラインの位相分解 s(φ) (全ビン、prompts/98)。PicPanel のライン毎
+  // s(φ) 折れ線チャート用。picCycle は実行完了 (done受信) 時に1回だけ新しい参照に
+  // なるため、同じ実行結果を表示している間はビンを切り替えても再計算しない
+  const sheathPhaseCacheRef = useRef<{
+    cycle: PicCycle | null;
+    mesh: MeshResult | null;
+    lines: SheathLineSettings[];
+    result: (number | null)[][];
+  }>({ cycle: null, mesh: null, lines: [], result: [] });
+  let sheathPhaseS: (number | null)[][] = [];
+  if (picCycle && picStarted && sheathLinesRaw.length > 0) {
+    const cache = sheathPhaseCacheRef.current;
+    if (cache.cycle !== picCycle || cache.mesh !== picStarted.mesh || cache.lines !== sheathLinesRaw) {
+      const { nodes, triangles } = picStarted.mesh;
+      cache.result = sheathLinesRaw.map((ln) => {
+        const perBin: (number | null)[] = [];
+        for (let b = 0; b < picCycle.bins; b++) {
+          const nE = picCycle.n_e[b];
+          const nI = picCycle.n_i[b];
+          perBin.push(nE && nI ? sheathLineEdge(nodes, triangles, nE, nI, ln.p1, ln.p2) : null);
+        }
+        return perBin;
+      });
+      cache.cycle = picCycle;
+      cache.mesh = picStarted.mesh;
+      cache.lines = sheathLinesRaw;
+    }
+    sheathPhaseS = cache.result;
+  }
+
+  // 配置済みシースエッジ評価ライン一覧 (CadCanvas への常時オーバーレイ表示 + PicPanel
+  // 結果セクションの一覧に共用、prompts/98)。label が未設定でも表示できるよう "S<n>" の
+  // フォールバックを与える (collectorsList と同じ流儀)
+  const sheathLinesList: SheathLineView[] = sheathLinesRaw.map((l, i) => ({
+    p1: l.p1,
+    p2: l.p2,
+    label: l.label && l.label.trim() !== "" ? l.label : `S${i + 1}`,
+    s: sheathCurrentS[i] ?? null,
+  }));
+
   // ガス流れ (DSMC) 結果フィールド表示用ビュー。ガス関連ノード (スタディ/結果) を選んでいて
   // PIC 実行中でなく、かつ結果がある場合のみ非null (DSMC の n/t/u/p はすべて要素値なので
   // nodeBased=false 固定)。PicFieldView 型をそのまま流用し、CadCanvas 側の変更は不要にする
@@ -2286,6 +2430,12 @@ export default function App() {
                 onSelectEedfRegion={setSelectedEedfIndexRaw}
                 onUpdateEedfRegion={updateEedfRegion}
                 onDeleteEedfRegion={deleteEedfRegion}
+                sheathLines={sheathLinesList}
+                onUpdateSheathLineLabel={updateSheathLineLabel}
+                onDeleteSheathLine={deleteSheathLine}
+                sheathAlpha={sheathAlpha}
+                onSheathAlphaChange={setSheathAlpha}
+                sheathPhaseS={sheathPhaseS}
                 mode="setup"
               />
             </div>
@@ -2348,6 +2498,12 @@ export default function App() {
                 onSelectEedfRegion={setSelectedEedfIndexRaw}
                 onUpdateEedfRegion={updateEedfRegion}
                 onDeleteEedfRegion={deleteEedfRegion}
+                sheathLines={sheathLinesList}
+                onUpdateSheathLineLabel={updateSheathLineLabel}
+                onDeleteSheathLine={deleteSheathLine}
+                sheathAlpha={sheathAlpha}
+                onSheathAlphaChange={setSheathAlpha}
+                sheathPhaseS={sheathPhaseS}
                 mode="results"
               />
             </div>
@@ -2603,6 +2759,23 @@ export default function App() {
             >
               メッシュ細分
             </button>
+            <button
+              className={`tool ${tool === "sheathline" ? "active" : ""}`}
+              onClick={() => setTool("sheathline")}
+              title={
+                sheathLinesList.length >= MAX_SHEATH_LINES
+                  ? `シース評価線は最大${MAX_SHEATH_LINES}本までです`
+                  : "2点クリックでシースエッジ評価ライン (Brinkmann判定) を追加します。" +
+                    "1点目を電極側、2点目をバルク側に取ってください (積分の参照点はライン終点)"
+              }
+            >
+              シース評価線 ({sheathLinesList.length}/{MAX_SHEATH_LINES})
+            </button>
+            {tool === "sheathline" && sheathLinesList.length >= MAX_SHEATH_LINES && (
+              <span className="snap" style={{ color: "#e0b050" }}>
+                シース評価線は最大{MAX_SHEATH_LINES}本に達しました
+              </span>
+            )}
             <div className="sep" />
             <Toggle label="グリッドスナップ" checked={gridSnap} onChange={setGridSnap} />
             <label className="snap">
@@ -2629,6 +2802,7 @@ export default function App() {
             <Toggle label="ガス境界" checked={showGasBoundaries} onChange={setShowGasBoundaries} />
             <Toggle label="EEDF領域" checked={showEedfRegions} onChange={setShowEedfRegions} />
             <Toggle label="メッシュ細分" checked={showEdgeMeshSizes} onChange={setShowEdgeMeshSizes} />
+            <Toggle label="シースエッジ" checked={showSheathEdge} onChange={setShowSheathEdge} />
           </div>
 
           <CadCanvas
@@ -2658,6 +2832,9 @@ export default function App() {
             gasParticles={gasRunning && gasShowParticles ? gasLiveParticles : null}
             gasBoundaries={showGasBoundaries ? gasBoundariesList : []}
             edgeMeshSizes={showEdgeMeshSizes ? edgeMeshSizesList : []}
+            sheathLines={showSheathEdge ? sheathLinesList : []}
+            sheathDensity={showSheathEdge ? sheathSource : null}
+            sheathAlpha={sheathAlpha}
             onSelectRegion={selectRegionFromCanvas}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}
@@ -2670,6 +2847,7 @@ export default function App() {
             onSetGasBoundary={setGasBoundaryPoints}
             onSetEedfRegion={setEedfRegionPoints}
             onSetEdgeMeshSize={setEdgeMeshSizePoints}
+            onSetSheathLine={setSheathLinePoints}
           />
           {showRfMonitorPanel && <RfPhaseMonitor project={project} t={picFrame!.t} />}
           {profileLine && (

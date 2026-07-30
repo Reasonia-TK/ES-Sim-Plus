@@ -12,6 +12,7 @@ import type {
   TraceResult,
 } from "../types";
 import { computeIsolines } from "./isolines";
+import { marchingTrianglesContour } from "../sheath";
 import { LENGTH_UNIT_LABEL, mToUnit } from "../units";
 import type { LengthUnit } from "../units";
 import { arrayMin, arrayMax } from "../mathUtils";
@@ -35,7 +36,8 @@ export type Tool =
   | "collector"
   | "gasbc"
   | "eedfbox"
-  | "meshref";
+  | "meshref"
+  | "sheathline";
 
 // カラーマップの対象: 電位 V か |E|
 export type FieldView = "v" | "e_abs";
@@ -72,6 +74,10 @@ const EEDF_REGION_COLOR = "#c792ea";
 // 辺 (線分) ローカルメッシュサイズの表示色 (水色系)。他のオーバーレイと重ならない固定色にする (prompts/90)
 const EDGE_MESH_COLOR = "#59c2ff";
 
+// シースエッジ (準中性度等値線 + 評価ライン) の表示色 (prompts/98)。仕様上ガス境界と
+// 同じ橙系 #ffb454 を使う (両者を同時に多用する場面は少なく、混同の実害は小さいと判断)
+const SHEATH_EDGE_COLOR = "#ffb454";
+
 // 配置済み EEDF/EEPF 集計領域 (軸平行矩形) の表示用ビュー (最大4個、常時オーバーレイ表示対象)
 export interface PicEedfRegionView {
   label: string;
@@ -91,6 +97,24 @@ export interface EdgeMeshSizeView {
   label: string;
   p1: Point;
   p2: Point;
+}
+
+// 配置済みシースエッジ評価ラインの描画用ビュー (prompts/98)。s (Brinkmann 積分で求めた
+// p1 からの距離 [m]) は App 側で時間平均/位相アニメの現在ビンに応じて計算済みのものを渡す。
+// 根が求まらない (退化ケース) 場合は null (マーカーを描かない)
+export interface SheathLineView {
+  label: string;
+  p1: Point;
+  p2: Point;
+  s: number | null;
+}
+
+// シースエッジ準中性度等値線 (n_e/n_i=α) の元データ (prompts/98)。時間平均 (picFields) か
+// 位相アニメ中の現在ビン (picCycle) かは App 側で解決してから渡す (mesh は picStarted.mesh)
+export interface SheathDensitySource {
+  mesh: MeshResult;
+  nE: number[];
+  nI: number[];
 }
 
 // PIC結果フィールド表示 (done後の「結果表示」セレクトでライブ以外を選んだ場合の描画データ)。
@@ -161,6 +185,13 @@ interface Props {
   gasBoundaries?: GasBoundaryView[];
   // 配置済み辺ローカルメッシュサイズ (常時オーバーレイ表示の対象、prompts/90)
   edgeMeshSizes?: EdgeMeshSizeView[];
+  // 配置済みシースエッジ評価ライン (常時オーバーレイ表示の対象、最大4本、prompts/98)。
+  // 表示トグルOFF時は App 側で [] を渡す (他のオーバーレイ一覧と同じ流儀)
+  sheathLines?: SheathLineView[];
+  // 準中性度等値線 (n_e/n_i=α) の元データ。表示トグルOFF/結果なしなら null
+  sheathDensity?: SheathDensitySource | null;
+  // 準中性度の閾値 α (0.05〜0.95、PicPanel のスライダで指定。project へは保存しない)
+  sheathAlpha?: number;
   onSelectRegion: (id: string | null) => void;
   onDeleteRegion: (id: string) => void;
   onAddRegion: (geom: Point[] | CircleShape) => void;
@@ -177,6 +208,8 @@ interface Props {
   onSetEedfRegion: (p1: Point, p2: Point) => void;
   // 辺ローカルメッシュサイズ配置ツールの確定通知 (コレクタ・ガス境界と同じ2点クリックUX、prompts/90)
   onSetEdgeMeshSize: (p1: Point, p2: Point) => void;
+  // シースエッジ評価ライン配置ツールの確定通知 (コレクタと同じ2点クリックUX、prompts/98)
+  onSetSheathLine: (p1: Point, p2: Point) => void;
 }
 
 interface View {
@@ -403,6 +436,9 @@ export default function CadCanvas({
   gasParticles,
   gasBoundaries = [],
   edgeMeshSizes = [],
+  sheathLines = [],
+  sheathDensity = null,
+  sheathAlpha = 0.5,
   onSelectRegion,
   onDeleteRegion,
   onAddRegion,
@@ -415,6 +451,7 @@ export default function CadCanvas({
   onSetGasBoundary,
   onSetEedfRegion,
   onSetEdgeMeshSize,
+  onSetSheathLine,
 }: Props) {
   // 軸対称 (r-z) モードかどうか。x=z(軸方向)・y=r(径方向) と読み替えて表示する
   const isRz = project.coord === "rz";
@@ -435,6 +472,16 @@ export default function CadCanvas({
   const [cursor, setCursor] = useState<Point | null>(null);
   const [drawPts, setDrawPts] = useState<Point[]>([]);
   const dragRef = useRef<{ x: number; y: number } | null>(null);
+  // シースエッジ準中性度等値線のビン別キャッシュ (prompts/98)。位相アニメ再生中は
+  // nE 配列の参照 (picCycle.n_e[bin] 等、ビンごとに固定の配列オブジェクト) をキーにした
+  // Map で結果を保持することで、再生でビンを行ったり来たりしても (単発キャッシュと違い)
+  // 一度計算したビンは marching triangles をやり直さない。mesh か α が変わったら
+  // (等値線の形そのものが変わるため) キャッシュ全体を作り直す
+  const sheathContourCacheRef = useRef<{
+    mesh: MeshResult | null;
+    alpha: number;
+    map: Map<number[], Array<[Point, Point]>>;
+  }>({ mesh: null, alpha: NaN, map: new Map() });
   const didDragRef = useRef(false);
   const spaceRef = useRef(false);
   // mousedown 時の画面座標 (クリック/ドラッグの判定に使う)
@@ -685,6 +732,46 @@ export default function CadCanvas({
       drawSpecies(picFrame.particles.ion, "#ff9d4d");       // イオン: オレンジ
 
       drawColorbar(rawMin, rawMax, picFrame.unit);
+    }
+
+    // シースエッジ準中性度等値線 (n_e/n_i = α、prompts/98)。picFieldView/picFrame の
+    // どちらで色分け表示していても (電位 φ を見ていても) 独立に重ね描きする。
+    // sheathDensity が null (結果なし・表示トグルOFF) なら何もしない
+    if (sheathDensity) {
+      const { mesh, nE, nI } = sheathDensity;
+      const cache = sheathContourCacheRef.current;
+      if (cache.mesh !== mesh || cache.alpha !== sheathAlpha) {
+        // mesh か α が変わったら等値線の形そのものが変わるので、ビン別キャッシュを作り直す
+        cache.mesh = mesh;
+        cache.alpha = sheathAlpha;
+        cache.map = new Map();
+      }
+      let segments = cache.map.get(nE);
+      if (!segments) {
+        const maxNi = arrayMax(nI);
+        // ほぼ真空 (n_i が最大値の2%未満) の三角形は n_e/n_i の比が数値的に暴れて
+        // 偽の等値線が出やすいため、3頂点すべてがこの閾値未満の三角形は除外する
+        // (0.02 は経験的な閾値。シース内部は n_i がバルクよりずっと薄いがゼロではない
+        // ため、これより緩いとシース内部の等値線まで消えてしまう)
+        const niThreshold = 0.02 * maxNi;
+        const ratio = new Array<number>(nI.length);
+        for (let i = 0; i < nI.length; i++) {
+          ratio[i] = nI[i] > 0 ? nE[i] / nI[i] : nE[i] > 0 ? Infinity : 0;
+        }
+        const mask = ([a, b, c]: [number, number, number]) =>
+          !(nI[a] < niThreshold && nI[b] < niThreshold && nI[c] < niThreshold);
+        segments = marchingTrianglesContour(mesh.nodes, mesh.triangles, ratio, sheathAlpha, mask);
+        cache.map.set(nE, segments);
+      }
+      ctx.strokeStyle = SHEATH_EDGE_COLOR;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      for (const [p0, p1] of segments) {
+        ctx.moveTo(sx(p0[0]), sy(p0[1]));
+        ctx.lineTo(sx(p1[0]), sy(p1[1]));
+      }
+      ctx.stroke();
     }
 
     // Mesh ボタンで生成したメッシュのワイヤーフレーム (解析結果がない状態でも見えるようにする)。
@@ -1113,6 +1200,21 @@ export default function CadCanvas({
       ctx.beginPath();
       ctx.arc(sx(x0m), sy(y0m), 3, 0, Math.PI * 2);
       ctx.fill();
+    } else if (tool === "sheathline" && drawPts.length === 1 && cursor) {
+      // シースエッジ評価ライン配置ツールのラバーバンド (橙系破線、コレクタと同じ2点クリックUX)
+      const [x0s, y0s] = drawPts[0];
+      const [x1s, y1s] = cursor;
+      ctx.strokeStyle = SHEATH_EDGE_COLOR;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(sx(x0s), sy(y0s));
+      ctx.lineTo(sx(x1s), sy(y1s));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = SHEATH_EDGE_COLOR;
+      ctx.beginPath();
+      ctx.arc(sx(x0s), sy(y0s), 3, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     // 確定済みプロファイル線のオーバーレイ (白破線 + 端点マーカー)
@@ -1263,6 +1365,54 @@ export default function CadCanvas({
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
       ctx.fillText(m.label, sx(mx), sy(my) - 6);
+    });
+
+    // 配置済みシースエッジ評価ラインのオーバーレイ (常時表示、橙系破線+ラベル、prompts/98)。
+    // s (App 側で Brinkmann 判定済み、時間平均 or 位相アニメの現在ビン) が求まっていれば
+    // ライン上の該当位置に白丸+橙枠のマーカーを重ねる (根なし・退化ケースは s=null でマーカーなし)
+    sheathLines.forEach((ln) => {
+      const [xl0, yl0] = ln.p1;
+      const [xl1, yl1] = ln.p2;
+      ctx.strokeStyle = SHEATH_EDGE_COLOR;
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(sx(xl0), sy(yl0));
+      ctx.lineTo(sx(xl1), sy(yl1));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = SHEATH_EDGE_COLOR;
+      ctx.strokeStyle = "#1b1e24";
+      ctx.lineWidth = 1;
+      for (const [px, py] of [ln.p1, ln.p2]) {
+        ctx.beginPath();
+        ctx.arc(sx(px), sy(py), 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      const mx = (xl0 + xl1) / 2;
+      const my = (yl0 + yl1) / 2;
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.fillStyle = SHEATH_EDGE_COLOR;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(ln.label, sx(mx), sy(my) - 6);
+
+      if (ln.s != null) {
+        const length = Math.hypot(xl1 - xl0, yl1 - yl0);
+        if (length > 0) {
+          const t = ln.s / length;
+          const smx = xl0 + (xl1 - xl0) * t;
+          const smy = yl0 + (yl1 - yl0) * t;
+          ctx.beginPath();
+          ctx.fillStyle = "#ffffff";
+          ctx.strokeStyle = SHEATH_EDGE_COLOR;
+          ctx.lineWidth = 2;
+          ctx.arc(sx(smx), sy(smy), 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
     });
 
     // 粒子軌道 (trace 結果): シアン系半透明ポリライン。粒子数が多くても見えるように線幅は細く保つ
@@ -1481,6 +1631,9 @@ export default function CadCanvas({
     gasParticles,
     gasBoundaries,
     edgeMeshSizes,
+    sheathLines,
+    sheathDensity,
+    sheathAlpha,
     isRz,
     isRzX0,
     isAxisym,
@@ -1786,6 +1939,14 @@ export default function CadCanvas({
             } else {
               const p1 = drawPts[0];
               onSetEdgeMeshSize(p1, pt);
+              setDrawPts([]);
+            }
+          } else if (tool === "sheathline") {
+            if (drawPts.length === 0) {
+              setDrawPts([pt]);
+            } else {
+              const p1 = drawPts[0];
+              onSetSheathLine(p1, pt);
               setDrawPts([]);
             }
           }

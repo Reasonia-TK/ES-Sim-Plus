@@ -109,6 +109,14 @@ const PIC1D_TIMING_LABELS: Record<string, string> = {
   other: "時間平均・EEDF集計・診断",
 };
 
+// シースエッジ (prompts/97、Brinkmann 基準) の表示色。プロファイル/位相アニメの
+// 縦破線マーカーは左右とも同じ色 (#ffb454系、既存 CadCanvas の GAS_BOUNDARY_COLOR と
+// 同系統の目立つオレンジ)。s(φ) チャートは左右を区別する必要があるため、同系統内で
+// 明度の異なる2色を使う (左=通常のオレンジ、右=より赤寄りの濃いオレンジ)
+const SHEATH_MARKER_COLOR = "#ffb454";
+const SHEATH_LEFT_COLOR = "#ffb454";
+const SHEATH_RIGHT_COLOR = "#ff7a45";
+
 // ---- canvas 直描きの汎用ラインチャート ----------------------------------------
 
 interface LineSeries {
@@ -117,19 +125,29 @@ interface LineSeries {
   color: string;
 }
 
+// 縦の破線マーカー (シースエッジ等、特定の x 位置を示す補助線)
+interface ChartMarker {
+  x: number;
+  color: string;
+  label: string;
+}
+
 // 複数系列を重ね描きする折れ線チャート (PicPanel の PicHistoryChart/EedfChart と同じ
 // canvas 直描きスタイル: 枠 #363c48、9px 目盛りフォント、padL≈50)。
-// x/系列値はどちらも「表示用に変換済み」の生の number[] を渡す想定 (単位変換は呼び出し側で行う)
+// x/系列値はどちらも「表示用に変換済み」の生の number[] を渡す想定 (単位変換は呼び出し側で行う)。
+// markers は x 位置に縦の破線を重ね描きする (シースエッジ表示、prompts/97)
 function Pic1dLineChart({
   x,
   series,
   height = 110,
   logY = false,
+  markers = [],
 }: {
   x: number[];
   series: LineSeries[];
   height?: number;
   logY?: boolean;
+  markers?: ChartMarker[];
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -212,6 +230,21 @@ function Pic1dLineChart({
       ctx.stroke();
     }
 
+    // シースエッジ等の縦破線マーカー (系列の後、軸ラベルより前に描く。範囲外は無視)
+    for (const m of markers) {
+      if (!(m.x >= xMin && m.x <= xMax)) continue;
+      const px = xOf(m.x);
+      ctx.save();
+      ctx.strokeStyle = m.color;
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(px, padT);
+      ctx.lineTo(px, padT + plotH);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     ctx.font = "9px system-ui, sans-serif";
     ctx.fillStyle = "#8a919e";
     ctx.textBaseline = "top";
@@ -225,7 +258,10 @@ function Pic1dLineChart({
     ctx.fillText(yMax.toPrecision(3), padL - 4, padT);
     ctx.textBaseline = "bottom";
     ctx.fillText((useLog ? yMinPos : yMinRaw).toPrecision(3), padL - 4, padT + plotH);
-  }, [x, series, logY]);
+  }, [x, series, logY, markers]);
+
+  // マーカーの凡例は色+ラベルの組で重複除去する (左右とも同色・同ラベルなら1個にまとめる)
+  const legendMarkers = Array.from(new Map(markers.map((m) => [`${m.color}|${m.label}`, m])).values());
 
   return (
     <>
@@ -235,6 +271,12 @@ function Pic1dLineChart({
           <span key={i}>
             <span className="swatch" style={{ background: s.color }} />
             {s.label}
+          </span>
+        ))}
+        {legendMarkers.map((m, i) => (
+          <span key={`marker-${i}`}>
+            <span className="swatch" style={{ background: m.color }} />
+            {m.label}
           </span>
         ))}
       </div>
@@ -510,16 +552,125 @@ function pic1dFieldSeries(field: Pic1dField, profiles: NonNullable<Pic1dResult["
   }
 }
 
+// 位相 (0..1) vs シースエッジ位置 [表示単位] の折れ線チャート (prompts/97)。
+// Pic1dLineChart は「x配列と各系列の点数が一致し、非正値のみで線を切る」設計だが、
+// こちらは null ビン (根が求まらなかったビン) で線を切る必要があるため専用実装にする。
+// x 軸は常に位相フラクション 0..1 固定 (実際の位置チャートのような単位変換は不要)
+function Pic1dSheathPhaseChart({
+  bins,
+  sLeft,
+  sRight,
+  height = 90,
+}: {
+  bins: number;
+  sLeft: (number | null)[];
+  sRight: (number | null)[];
+  height?: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = el.getBoundingClientRect();
+    el.width = rect.width * dpr;
+    el.height = rect.height * dpr;
+    const ctx = el.getContext("2d")!;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const padL = 52;
+    const padR = 8;
+    const padT = 6;
+    const padB = 16;
+    const plotW = rect.width - padL - padR;
+    const plotH = rect.height - padT - padB;
+
+    ctx.strokeStyle = "#363c48";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    if (bins < 2) return;
+    const finiteVals: number[] = [];
+    for (const v of sLeft) if (v != null) finiteVals.push(v);
+    for (const v of sRight) if (v != null) finiteVals.push(v);
+    if (finiteVals.length === 0) return;
+
+    const yMin = arrayMin(finiteVals);
+    const yMax = arrayMax(finiteVals);
+    const yRange = yMax - yMin || 1;
+    const xOf = (frac: number) => padL + frac * plotW;
+    const yOf = (v: number) => padT + plotH - ((v - yMin) / yRange) * plotH;
+
+    const draw = (values: (number | null)[], color: string) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < bins; i++) {
+        const v = values[i];
+        if (v == null) {
+          started = false; // null ビン (根が求まらなかったビン) で線を切る
+          continue;
+        }
+        const px = xOf(i / (bins - 1));
+        const py = yOf(v);
+        if (!started) {
+          ctx.moveTo(px, py);
+          started = true;
+        } else {
+          ctx.lineTo(px, py);
+        }
+      }
+      ctx.stroke();
+    };
+    draw(sLeft, SHEATH_LEFT_COLOR);
+    draw(sRight, SHEATH_RIGHT_COLOR);
+
+    ctx.font = "9px system-ui, sans-serif";
+    ctx.fillStyle = "#8a919e";
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText("φ=0", padL, padT + plotH + 3);
+    ctx.textAlign = "right";
+    ctx.fillText("φ=1", padL + plotW, padT + plotH + 3);
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(yMax.toPrecision(3), padL - 4, padT);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(yMin.toPrecision(3), padL - 4, padT + plotH);
+  }, [bins, sLeft, sRight]);
+
+  return (
+    <>
+      <canvas ref={canvasRef} className="pic1d-chart" style={{ height }} />
+      <div className="pic-chart-legend">
+        <span>
+          <span className="swatch" style={{ background: SHEATH_LEFT_COLOR }} />
+          左 s
+        </span>
+        <span>
+          <span className="swatch" style={{ background: SHEATH_RIGHT_COLOR }} />
+          右 s
+        </span>
+      </div>
+    </>
+  );
+}
+
 function Pic1dCyclePlayer({
   lengthUnit,
   cycle,
   gapM,
   nCells,
+  showSheath,
 }: {
   lengthUnit: LengthUnit;
   cycle: Pic1dCycle;
   gapM: number;
   nCells: number;
+  showSheath: boolean;
 }) {
   const [field, setField] = useState<"phi" | "n_e" | "n_i">("phi");
   const [playing, setPlaying] = useState(false);
@@ -539,6 +690,17 @@ function Pic1dCyclePlayer({
   const clampedBin = Math.min(bin, cycle.bins - 1);
   const colorOf = (f: "phi" | "n_e" | "n_i") => (f === "phi" ? "#59c2ff" : f === "n_e" ? "#4da3ff" : "#ffb84d");
 
+  // 現在の位相ビンのシースエッジ位置を縦破線マーカーとして重ねる (prompts/97)。
+  // null (そのビンでは根が求まらなかった) なら該当側のマーカーを出さない
+  const sheath = cycle.sheath;
+  const markers: ChartMarker[] = [];
+  if (showSheath && sheath) {
+    const sl = sheath.s_left[clampedBin];
+    const sr = sheath.s_right[clampedBin];
+    if (sl != null) markers.push({ x: mToUnit(sl, lengthUnit), color: SHEATH_MARKER_COLOR, label: "シースエッジ" });
+    if (sr != null) markers.push({ x: mToUnit(sr, lengthUnit), color: SHEATH_MARKER_COLOR, label: "シースエッジ" });
+  }
+
   return (
     <>
       <h3>位相分解アニメーション</h3>
@@ -553,6 +715,7 @@ function Pic1dCyclePlayer({
       <Pic1dLineChart
         x={xDisp}
         series={[{ label: field, values: cycle[field][clampedBin] ?? [], color: colorOf(field) }]}
+        markers={markers}
       />
       <div className="actions">
         <button className="secondary" onClick={() => setPlaying(!playing)}>
@@ -583,6 +746,17 @@ function Pic1dCyclePlayer({
       <p className="hint">
         周波数 {formatNumber(cycle.freq_hz)} Hz (周期 {(1e9 / cycle.freq_hz).toFixed(2)} ns)
       </p>
+
+      {sheath && (
+        <>
+          <h3>シースエッジ s(φ) [{lengthUnit}]</h3>
+          <Pic1dSheathPhaseChart
+            bins={cycle.bins}
+            sLeft={sheath.s_left.map((v) => (v == null ? null : mToUnit(v, lengthUnit)))}
+            sRight={sheath.s_right.map((v) => (v == null ? null : mToUnit(v, lengthUnit)))}
+          />
+        </>
+      )}
     </>
   );
 }
@@ -592,6 +766,7 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
   const [logScale, setLogScale] = useState(false);
   const [eedfMode, setEedfMode] = useState<"eedf" | "eepf">("eepf");
   const [eedfLogScale, setEedfLogScale] = useState(true);
+  const [showSheath, setShowSheath] = useState(true); // シースエッジ表示 (prompts/97)。既定オン
 
   const profiles = result.profiles;
   const xDisp = deriveXGrid(result.settings.gap_m, result.settings.n_cells).map((v) => mToUnit(v, lengthUnit));
@@ -602,6 +777,18 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
 
   const centerX = result.settings.gap_m / 2;
   const centerNi = profiles ? interpLinear(profiles.x, profiles.n_i, centerX) : null;
+
+  // 時間平均プロファイルのシースエッジ縦マーカー (密度・電位いずれの表示でも出す)
+  const sheath = result.sheath ?? null;
+  const sheathMarkers: ChartMarker[] = [];
+  if (showSheath && sheath) {
+    if (sheath.left_s != null) {
+      sheathMarkers.push({ x: mToUnit(sheath.left_s, lengthUnit), color: SHEATH_MARKER_COLOR, label: "シースエッジ" });
+    }
+    if (sheath.right_s != null) {
+      sheathMarkers.push({ x: mToUnit(sheath.right_s, lengthUnit), color: SHEATH_MARKER_COLOR, label: "シースエッジ" });
+    }
+  }
 
   // EEDF/EEPF CSV書き出し (PicPanel の downloadEedfCsv と同じ書式。1D 独自のプレフィックスにする)
   const downloadEedfCsv = (index: number) => {
@@ -630,6 +817,7 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
         </select>
       </div>
       {isPic1dDensityField(field) && <Toggle label="対数スケール" checked={logScale} onChange={setLogScale} />}
+      {sheath && <Toggle label="シースエッジ" checked={showSheath} onChange={setShowSheath} />}
 
       {profiles ? (
         <Pic1dLineChart
@@ -637,6 +825,7 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
           series={pic1dFieldSeries(field, profiles)}
           height={160}
           logY={isPic1dDensityField(field) && logScale}
+          markers={sheathMarkers}
         />
       ) : (
         <p className="hint">時間平均プロファイルがありません (ステップ数0で停止した可能性があります)。</p>
@@ -649,6 +838,7 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
           cycle={result.cycle}
           gapM={result.settings.gap_m}
           nCells={result.settings.n_cells}
+          showSheath={showSheath}
         />
       )}
 
@@ -733,6 +923,16 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
         <div className="kv">
           <span>中央密度 n_i(gap/2)</span>
           <span>{centerNi.toExponential(3)} m^-3</span>
+        </div>
+      )}
+      {sheath && (
+        <div className="kv">
+          <span>シースエッジ: 左 s / 右 s</span>
+          <span>
+            {sheath.left_s != null ? `${formatNumber(mToUnit(sheath.left_s, lengthUnit))} ${lengthUnit}` : "—"}
+            {" / "}
+            {sheath.right_s != null ? `${formatNumber(mToUnit(sheath.right_s, lengthUnit))} ${lengthUnit}` : "—"}
+          </span>
         </div>
       )}
 

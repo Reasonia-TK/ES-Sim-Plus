@@ -331,6 +331,13 @@ export interface Pic1dProfiles {
   avg_steps: number;    // 実際に平均したステップ数
 }
 
+// 位相分解版シースエッジ (result.cycle.sheath、prompts/97 の Brinkmann 基準)。
+// 各配列は bins 長。根が求まらなかったビットは null (NaN ではなく JSON の null)
+export interface Pic1dCycleSheath {
+  s_left: (number | null)[];
+  s_right: (number | null)[];
+}
+
 // RF 1周期の位相分解データ (done メッセージの result.cycle、アニメーション用)
 export interface Pic1dCycle {
   bins: number;
@@ -338,6 +345,14 @@ export interface Pic1dCycle {
   phi: number[][];  // bins × 節点
   n_e: number[][];
   n_i: number[][];
+  sheath?: Pic1dCycleSheath;
+}
+
+// 時間平均プロファイルのシースエッジ (result.sheath、prompts/97 の Brinkmann 基準)。
+// 左右いずれか (または両方) の根が求まらなければ個別に null になる
+export interface Pic1dSheath {
+  left_s: number | null;
+  right_s: number | null;
 }
 
 // 指定区間の EEDF/EEPF 集計結果 (done メッセージの result.eedf、prompts/85 の1D版)
@@ -377,6 +392,7 @@ export interface Pic1dFnResult {
 export interface Pic1dResult {
   history: Pic1dHistoryDict;
   profiles: Pic1dProfiles | null;
+  sheath?: Pic1dSheath | null; // シースエッジ (prompts/97)。sheath キー無しの旧保存ファイルとも互換 (optional)
   cycle: Pic1dCycle | null;
   eedf: Pic1dEedfResult[];
   walls: Pic1dWalls;
@@ -550,6 +566,17 @@ export interface PicSettings {
   threads?: number;
   // 粒子マージ (高速化③、prompts/77)。null/undefined = 無効 (既定)
   merge?: PicMerge | null;
+  // シースエッジ評価ライン (最大4本、prompts/98)。可視化専用 (Brinkmann 判定・
+  // 準中性度等値線の計算はすべてフロント側で行う。sheath.ts 参照)。省略/undefined = 無効
+  sheath_lines?: SheathLineSettings[];
+}
+
+// シースエッジ評価ラインの設定 (prompts/98)。p1=電極側、p2=バルク側
+// (Brinkmann 積分の参照点 x_b = p2 の位置)
+export interface SheathLineSettings {
+  p1: [number, number];
+  p2: [number, number];
+  label?: string; // 表示用ラベル (空なら "S1" 等をフロントが振る)
 }
 
 // IEDF/IADF コレクタ線分の設定

@@ -389,6 +389,19 @@ class Collector(BaseModel):
     label: str = ""  # 表示用ラベル (空ならフロントが "C1" 等を振る、prompts/36)
 
 
+class SheathLine(BaseModel):
+    """2D シースエッジの Brinkmann 評価ライン (prompts/98)。可視化専用で計算はフロント側
+    (時間平均・位相分解の n_e/n_i 節点配列は既に done メッセージでフロントに届いており、
+    α スライダの即時反映や保存済み結果ファイルでの再計算にもフロント計算が適切なため)。
+
+    p1 = 電極側、p2 = バルク側 (Brinkmann 積分の参照点 x_b = p2 の位置)。
+    """
+
+    p1: Point
+    p2: Point
+    label: str = ""  # 空ならフロントが S1, S2... を振る
+
+
 class EedfRegion(BaseModel):
     """EEDF/EEPF の集計領域 (軸平行矩形、prompts/85)。キャンバスの2点クリックで指定する。
 
@@ -473,6 +486,15 @@ class PicSettings(BaseModel):
     # 粒子マージ (高速化③、prompts/77)。null = 無効 (既定。マージ関連の処理・乱数消費が
     # 一切発生せず、従来経路と完全一致する)
     merge: PicMerge | None = None
+    # シースエッジ評価ライン (prompts/98、最大4本)。可視化専用で backend は永続化のみ
+    # (Brinkmann 判定・準中性度等値線の計算はフロント側、SheathLine 参照)
+    sheath_lines: list[SheathLine] = []
+
+    @model_validator(mode="after")
+    def _check_sheath_lines(self) -> "PicSettings":
+        if len(self.sheath_lines) > 4:
+            raise ValueError("sheath_lines は最大 4 個までです")
+        return self
 
 
 # ---- 1D PIC/MCC (1d3v、prompts/91) --------------------------------------------

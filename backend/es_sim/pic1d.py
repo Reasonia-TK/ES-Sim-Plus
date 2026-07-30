@@ -858,6 +858,98 @@ class Pic1dSimulation:
                 st["e_max"] = None
 
 
+# ---- Brinkmann 基準のシースエッジ検出 (prompts/97) --------------------------------------
+
+
+def brinkmann_sheath_edge(
+    x: np.ndarray, n_e: np.ndarray, n_i: np.ndarray, from_left: bool, x_b: float
+) -> float | None:
+    """Brinkmann (J. Appl. Phys. 102, 093303, 2007) の step model によるシースエッジ位置。
+
+    実際の滑らかな n_e(x) プロファイルを「電極 (x=0) から s までは 0、s から
+    バルク参照点 x_b までは n_i に等しい」段差分布に置き換えても、その区間の
+    総電子量が変わらない位置 s を
+
+        G(s) = ∫₀ˢ n_e dx − ∫ₛ^{x_b} (n_i − n_e) dx = 0
+
+    の根として定義する。dG/ds = n_e(s) − (−(n_i(s) − n_e(s))) = n_i(s) ≥ 0 なので
+    G は単調非減少 → 根は高々一意 (存在すれば)。さらに代数的に
+
+        G(s) = ∫₀ˢ n_e dx + ∫₀ˢ (n_i−n_e) dx − ∫₀^{x_b} (n_i−n_e) dx
+             = ∫₀ˢ n_i dx − C   (C := ∫₀^{x_b} (n_i−n_e) dx は s に依らない定数)
+
+    と書き直せる。∫₀ˢ n_i dx は n_i≥0 の台形則累積和であり s について昇順 (非減少)
+    になることが保証されるため、符号変化点は np.searchsorted による二分探索一発で
+    見つかる (粒子ループはもちろん、素朴な線形走査すら不要な理由)。
+
+    x は電極間の全節点 (x[0]=0 が電極、x[-1]=gap であることを仮定)。from_left=False
+    (右電極) は距離 d = x[-1] − x へ鏡映し (右電極からの距離で評価すれば左電極と
+    全く同じ式・同じ実装を再利用できるため)、鏡映後は左電極と同一のロジックに
+    素通しする。
+
+    x_b はバルク側の参照点で、呼び出し側は gap/2 を渡す想定 (Brinkmann の原論文が
+    対象とする対称二重シース CCP で、両シースを対称に扱える最も自然な取り方であり、
+    n_i(gap/2) がバルクの代表イオン密度に最も近いと期待できるため)。x_b が格子点
+    上に無くても、その点だけ n_e/n_i を線形補間して台形則の最終区間に挿入することで
+    正確に積分する。
+
+    戻り値: 根が求まれば s [m] (電極からの距離)。全域で G が同符号
+    (n_e がほぼ 0 のままでプラズマが未形成、または逆に電極直上からすでに正 =
+    全域が既に "遮蔽側" とみなせる退化ケース) の場合は根が存在しないため None。
+    """
+    x = np.asarray(x, dtype=np.float64)
+    n_e = np.asarray(n_e, dtype=np.float64)
+    n_i = np.asarray(n_i, dtype=np.float64)
+    if not from_left:
+        d = x[-1] - x
+        order = np.argsort(d)
+        x = d[order]
+        n_e = n_e[order]
+        n_i = n_i[order]
+
+    if x_b <= x[0]:
+        return None  # 退化ケース (バルク参照点が電極位置以下で積分区間が無い)
+
+    if x_b < x[-1]:
+        # x_b が格子点上に無くても正確に積分できるよう、線形補間した値を台形則の
+        # 最終部分区間として挿入する (テスト2の線形ランプはこの経路を通る)
+        cut = int(np.searchsorted(x, x_b))
+        ne_b = float(np.interp(x_b, x, n_e))
+        ni_b = float(np.interp(x_b, x, n_i))
+        x = np.concatenate([x[:cut], [x_b]])
+        n_e = np.concatenate([n_e[:cut], [ne_b]])
+        n_i = np.concatenate([n_i[:cut], [ni_b]])
+
+    dx = np.diff(x)
+    cum_e = np.concatenate([[0.0], np.cumsum(0.5 * (n_e[1:] + n_e[:-1]) * dx)])
+    cum_i = np.concatenate([[0.0], np.cumsum(0.5 * (n_i[1:] + n_i[:-1]) * dx)])
+    c = cum_i[-1] - cum_e[-1]  # ∫0^xb (n_i-n_e) dx (s に依らない定数)
+    g = cum_i - c  # G(s) を各節点で評価した配列 (n_i>=0 なら昇順)
+
+    # g[0] = -C = cum_e[-1]-cum_i[-1]、g[-1] = cum_e[-1] (常に n_e>=0 なので 0 以上)。
+    # g[-1]<=0 になるのは実質 n_e が全域ゼロ (プラズマ未形成) の退化ケースのみ
+    if g[0] > 0.0 or g[-1] <= 0.0:
+        return None
+
+    idx = int(np.searchsorted(g, 0.0))
+    if idx <= 0:
+        return float(x[0])
+    g_lo, g_hi = g[idx - 1], g[idx]
+    if g_hi == g_lo:
+        return float(x[idx])
+    frac = -g_lo / (g_hi - g_lo)
+    return float(x[idx - 1] + frac * (x[idx] - x[idx - 1]))
+
+
+def _sheath_pair(x: np.ndarray, n_e: np.ndarray, n_i: np.ndarray, gap: float) -> dict:
+    """左右シースエッジのペアを組み立てる (x_b=gap/2、brinkmann_sheath_edge 参照)。"""
+    x_b = gap / 2.0
+    return {
+        "left_s": brinkmann_sheath_edge(x, n_e, n_i, True, x_b),
+        "right_s": brinkmann_sheath_edge(x, n_e, n_i, False, x_b),
+    }
+
+
 # ---- 結果バンドル組み立て (server.py / batch.py 共通、prompts/96) -----------------------
 #
 # /ws/pic1d の done.result と batch/sweep の ResultsBundle.pic1d は同じ形にする必要がある
@@ -873,6 +965,7 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
     そのまま保存し、そのまま読み込んで復元できる自己完結な dict にする。
     """
     profiles = None
+    sheath = None
     if sim.fields is not None:
         f = sim.fields
         profiles = {
@@ -885,15 +978,28 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
             "ionization": f["ionization"].tolist(),
             "avg_steps": f["avg_steps"],
         }
+        # シースエッジ検出 (prompts/97) は done result 組み立て時に一度だけ行う。
+        # 毎ステップ計算しない理由: s は時間平均密度 (averaged_fields) にしか意味を
+        # 持たない診断量であり、averaged_fields 自体が run_batch 完了時に一度しか
+        # 求まらない (途中ステップでは時間平均が定義できない) ため
+        sheath = _sheath_pair(sim.xg, f["n_e"], f["n_i"], sim.gap)
     cycle = None
     if sim.cycle is not None:
         c = sim.cycle
+        # 位相分解版も同じ理由で cycle_data() 完了後 (= ここ) にまとめて計算する。
+        # bins は phase_bins (典型 20〜50) 程度の小さな固定数であり、粒子ループでは
+        # ないため計算コストは無視できる
+        cycle_sheath = [_sheath_pair(sim.xg, c["n_e"][i], c["n_i"][i], sim.gap) for i in range(c["bins"])]
         cycle = {
             "bins": c["bins"],
             "freq_hz": c["freq_hz"],
             "phi": c["phi"].tolist(),
             "n_e": c["n_e"].tolist(),
             "n_i": c["n_i"].tolist(),
+            "sheath": {
+                "s_left": [p["left_s"] for p in cycle_sheath],
+                "s_right": [p["right_s"] for p in cycle_sheath],
+            },
         }
     eedf: list[dict] = []
     if sim.eedf_results is not None:
@@ -914,6 +1020,7 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
     return {
         "history": sim.history,
         "profiles": profiles,
+        "sheath": sheath,  # シースエッジ検出 (prompts/97、Brinkmann 基準)。profiles と対
         "cycle": cycle,
         "eedf": eedf,
         "walls": sim.wall,
