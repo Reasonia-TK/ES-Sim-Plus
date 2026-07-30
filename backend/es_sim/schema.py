@@ -482,6 +482,24 @@ class PicSettings(BaseModel):
 # (Turner et al. 2013 / eduPIC) 向けの軽量モジュール。
 
 
+class Fn1dEmission(BaseModel):
+    """1D 電極の FN (Fowler–Nordheim) 電界放出 (prompts/95)。
+
+    2D の FnEmission (fn.py の Murphy-Good式 + Forbes近似 fn_current_density を
+    そのまま流用) と同じ物理・パラメータだが、1D は電極がちょうど1点 (左端 x=0
+    または右端 x=gap) なので放出面/位置サンプリングという概念がなく、
+    edges/regions/n (放出マクロ粒子総数)/seed (位置乱数シード) は不要 —
+    毎ステップの放出数は決定論的な端数キャリーのみで決まる (乱数不使用)。
+    """
+
+    phi_ev: float = Field(4.5, gt=0, description="仕事関数 φ [eV]")
+    beta: float = Field(1.0, gt=0, description="電界増倍係数 β")
+    init_energy_ev: float = Field(0.1, ge=0, description="放出電子の初期エネルギー [eV]")
+    # マクロ重み [m^-2] (= 実電子数/マクロ粒子。1D のマクロ重みの単位そのものなので
+    # 2D のような面積換算は不要)。None なら初期プラズマの w0 を使う
+    macro_weight: float | None = Field(None, gt=0)
+
+
 class Pic1dElectrode(BaseModel):
     """1D の左右電極。電圧は v_dc + Σ RF sin + Σ waveforms(t) の合成 (prompts/93)。
     2D の Region/BoundaryCondition の voltage_rf と同じ規約 (単一/リスト/None、
@@ -497,6 +515,8 @@ class Pic1dElectrode(BaseModel):
     voltage_rf: VoltageRF | list[VoltageRF] | None = None
     waveforms: list[VoltageWaveform] = []
     see_gamma: float = Field(0.0, ge=0.0, le=1.0, description="イオン入射あたりのSEE収率 γ")
+    # FN 電界放出 (prompts/95)。None なら放出なし (従来動作と完全ビット不変)
+    fn: Fn1dEmission | None = None
 
 
 class Eedf1dRegion(BaseModel):

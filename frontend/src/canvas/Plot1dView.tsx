@@ -717,6 +717,18 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
         <span>壁吸収 右電極 (電子/イオン)</span>
         <span>{result.walls.right.electron} / {result.walls.right.ion}</span>
       </div>
+      {result.fn?.left && (
+        <div className="kv">
+          <span>FN放出 左 J_avg</span>
+          <span>{formatNumber(result.fn.left.j_avg)} A/m^2</span>
+        </div>
+      )}
+      {result.fn?.right && (
+        <div className="kv">
+          <span>FN放出 右 J_avg</span>
+          <span>{formatNumber(result.fn.right.j_avg)} A/m^2</span>
+        </div>
+      )}
       {centerNi != null && (
         <div className="kv">
           <span>中央密度 n_i(gap/2)</span>

@@ -694,6 +694,7 @@ def _pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
         "cycle": cycle,
         "eedf": eedf,
         "walls": sim.wall,
+        "fn": sim.fn,  # FN 電界放出サマリ (prompts/95)。両電極とも fn 未設定なら None
         "elapsed_s": elapsed_s,
         "timing": {**sim.timing, "total": timing_total},
         "settings": sim.s.model_dump(),

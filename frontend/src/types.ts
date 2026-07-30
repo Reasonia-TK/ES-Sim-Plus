@@ -220,6 +220,16 @@ export interface McSettings {
 // 2D FEM-PIC (PicSettings/PicSimulation 系) とは完全に独立な専用ソルバー。geometry/mesh とは
 // 無関係な一様格子 (n_cells 個のセル) 上で動く。
 
+// 1D 電極の FN (Fowler–Nordheim) 電界放出 (prompts/95)。2D の FnEmission と同じ物理
+// (fn.py の fn_current_density) だが、1D は電極がちょうど1点なので放出面/位置サンプリング
+// (edges/regions/n/seed) が無い。null/undefined = 放出なし (従来動作と完全ビット不変)
+export interface Fn1dEmission {
+  phi_ev: number;               // 仕事関数 φ [eV] 既定 4.5
+  beta: number;                 // 電界増倍係数 β 既定 1.0
+  init_energy_ev: number;       // 放出電子の初期エネルギー [eV] 既定 0.1
+  macro_weight?: number | null; // マクロ重み [m^-2]。null なら初期プラズマと同じ (w0)
+}
+
 // 1D の左右電極。電圧は v_dc + Σ RF sin + Σ waveforms(t) の合成 (prompts/93)。
 // voltage_rf は 2D の Region/BoundaryCondition と同じ VoltageRf 型を流用する
 // (単一成分/複数成分リスト/未指定)。CSV 波形 (waveforms) とは併記可
@@ -228,6 +238,7 @@ export interface Pic1dElectrode {
   voltage_rf?: VoltageRf | VoltageRf[]; // RF重畳 (未指定なら直流+CSV波形のみ。複数成分でデュアル周波数)
   waveforms?: VoltageWaveform[];
   see_gamma?: number; // イオン入射あたりのSEE収率 γ
+  fn?: Fn1dEmission | null; // FN 電界放出 (prompts/95)。null/undefined なら放出なし
 }
 
 // 1D の EEDF/EEPF 集計区間 [x1, x2] (2D の EedfRegion の1D版、prompts/85 と同じ規約)
@@ -304,6 +315,8 @@ export interface Pic1dHistoryDict {
   ion_events: number[];
   see_events: number[];
   coll_e: number[];
+  fn_left: number[];   // FN 放出重み [m^-2] (このステップ分。prompts/95。fn 未設定なら常に0)
+  fn_right: number[];
 }
 
 // 完了時の時間平均プロファイル一式 (done メッセージの result.profiles)
@@ -349,6 +362,17 @@ export interface Pic1dWalls {
   right: Pic1dWallCounts;
 }
 
+// FN 電界放出の done サマリ (prompts/95)。fn 未設定の電極側は null
+export interface Pic1dFnSide {
+  j_avg: number;   // 時間平均プロファイルと同じ平均区間の平均放出電流密度 [A/m^2]
+  total_w: number; // 放出開始からの累積放出重み [m^-2] (continue をまたいでも維持)
+}
+
+export interface Pic1dFnResult {
+  left: Pic1dFnSide | null;
+  right: Pic1dFnSide | null;
+}
+
 // /ws/pic1d の done.result (= ResultsBundle.pic1d に保存する形そのもの)
 export interface Pic1dResult {
   history: Pic1dHistoryDict;
@@ -356,6 +380,7 @@ export interface Pic1dResult {
   cycle: Pic1dCycle | null;
   eedf: Pic1dEedfResult[];
   walls: Pic1dWalls;
+  fn: Pic1dFnResult | null; // 両電極とも fn 未設定なら null (prompts/95)
   elapsed_s: number;
   timing: Record<string, number>; // deposit/field/push/mcc/other (+ total、server 側で加算)
   settings: Pic1dSettings; // 実行に使った設定 (グリッド再構成に使える)

@@ -9,6 +9,7 @@ import { ProcessList } from "./PicPanel";
 import { rfComponents } from "../types";
 import type {
   Eedf1dRegion,
+  Fn1dEmission,
   McSettings,
   Pic1dElectrode,
   Pic1dFrameMsg,
@@ -56,6 +57,10 @@ const DEFAULT_MCC: McSettings = {
 };
 
 const DEFAULT_ELECTRODE: Pic1dElectrode = { v_dc: 0.0, waveforms: [], see_gamma: 0.0 };
+
+// FN電界放出 (prompts/95) の既定値。有効チェックを一度オフにしても直前の値を復元できるよう
+// ElectrodeEditor 側で defaultsRef に保持する (MCC/RF重畳と同じ流儀)
+const DEFAULT_FN_1D: Fn1dEmission = { phi_ev: 4.5, beta: 1.0, init_energy_ev: 0.1, macro_weight: null };
 
 type Pic1dPreset = { label: string; description: string; pic1d: Pic1dSettings; note?: string };
 
@@ -106,6 +111,19 @@ function ElectrodeEditor({
 }) {
   const waveforms = electrode.waveforms ?? [];
   const rfList = rfComponents(electrode.voltage_rf);
+  const fn = electrode.fn;
+
+  // FN電界放出 (prompts/95)。有効チェックを一度オフにしても、再度オンにしたときに
+  // 直前の値を復元できるよう保持する (MCC/RF重畳と同じ流儀)
+  const fnDefaultsRef = useRef<Fn1dEmission>(fn ?? DEFAULT_FN_1D);
+  useEffect(() => {
+    if (fn) fnDefaultsRef.current = fn;
+  }, [fn]);
+  const updateFn = (patch: Partial<Fn1dEmission>) => {
+    if (!fn) return;
+    onChange({ ...electrode, fn: { ...fn, ...patch } });
+  };
+
   return (
     <>
       <p className="hint" style={{ fontWeight: 600, color: "#d8dce4" }}>{title}</p>
@@ -133,6 +151,39 @@ function ElectrodeEditor({
           components={rfList}
           onChange={(next) => onChange({ ...electrode, voltage_rf: next })}
         />
+      )}
+      {/* FN電界放出 (Fowler–Nordheim、prompts/95)。2D の FnPanel/ParticlePanel の FN 設定
+          (仕事関数・電界増倍係数・初期エネルギー・マクロ重み) と同じ物理・文言を、放出面選択
+          (電極がちょうど1点のため不要) を省いて表示する */}
+      <Toggle
+        label="FN電界放出"
+        checked={!!fn}
+        onChange={(v) => onChange({ ...electrode, fn: v ? fnDefaultsRef.current : null })}
+      />
+      {fn && (
+        <>
+          <p className="hint">表面電界が電子を引き出す向きのときのみ放出します (Murphy-Good FN 式)</p>
+          <div className="field">
+            <span className="label">仕事関数 φ [eV]</span>
+            <CommitNumberInput value={fn.phi_ev} onCommit={(v) => updateFn({ phi_ev: v })} />
+          </div>
+          <div className="field">
+            <span className="label">電界増倍係数 β</span>
+            <CommitNumberInput value={fn.beta} onCommit={(v) => updateFn({ beta: v })} />
+          </div>
+          <div className="field">
+            <span className="label">初期エネルギー [eV]</span>
+            <CommitNumberInput value={fn.init_energy_ev} onCommit={(v) => updateFn({ init_energy_ev: v })} />
+          </div>
+          <div className="field">
+            <span className="label">マクロ重み [m^-2] (空欄=初期プラズマと同じ)</span>
+            <CommitNullableNumberInput
+              value={fn.macro_weight ?? null}
+              placeholder="初期プラズマと同じ"
+              onCommit={(v) => updateFn({ macro_weight: v })}
+            />
+          </div>
+        </>
       )}
       {/* Pic1dElectrode.waveforms は複数波形の和 (Σ waveforms(t)) を表す配列のため、
           既存の WaveformImportEditor (1個編集用、FieldPanel の共有部品) を配列の各要素と

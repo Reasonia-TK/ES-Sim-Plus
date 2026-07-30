@@ -50,6 +50,7 @@ import numpy as np
 from scipy.linalg import solve_banded
 
 from .fem import EPS0
+from .fn import fn_current_density
 from .mcc import MccModel
 from .particles import ME, MP, QE
 from .pic import _eval_rf, _eval_waveform
@@ -63,6 +64,7 @@ _HISTORY_KEYS = (
     "step", "t", "n_e", "n_i", "w_e", "w_i",
     "wall_left_e", "wall_left_i", "wall_right_e", "wall_right_i",
     "ion_events", "see_events", "coll_e",
+    "fn_left", "fn_right",
 )
 
 
@@ -181,6 +183,34 @@ class Pic1dSimulation:
         mcc_seed = s.mcc.seed if s.mcc is not None else 0
         self._see_rng = np.random.default_rng(mcc_seed + 12345)
         self._see_speed = math.sqrt(2.0 * s.see_energy_ev * QE / ME)
+
+        # ---- FN 電界放出 (prompts/95、Fowler–Nordheim) -------------------------
+        # 左右電極それぞれ fn=None なら放出処理を一切行わない (従来動作と完全ビット
+        # 不変)。1D は電極がちょうど1点 (左端 x=0 / 右端 x=gap) なので、2D PIC
+        # (pic.py の FnSurface) のような放出面のセグメント分割・位置サンプリング
+        # 乱数が不要 — 毎ステップの放出数は端数の決定論的キャリーのみで決まる。
+        # また 1D のマクロ重みは [m^-2] (単位断面積あたりの実粒子数) 単位そのもの
+        # なので、2D のような奥行き/周方向の面積換算は不要 (J·dt/e がそのまま
+        # 放出実電子数密度になる)。
+        self.fn_left = s.left.fn
+        self.fn_right = s.right.fn
+        # 壁からわずかに内側へ置くオフセット (2D の fn.py FnSurface.delta と同じ考え方:
+        # 局所メッシュ規模の 1e-3 倍。1D の局所規模はセル幅 dx に対応する)
+        self._fn_delta = 1e-3 * self.dx
+        self._fn_w: dict[str, float] = {}
+        self._fn_speed: dict[str, float] = {}
+        self._fn_frac: dict[str, float] = {"left": 0.0, "right": 0.0}  # 端数の決定論的キャリー
+        self.fn_events: dict[str, int] = {"left": 0, "right": 0}  # 累計放出マクロ数 (continue でも維持)
+        self.fn_total_w: dict[str, float] = {"left": 0.0, "right": 0.0}  # 累計放出重み [m^-2]
+        self._fn_accum_j: dict[str, float] = {"left": 0.0, "right": 0.0}  # 平均区間内の J 積算
+        self.fn: dict | None = None  # done result 用サマリ (run_batch で確定)
+        for side, fn in (("left", self.fn_left), ("right", self.fn_right)):
+            if fn is None:
+                continue
+            self._fn_w[side] = float(fn.macro_weight) if fn.macro_weight is not None else w0
+            self._fn_speed[side] = (
+                math.sqrt(2.0 * fn.init_energy_ev * QE / ME) if fn.init_energy_ev > 0.0 else 0.0
+            )
 
         # ---- MCC (既存 MccModel を流用、prompts/19) ---------------------------
         # 1D は非一様背景ガス場 (DSMC 連成) 未対応なので gas_field は常に None
@@ -311,6 +341,75 @@ class Pic1dSimulation:
         ex[-1] = -(phi[-1] - phi[-2]) / self.dx
         return ex
 
+    # ---- FN 電界放出 (prompts/95、Fowler–Nordheim) -----------------------------
+
+    def _emit_fn(self, ex: np.ndarray) -> tuple[float, float, float, float]:
+        """このステップの表面電界から左右電極の FN 電界放出を行う。
+
+        表面電界 F は現ステップの場 ex (端点値) から「電子を真空側へ引き出す
+        向き」成分のみを取る (fn.py と同じ規約: 左電極は真空側 n̂=+x なので
+        F=-ex[0]、右電極は n̂=-x なので F=+ex[-1]。負なら放出ゼロ)。
+        放出実電子数 J·dt/e をマクロ重み w で割った端数を電極ごとに決定論的に
+        持ち越す (pic.py の _emit_fn と同じ「時間平均で正確に J を再現する」
+        考え方。1D は電極が1点なので位置サンプリングの乱数自体が不要)。
+        新粒子は放出法線方向のみの速さ (init_energy_ev 相当) を持ち、
+        リープフロッグの半ステップ補正は行わない (1D の SEE/電離生成粒子と同じ
+        流儀に揃える。pic.py の FN/注入は半ステップ補正を行うが、1D 側の新粒子
+        追加処理はいずれも半ステップ補正をしていないため、それに合わせる)。
+
+        戻り値: (j_left, j_right, w_left, w_right) — このステップの放出電流密度
+        [A/m^2] と放出重み [m^-2] (fn 未設定の側は常に 0.0)。
+        """
+        el = self.species["electron"]
+        j = {"left": 0.0, "right": 0.0}
+        w_emit = {"left": 0.0, "right": 0.0}
+        for side, fn, e_end, sign, wall_x in (
+            ("left", self.fn_left, float(ex[0]), 1.0, 0.0),
+            ("right", self.fn_right, float(ex[-1]), -1.0, self.gap),
+        ):
+            if fn is None:
+                continue
+            f_surf = max(0.0, -sign * e_end)
+            j[side] = float(fn_current_density(np.array([f_surf]), fn.phi_ev, fn.beta)[0])
+            w_fn = self._fn_w[side]
+            quota = j[side] * self.dt / (QE * w_fn) + self._fn_frac[side]
+            n_emit = int(math.floor(quota))
+            self._fn_frac[side] = quota - n_emit
+            if n_emit <= 0:
+                continue
+            x_new = np.full(n_emit, wall_x + sign * self._fn_delta)
+            v_new = np.zeros((n_emit, 3))
+            v_new[:, 0] = sign * self._fn_speed[side]
+            el.x = np.concatenate([el.x, x_new])
+            el.v = np.concatenate([el.v, v_new])
+            el.w = np.concatenate([el.w, np.full(n_emit, w_fn)])
+            w_emit[side] = n_emit * w_fn
+            self.fn_events[side] += n_emit
+            self.fn_total_w[side] += w_emit[side]
+        return j["left"], j["right"], w_emit["left"], w_emit["right"]
+
+    def fn_summary(self) -> dict | None:
+        """done result 用の FN 放出サマリ (prompts/95)。
+
+        j_avg は時間平均プロファイル (averaged_fields) と同じ平均区間
+        (_accum_start 以降) の平均放出電流密度 [A/m^2]、total_w は放出開始からの
+        累積放出重み [m^-2] (continue をまたいでも維持される)。左右いずれの
+        電極も fn 未設定なら None。
+        """
+        if self.fn_left is None and self.fn_right is None:
+            return None
+        cnt = self._accum_count if self._accum_count > 0 else 1
+        out: dict[str, dict | None] = {}
+        for side, fn in (("left", self.fn_left), ("right", self.fn_right)):
+            if fn is None:
+                out[side] = None
+                continue
+            out[side] = {
+                "j_avg": self._fn_accum_j[side] / cnt,
+                "total_w": self.fn_total_w[side],
+            }
+        return out
+
     # ---- 位相分解 -----------------------------------------------------------
 
     def _phase_bin(self, t: float) -> int:
@@ -418,6 +517,7 @@ class Pic1dSimulation:
         self._cycle_ni = None
         self._cycle_ion = None
         self._cycle_count = None
+        self._fn_accum_j = {"left": 0.0, "right": 0.0}  # j_avg (fn_summary) の平均区間積算
 
     def _ensure_accumulators(self) -> None:
         if self._accum_phi is not None:
@@ -596,12 +696,24 @@ class Pic1dSimulation:
         t4 = time.perf_counter()
         self.timing["mcc"] += t4 - t3
 
+        # 7. FN 電界放出 (prompts/95)。表面電界はこのステップの場 (ex) を使う。
+        # 両電極とも fn=None ならこの呼び出し自体を省略する (従来経路とビット不変)
+        if self.fn_left is not None or self.fn_right is not None:
+            fn_j_left, fn_j_right, fn_w_left, fn_w_right = self._emit_fn(ex)
+        else:
+            fn_j_left = fn_j_right = fn_w_left = fn_w_right = 0.0
+
         self.t = t + dt
         self.step_count += 1
 
         if accumulating:
             self._accumulate_fields(phi, ex, t)
             self._accumulate_eedf()
+            # j_avg (fn_summary) 用: 時間平均プロファイルと同じ平均区間で積算する
+            if self.fn_left is not None:
+                self._fn_accum_j["left"] += fn_j_left
+            if self.fn_right is not None:
+                self._fn_accum_j["right"] += fn_j_right
 
         h = self.history
         h["step"].append(self.step_count)
@@ -617,6 +729,8 @@ class Pic1dSimulation:
         h["ion_events"].append(self.ion_events)
         h["see_events"].append(self.see_events)
         h["coll_e"].append(self.coll_e)
+        h["fn_left"].append(fn_w_left)
+        h["fn_right"].append(fn_w_right)
 
         t5 = time.perf_counter()
         self.timing["other"] += t5 - t4
@@ -684,6 +798,7 @@ class Pic1dSimulation:
         self.fields = self.averaged_fields()
         self.cycle = self.cycle_data()
         self.eedf_results = self._eedf_data()
+        self.fn = self.fn_summary()
         return self.history, frames
 
     def prepare_continue(
@@ -696,8 +811,10 @@ class Pic1dSimulation:
         """完了/停止後の状態から追加実行の準備をする (2D の prepare_continue と同じ設計)。
 
         維持するもの: 粒子状態 (x, v, w)・時刻 t・step_count・乱数 Generator
-        (SEE/MCC)・累計カウンタ (wall/ion_events/see_events/coll_e)。
-        リセットするもの: 診断 history (追加区間分のみ)・timing・平均/位相/EEDF の
+        (SEE/MCC)・累計カウンタ (wall/ion_events/see_events/coll_e/fn_events/fn_total_w
+        および端数キャリー _fn_frac — FN のキャリーも維持しないと continue で放出数が
+        ずれ、run(n+m) とビット一致しなくなる)。
+        リセットするもの: 診断 history (追加区間分のみ)・timing・平均/位相/EEDF/FN j_avg の
         アキュムレータ。これにより run(n) → continue(m) は run(n+m) とビット一致する
         (平均区間の開始ステップは常に「現在の step_count + 今回の n_steps - avg + 1」
         という絶対ステップ番号で決まるため、区間の切り方によらず同じ結果になる)。
@@ -730,6 +847,8 @@ class Pic1dSimulation:
         self.fields = None
         self.cycle = None
         self.eedf_results = None
+        self.fn = None
+        self._fn_accum_j = {"left": 0.0, "right": 0.0}
         for st in self._eedf_st:
             st["sum_w"] = 0.0
             st["sum_we"] = 0.0

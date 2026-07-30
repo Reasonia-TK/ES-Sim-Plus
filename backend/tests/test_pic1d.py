@@ -14,6 +14,9 @@
    Turner Case 1 の数値 (gap, pressure, freq) が仕様通り
 9. RF 重畳 (voltage_rf、prompts/93): 電極電圧が2D と同じ式どおり、CSV サンプル波形
    との等価性、cycle 基本周波数の優先順位 (voltage_rf 優先)、デュアル周波数の疎通
+10. FN 電界放出 (prompts/95): 放出重みが実際に使われた表面電流密度の積分と一致
+    (端数キャリー1個未満の誤差)、逆向き電界からは放出ゼロ、続きから実行がビット一致、
+    validator (phi_ev<=0 等)
 """
 
 import json
@@ -475,3 +478,126 @@ def test_dual_frequency_voltage_rf_runs():
     assert sim.fields is not None
     for key in ("phi", "e", "n_e", "n_i", "t_e", "ionization"):
         assert np.all(np.isfinite(sim.fields[key])), key
+
+
+# ---- 10. FN 電界放出 (prompts/95) --------------------------------------------------
+#
+# 空間電荷の影響を除くため初期プラズマ (electron/ion) の重みをゼロにし、電界を
+# 境界電圧だけで決まる値 (± FN 放出電子自身の空間電荷による僅かな摂動のみ) にする
+# (test_leapfrog_matches_analytic_uniform_field と同じ手法)。
+
+
+def _zero_background_weight(sim: Pic1dSimulation) -> None:
+    for name in ("electron", "ion"):
+        sp = sim.species[name]
+        sp.w = np.zeros_like(sp.w)
+
+
+def _fn_accounting_settings(n_steps: int) -> Pic1dSettings:
+    # gap=1um・V=100V (beta=50 でF~1e8 V/m級) → 有意な FN 電流が出る条件 (prompts/95 の例)。
+    # 右電極のみ fn を設定 (左は not-emitting 方向の検証に使う)
+    return Pic1dSettings(
+        gap_m=1e-6, n_cells=10, init_density_m3=1.0e6, n_macro=2,
+        dt=1e-16, n_steps=n_steps, frame_every=n_steps,
+        left={"v_dc": 0.0},
+        right={"v_dc": -100.0, "fn": {"phi_ev": 4.5, "beta": 50.0, "macro_weight": 1e12}},
+    )
+
+
+def test_fn_emission_matches_integrated_current():
+    """放出重みの積算 ≈ 実際に使われた J(F_t) を積分した値 (誤差はマクロ1個未満、prompts/95)。
+
+    quota_t = J_t·dt/(e·w) + frac_{t-1}、n_emit_t = floor(quota_t) の毎ステップ更新を
+    Σ で telescope すると Σn_emit_t = ΣJ_t·dt/(e) /w  - frac_T (frac_0=0) になるので、
+    総放出重み = w·Σn_emit_t は Σ J_t·dt/e よりちょうど [0, w) 小さいはずである。
+    """
+    sim = Pic1dSimulation(_project(_fn_accounting_settings(10)))
+    _zero_background_weight(sim)
+
+    captured_j_right: list[float] = []
+    orig_emit = sim._emit_fn
+
+    def spy(ex: np.ndarray):
+        result = orig_emit(ex)
+        captured_j_right.append(result[1])
+        return result
+
+    sim._emit_fn = spy
+    sim.run_batch()
+
+    assert sim.fn_events["right"] > 0  # 実際に何か放出されていること
+    expected_w = sum(captured_j_right) * sim.dt / QE
+    w_fn = sim._fn_w["right"]
+    diff = expected_w - sim.fn_total_w["right"]
+    assert 0.0 <= diff < w_fn * (1.0 + 1e-9)
+
+    # 左電極は fn 未設定なので放出処理自体が発生しない
+    assert sim.fn_events["left"] == 0
+    assert sim.fn_total_w["left"] == 0.0
+
+
+def test_fn_no_emission_when_field_points_wrong_way():
+    """引き出し電界が逆向き (右電極側から見て F<0) の電極からは放出ゼロ (prompts/95)。"""
+    s = _fn_accounting_settings(10)
+    # 左右電圧を反転し、右電極 (fn 設定側) の表面電界を「電子を引き込む」向きにする
+    s.left.v_dc, s.right.v_dc = s.right.v_dc, s.left.v_dc
+    sim = Pic1dSimulation(_project(s))
+    _zero_background_weight(sim)
+    sim.run_batch()
+    assert sim.fn_events["right"] == 0
+    assert sim.fn_total_w["right"] == 0.0
+    assert all(w == 0.0 for w in sim.history["fn_right"])
+
+
+def test_fn_continue_is_bit_identical_to_single_run():
+    """FN ありでも run(n)+continue(m) が run(n+m) とビット一致する (端数キャリーも維持、prompts/95)。"""
+
+    def make(n_steps: int) -> Pic1dSettings:
+        return Pic1dSettings(
+            gap_m=1e-6, n_cells=10, init_density_m3=1.0e6, n_macro=2,
+            dt=1e-16, n_steps=n_steps, frame_every=n_steps,
+            left={"v_dc": 0.0, "fn": {"phi_ev": 4.5, "beta": 40.0, "macro_weight": 5e11}},
+            right={"v_dc": 100.0, "fn": {"phi_ev": 4.5, "beta": 40.0, "macro_weight": 5e11}},
+        )
+
+    sim_a = Pic1dSimulation(_project(make(20)))
+    _zero_background_weight(sim_a)
+    sim_a.s.avg_steps = 10
+    sim_a.run_batch()
+
+    sim_b = Pic1dSimulation(_project(make(10)))
+    _zero_background_weight(sim_b)
+    sim_b.run_batch()
+    sim_b.prepare_continue(10, avg_steps=10)
+    sim_b.run_batch()
+
+    for name in ("electron", "ion"):
+        sa, sb = sim_a.species[name], sim_b.species[name]
+        assert len(sa.x) == len(sb.x) and len(sa.x) > 0
+        assert np.array_equal(sa.x, sb.x)
+        assert np.array_equal(sa.v, sb.v)
+        assert np.array_equal(sa.w, sb.w)
+
+    assert sim_a.fn_events == sim_b.fn_events
+    assert sim_a.fn_total_w == sim_b.fn_total_w
+    assert sim_a.fn_events["left"] > 0  # 実際に FN 放出が起きた条件であること (退化ケース回避)
+    assert sim_a.fn == sim_b.fn
+
+
+def test_fn_validators_raise():
+    with pytest.raises(pydantic.ValidationError):
+        Pic1dSettings(
+            gap_m=0.01, init_density_m3=1e14, left={"fn": {"phi_ev": 0.0}},
+        )
+    with pytest.raises(pydantic.ValidationError):
+        Pic1dSettings(
+            gap_m=0.01, init_density_m3=1e14, right={"fn": {"beta": 0.0}},
+        )
+    with pytest.raises(pydantic.ValidationError):
+        Pic1dSettings(
+            gap_m=0.01, init_density_m3=1e14, left={"fn": {"init_energy_ev": -1.0}},
+        )
+    with pytest.raises(pydantic.ValidationError):
+        Pic1dSettings(
+            gap_m=0.01, init_density_m3=1e14, left={"fn": {"macro_weight": 0.0}},
+        )
