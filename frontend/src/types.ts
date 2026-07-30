@@ -355,6 +355,29 @@ export interface Pic1dSheath {
   right_s: number | null;
 }
 
+// シース振動スペクトル (result.sheath_fft、prompts/100)。平均区間中の毎ステップ
+// s(t) を評価して FFT した片側振幅スペクトル (平均を引いた変動分)。freq_hz/amp_left/
+// amp_right は同じ長さの配列。f0_hz が無ければ (RF 未設定/CSV波形も無し) 整数周期
+// トリムをしていないので低周波側 2048 ビンで打ち切ったスペクトルになる
+export interface Pic1dSheathFft {
+  df_hz: number;
+  freq_hz: number[];
+  amp_left: number[];  // 片側振幅 [m] (変動分)
+  amp_right: number[];
+  mean_left: number | null;  // s の平均 [m] (電極からの距離)。左右どちらかが縮退すると null
+  mean_right: number | null;
+  n_samples: number;   // FFT に使ったサンプル数 (トリム後)
+  f0_hz: number | null; // 整数周期トリムに使った基本周波数 (cycle と同じ決定ロジック)
+}
+
+// s(t) プレビュー系列 (result.sheath_ts、prompts/100)。最大2048点に間引き済み。
+// 根が求まらなかったステップは null (線を切る)
+export interface Pic1dSheathTs {
+  t: number[];       // [s]
+  s_left: (number | null)[];
+  s_right: (number | null)[];
+}
+
 // 指定区間の EEDF/EEPF 集計結果 (done メッセージの result.eedf、prompts/85 の1D版)
 export interface Pic1dEedfResult {
   label: string;
@@ -394,6 +417,9 @@ export interface Pic1dResult {
   profiles: Pic1dProfiles | null;
   sheath?: Pic1dSheath | null; // シースエッジ (prompts/97)。sheath キー無しの旧保存ファイルとも互換 (optional)
   cycle: Pic1dCycle | null;
+  // シース振動スペクトル/プレビュー系列 (prompts/100)。旧保存ファイルとの互換のため optional
+  sheath_fft?: Pic1dSheathFft | null;
+  sheath_ts?: Pic1dSheathTs | null;
   eedf: Pic1dEedfResult[];
   walls: Pic1dWalls;
   fn: Pic1dFnResult | null; // 両電極とも fn 未設定なら null (prompts/95)

@@ -411,6 +411,13 @@ button.danger:hover { background: #b34747; }
    canvas-col 直下ではなく pic1d-body 内のスクロール領域に置くため高さ固定をやや小さくする */
 .pic1d-rf-monitor { height: 110px; margin-top: 10px; border: 1px solid var(--border); border-top: 1px solid var(--border); }
 
+/* シース振動スペクトルのピーク表 (prompts/100)。左右2つを横並びにする */
+.pic1d-peak-tables { display: flex; gap: 12px; flex-wrap: wrap; margin: 4px 0 8px; }
+.pic1d-peak-table { border-collapse: collapse; font-size: 11px; }
+.pic1d-peak-table th, .pic1d-peak-table td { padding: 1px 6px; text-align: right; }
+.pic1d-peak-table th:first-child, .pic1d-peak-table td:first-child { text-align: left; }
+.pic1d-peak-table th { color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); }
+
 /* ステータスバーのエラー閉じるボタン (居座り防止、prompts/90 相当) */
 .statusbar-error-close {
   margin-left: 8px; padding: 0 6px; background: transparent; border: none;

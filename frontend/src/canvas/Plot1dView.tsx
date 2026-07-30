@@ -13,6 +13,8 @@ import type {
   Pic1dFrameMsg,
   Pic1dResult,
   Pic1dSettings,
+  Pic1dSheathFft,
+  Pic1dSheathTs,
   Pic1dStartedMsg,
   VoltageWaveform,
 } from "../types";
@@ -116,6 +118,10 @@ const PIC1D_TIMING_LABELS: Record<string, string> = {
 const SHEATH_MARKER_COLOR = "#ffb454";
 const SHEATH_LEFT_COLOR = "#ffb454";
 const SHEATH_RIGHT_COLOR = "#ff7a45";
+
+// シース振動スペクトル (prompts/100) の n·f0 グリッド線。位置マーカー (SHEATH_MARKER_COLOR)
+// とは意味が異なる (周波数軸上の目印) ため、目立ちすぎない薄いグレーにする
+const SHEATH_HARMONIC_COLOR = "rgba(200, 208, 220, 0.18)";
 
 // ---- canvas 直描きの汎用ラインチャート ----------------------------------------
 
@@ -659,6 +665,244 @@ function Pic1dSheathPhaseChart({
   );
 }
 
+// s(t) の実時間チャート (prompts/100)。Pic1dLineChart は「非正値のみで線を切る」設計 (対数軸
+// 前提) だが、こちらは根が求まらなかったステップ (null) で線を切る必要があるため、
+// Pic1dSheathPhaseChart と同じ null-break の考え方で x 軸だけ任意の実数配列にした専用実装にする
+function Pic1dSheathTsChart({
+  x,
+  sLeft,
+  sRight,
+  height = 110,
+}: {
+  x: number[];
+  sLeft: (number | null)[];
+  sRight: (number | null)[];
+  height?: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = el.getBoundingClientRect();
+    el.width = rect.width * dpr;
+    el.height = rect.height * dpr;
+    const ctx = el.getContext("2d")!;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const padL = 52;
+    const padR = 8;
+    const padT = 6;
+    const padB = 16;
+    const plotW = rect.width - padL - padR;
+    const plotH = rect.height - padT - padB;
+
+    ctx.strokeStyle = "#363c48";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    if (x.length < 2) return;
+    const xMin = arrayMin(x);
+    const xMax = arrayMax(x);
+    const xRange = xMax - xMin || 1;
+
+    const finiteVals: number[] = [];
+    for (const v of sLeft) if (v != null) finiteVals.push(v);
+    for (const v of sRight) if (v != null) finiteVals.push(v);
+    if (finiteVals.length === 0) return;
+
+    const yMin = arrayMin(finiteVals);
+    const yMax = arrayMax(finiteVals);
+    const yRange = yMax - yMin || 1;
+    const xOf = (v: number) => padL + ((v - xMin) / xRange) * plotW;
+    const yOf = (v: number) => padT + plotH - ((v - yMin) / yRange) * plotH;
+
+    const draw = (values: (number | null)[], color: string) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < x.length && i < values.length; i++) {
+        const v = values[i];
+        if (v == null) {
+          started = false; // null (根が求まらなかったステップ) で線を切る
+          continue;
+        }
+        const px = xOf(x[i]);
+        const py = yOf(v);
+        if (!started) {
+          ctx.moveTo(px, py);
+          started = true;
+        } else {
+          ctx.lineTo(px, py);
+        }
+      }
+      ctx.stroke();
+    };
+    draw(sLeft, SHEATH_LEFT_COLOR);
+    draw(sRight, SHEATH_RIGHT_COLOR);
+
+    ctx.font = "9px system-ui, sans-serif";
+    ctx.fillStyle = "#8a919e";
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText(xMin.toPrecision(3), padL, padT + plotH + 3);
+    ctx.textAlign = "right";
+    ctx.fillText(xMax.toPrecision(3), padL + plotW, padT + plotH + 3);
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(yMax.toPrecision(3), padL - 4, padT);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(yMin.toPrecision(3), padL - 4, padT + plotH);
+  }, [x, sLeft, sRight]);
+
+  return (
+    <>
+      <canvas ref={canvasRef} className="pic1d-chart" style={{ height }} />
+      <div className="pic-chart-legend">
+        <span>
+          <span className="swatch" style={{ background: SHEATH_LEFT_COLOR }} />
+          左 s
+        </span>
+        <span>
+          <span className="swatch" style={{ background: SHEATH_RIGHT_COLOR }} />
+          右 s
+        </span>
+      </div>
+    </>
+  );
+}
+
+// スペクトルの局所ピーク (振幅が両隣より大きい点、DC (index 0) は除く) を振幅降順で
+// 上位 topN 件抽出する (prompts/100 のピーク表用)
+interface SheathPeak {
+  freqHz: number;
+  amp: number;
+}
+
+function findSheathPeaks(freqHz: number[], amp: number[], topN: number): SheathPeak[] {
+  const candidates: SheathPeak[] = [];
+  for (let i = 1; i < amp.length - 1; i++) {
+    if (amp[i] > amp[i - 1] && amp[i] > amp[i + 1]) {
+      candidates.push({ freqHz: freqHz[i], amp: amp[i] });
+    }
+  }
+  candidates.sort((a, b) => b.amp - a.amp);
+  return candidates.slice(0, topN);
+}
+
+// ピーク表 (振幅上位5つ、prompts/100)。f/f0 は f0 があるときのみ表示する
+function Pic1dSheathPeakTable({
+  label,
+  color,
+  peaks,
+  f0Hz,
+  lengthUnit,
+}: {
+  label: string;
+  color: string;
+  peaks: SheathPeak[];
+  f0Hz: number | null;
+  lengthUnit: LengthUnit;
+}) {
+  if (peaks.length === 0) return null;
+  return (
+    <table className="pic1d-peak-table">
+      <thead>
+        <tr>
+          <th style={{ color }}>{label}</th>
+          <th>f [MHz]</th>
+          {f0Hz != null && <th>f/f0</th>}
+          <th>振幅 [{lengthUnit}]</th>
+        </tr>
+      </thead>
+      <tbody>
+        {peaks.map((p, i) => (
+          <tr key={i}>
+            <td>{i + 1}</td>
+            <td>{(p.freqHz / 1e6).toFixed(3)}</td>
+            {f0Hz != null && <td>{(p.freqHz / f0Hz).toFixed(2)}</td>}
+            <td>{formatNumber(mToUnit(p.amp, lengthUnit))}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// シース振動スペクトル一式 (s(t) チャート・FFTスペクトル・ピーク表、prompts/100)。
+// sheath_ts/sheath_fft はどちらも旧保存ファイルとの互換のため optional (無ければ何も出さない)
+function Pic1dSheathFftSection({
+  lengthUnit,
+  sheathTs,
+  sheathFft,
+}: {
+  lengthUnit: LengthUnit;
+  sheathTs?: Pic1dSheathTs | null;
+  sheathFft?: Pic1dSheathFft | null;
+}) {
+  const [logScale, setLogScale] = useState(true); // 振幅は桁が大きく変わりやすいため既定オン
+
+  if (!sheathTs && !sheathFft) return null;
+
+  const tUs = sheathTs ? sheathTs.t.map((v) => v * 1e6) : [];
+  const sLeftDisp = sheathTs ? sheathTs.s_left.map((v) => (v == null ? null : mToUnit(v, lengthUnit))) : [];
+  const sRightDisp = sheathTs ? sheathTs.s_right.map((v) => (v == null ? null : mToUnit(v, lengthUnit))) : [];
+
+  const freqMHz = sheathFft ? sheathFft.freq_hz.map((v) => v / 1e6) : [];
+  const ampLeftDisp = sheathFft ? sheathFft.amp_left.map((v) => mToUnit(v, lengthUnit)) : [];
+  const ampRightDisp = sheathFft ? sheathFft.amp_right.map((v) => mToUnit(v, lengthUnit)) : [];
+  const f0 = sheathFft?.f0_hz ?? null;
+
+  // n·f0 (n=1..) の位置に薄い縦グリッド線 (スペクトルの帯域上限 = 最後の周波数点まで)
+  const harmonicMarkers: ChartMarker[] = [];
+  if (sheathFft && f0 != null && f0 > 0 && freqMHz.length > 0) {
+    const maxMHz = freqMHz[freqMHz.length - 1];
+    const f0MHz = f0 / 1e6;
+    for (let n = 1; n * f0MHz <= maxMHz; n++) {
+      harmonicMarkers.push({ x: n * f0MHz, color: SHEATH_HARMONIC_COLOR, label: "n·f0" });
+    }
+  }
+
+  const peaksLeft = sheathFft ? findSheathPeaks(sheathFft.freq_hz, sheathFft.amp_left, 5) : [];
+  const peaksRight = sheathFft ? findSheathPeaks(sheathFft.freq_hz, sheathFft.amp_right, 5) : [];
+
+  return (
+    <>
+      {sheathTs && (
+        <>
+          <h3>シース振動 s(t) [µs]</h3>
+          <Pic1dSheathTsChart x={tUs} sLeft={sLeftDisp} sRight={sRightDisp} />
+        </>
+      )}
+
+      {sheathFft && (
+        <>
+          <div className="pic1d-row-header">
+            <h3>シース振動スペクトル</h3>
+            <Toggle label="対数軸" checked={logScale} onChange={setLogScale} />
+          </div>
+          <Pic1dLineChart
+            x={freqMHz}
+            series={[
+              { label: "左", values: ampLeftDisp, color: SHEATH_LEFT_COLOR },
+              { label: "右", values: ampRightDisp, color: SHEATH_RIGHT_COLOR },
+            ]}
+            logY={logScale}
+            markers={harmonicMarkers}
+          />
+          <div className="pic1d-peak-tables">
+            <Pic1dSheathPeakTable label="左" color={SHEATH_LEFT_COLOR} peaks={peaksLeft} f0Hz={f0} lengthUnit={lengthUnit} />
+            <Pic1dSheathPeakTable label="右" color={SHEATH_RIGHT_COLOR} peaks={peaksRight} f0Hz={f0} lengthUnit={lengthUnit} />
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 function Pic1dCyclePlayer({
   lengthUnit,
   cycle,
@@ -804,6 +1048,24 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
     }
   }
 
+  // シース振動スペクトルの f0 ビン振幅 (数値サマリ用、prompts/100)。f0 が無ければ非表示
+  let sheathAmpAtF0: { left: number; right: number } | null = null;
+  if (result.sheath_fft && result.sheath_fft.f0_hz != null) {
+    const f0 = result.sheath_fft.f0_hz;
+    const freq = result.sheath_fft.freq_hz;
+    // df_hz 刻みの格子上で f0 に最も近いビンを探す (整数周期トリムにより通常は厳密一致する)
+    let idx = 0;
+    let best = Infinity;
+    for (let i = 0; i < freq.length; i++) {
+      const d = Math.abs(freq[i] - f0);
+      if (d < best) {
+        best = d;
+        idx = i;
+      }
+    }
+    sheathAmpAtF0 = { left: result.sheath_fft.amp_left[idx], right: result.sheath_fft.amp_right[idx] };
+  }
+
   // EEDF/EEPF CSV書き出し (PicPanel の downloadEedfCsv と同じ書式。1D 独自のプレフィックスにする)
   const downloadEedfCsv = (index: number) => {
     const r = result.eedf[index];
@@ -855,6 +1117,8 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
           showSheath={showSheath}
         />
       )}
+
+      <Pic1dSheathFftSection lengthUnit={lengthUnit} sheathTs={result.sheath_ts} sheathFft={result.sheath_fft} />
 
       {result.eedf.length > 0 && (
         <>
@@ -948,6 +1212,16 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
             {sheath.left_s != null ? `${formatNumber(mToUnit(sheath.left_s, lengthUnit))} ${lengthUnit}` : "—"}
             {" / "}
             {sheath.right_s != null ? `${formatNumber(mToUnit(sheath.right_s, lengthUnit))} ${lengthUnit}` : "—"}
+          </span>
+        </div>
+      )}
+      {sheathAmpAtF0 && (
+        <div className="kv">
+          <span>シース振動 (f0 の振幅): 左 A@f0 / 右 A@f0</span>
+          <span>
+            {formatNumber(mToUnit(sheathAmpAtF0.left, lengthUnit))} {lengthUnit}
+            {" / "}
+            {formatNumber(mToUnit(sheathAmpAtF0.right, lengthUnit))} {lengthUnit}
           </span>
         </div>
       )}

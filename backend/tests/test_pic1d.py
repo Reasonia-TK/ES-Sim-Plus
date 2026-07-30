@@ -20,6 +20,10 @@
 11. Brinkmann シースエッジ検出 (prompts/97): 段差プロファイル・線形ランプの解析解
     (後者は scipy.optimize.brentq による独立な数値根探索でも確認)、右電極の鏡映対称性、
     プラズマ無しで None、CCP スモーク結果への搭載
+12. シース振動 FFT (prompts/100): 合成系列 (基本波+第3高調波) の振幅定量検証
+    (整数周期トリムが効いている証拠、rtol 1e-2)、内部孤立 NaN の線形補間、
+    有効率50%未満での縮退 (None)、f0 無指定時の帯域上限、RF付き CCP スモークでの
+    result.sheath_fft/sheath_ts の搭載確認
 """
 
 import json
@@ -34,7 +38,7 @@ from scipy import integrate, optimize
 import es_sim.server as server
 from es_sim.mcc import KB
 from es_sim.particles import ME, QE
-from es_sim.pic1d import Pic1dSimulation, brinkmann_sheath_edge, build_pic1d_result
+from es_sim.pic1d import Pic1dSimulation, brinkmann_sheath_edge, build_pic1d_result, sheath_fft
 from es_sim.pic1d_presets import edupic_ar_processes, get_presets
 from es_sim.schema import Geometry, Domain, MeshSettings, Pic1dSettings, Project, VoltageWaveform
 
@@ -736,3 +740,127 @@ def test_brinkmann_sheath_edge_in_ccp_result():
         bins = result["cycle"]["bins"]
         assert len(cyc_sheath["s_left"]) == bins
         assert len(cyc_sheath["s_right"]) == bins
+
+
+# ---- 12. シース振動 FFT (prompts/100) --------------------------------------------------
+
+
+def _synthetic_sheath_series(f0: float, n_total: int, s0: float, a1: float, a2: float, dt: float) -> np.ndarray:
+    """s(t) = s0 + A1·sin(2π f0 t) + A2·sin(2π·3f0 t) の合成系列 (窓はあえて f0 の非整数周期)。"""
+    t = np.arange(n_total) * dt
+    return s0 + a1 * np.sin(2.0 * np.pi * f0 * t) + a2 * np.sin(2.0 * np.pi * 3.0 * f0 * t)
+
+
+def test_sheath_fft_synthetic_amplitudes():
+    """合成系列 (基本波 f0 + 第3高調波) の FFT が mean≈s0、f0/3f0 ビンの振幅≈A1/A2
+    (rtol 1e-2)、他ビンは A1 の1%未満になることを検証する (整数周期トリムが効いている
+    証拠: 窓長 5432 サンプルは f0 の 1 周期=1000 サンプルの非整数倍だが、トリム後は
+    ちょうど整数周期になるためリークがほぼ皆無になる)。
+    """
+    f0 = 1.0e6
+    dt = 1.0e-9  # 1周期=1000サンプル (きれいな整数)
+    n_total = 5432  # 1000 の非倍数 (非整数周期の窓であることを保証)
+    s0, a1, a2 = 1.0e-3, 2.0e-4, 5.0e-5
+    s = _synthetic_sheath_series(f0, n_total, s0, a1, a2, dt)
+
+    result = sheath_fft(s, dt, f0)
+    assert result is not None
+    assert result["mean"] == pytest.approx(s0, rel=1e-2)
+    assert result["f0_hz"] == pytest.approx(f0)
+    assert result["n_samples"] < n_total  # 実際にトリムされていること
+
+    freq = result["freq_hz"]
+    amp = result["amp"]
+    df = result["df_hz"]
+    idx1 = int(round(f0 / df))
+    idx2 = int(round(3.0 * f0 / df))
+    assert freq[idx1] == pytest.approx(f0, rel=1e-6)
+    assert freq[idx2] == pytest.approx(3.0 * f0, rel=1e-6)
+    assert amp[idx1] == pytest.approx(a1, rel=1e-2)
+    assert amp[idx2] == pytest.approx(a2, rel=1e-2)
+
+    other = np.delete(amp, [0, idx1, idx2])
+    assert np.all(other < 0.01 * a1)
+
+
+def test_sheath_fft_nan_interpolation_and_degenerate_below_half():
+    """内部の孤立 NaN を数点入れても振幅検証が成立すること (線形補間)、
+    および NaN が過半数を占めれば None (縮退) になることを確認する。"""
+    f0 = 1.0e6
+    dt = 1.0e-9
+    n_total = 5432
+    s0, a1, a2 = 1.0e-3, 2.0e-4, 5.0e-5
+    s = _synthetic_sheath_series(f0, n_total, s0, a1, a2, dt)
+
+    s_nan = s.copy()
+    rng = np.random.default_rng(0)
+    # 先頭/末尾を除く内部に孤立 NaN を数点だけ入れる (有効率は50%を大きく上回る)
+    idx = rng.choice(np.arange(10, n_total - 10), size=8, replace=False)
+    s_nan[idx] = np.nan
+
+    result = sheath_fft(s_nan, dt, f0)
+    assert result is not None
+    assert result["mean"] == pytest.approx(s0, rel=1e-2)
+    freq = result["freq_hz"]
+    amp = result["amp"]
+    df = result["df_hz"]
+    idx1 = int(round(f0 / df))
+    idx2 = int(round(3.0 * f0 / df))
+    assert amp[idx1] == pytest.approx(a1, rel=1e-2)
+    assert amp[idx2] == pytest.approx(a2, rel=1e-2)
+
+    # 過半数を NaN にすると有効率50%未満になり None を返す。ただし先頭/末尾の連続 NaN は
+    # トリムされてしまい「有効率」の分母に入らないため、両端は有効値のままにして
+    # 内部にランダムに散らす (先頭寄りの連続区間を NaN にする単純な書き方では、
+    # 単にトリムされて残りが全部有効になってしまい意図した縮退にならない)
+    s_degenerate = s.copy()
+    interior = np.arange(1, n_total - 1)
+    n_nan = int(0.6 * n_total)
+    nan_idx = rng.choice(interior, size=n_nan, replace=False)
+    s_degenerate[nan_idx] = np.nan
+    assert sheath_fft(s_degenerate, dt, f0) is None
+
+
+def test_sheath_fft_all_nan_returns_none():
+    assert sheath_fft(np.full(100, np.nan), 1e-9, 1e6) is None
+
+
+def test_sheath_fft_no_f0_uses_full_series_and_caps_bins():
+    """f0=None なら整数周期トリムをせず全系列をそのまま使い、返す帯域は
+    低周波側 2048 ビンまでに絞る (Nyquist 全帯域を返す必要はないため)。"""
+    dt = 1.0e-9
+    n_total = 6000  # rfft のビン数は 3001 (> 2048) になる想定
+    t = np.arange(n_total) * dt
+    s = 1.0e-3 + 2.0e-4 * np.sin(2.0 * np.pi * 1.0e6 * t)
+    result = sheath_fft(s, dt, None)
+    assert result is not None
+    assert result["f0_hz"] is None
+    assert result["n_samples"] == n_total
+    assert len(result["freq_hz"]) == 2048
+    assert len(result["amp"]) == 2048
+
+
+def test_sheath_fft_and_ts_in_ccp_result():
+    """RF付き CCP スモークで result.sheath_fft が非null、freq_hz の上限≈40·f0、
+    amp配列長が freq_hz と一致、result.sheath_ts が ≤2048 点になること (prompts/100)。
+    """
+    s = _edupic_smoke_settings(2400)
+    sim = Pic1dSimulation(_project(s))
+    sim.run_batch()
+    result = build_pic1d_result(sim, 0.0)
+
+    fft = result["sheath_fft"]
+    assert fft is not None
+    f0 = fft["f0_hz"]
+    assert f0 is not None and f0 == pytest.approx(sim._cycle_freq)
+    assert len(fft["freq_hz"]) == len(fft["amp_left"]) == len(fft["amp_right"])
+    # 上限は 40·f0 (端数ビンの丸めで多少前後する)。実際に高調波帯域まで返っていることも確認
+    assert fft["freq_hz"][-1] <= 40.0 * f0 + fft["df_hz"] + 1e-6
+    assert fft["freq_hz"][-1] > 30.0 * f0
+    assert fft["mean_left"] is not None and math.isfinite(fft["mean_left"])
+    assert fft["mean_right"] is not None and math.isfinite(fft["mean_right"])
+
+    ts = result["sheath_ts"]
+    assert ts is not None
+    assert len(ts["t"]) <= 2048
+    assert len(ts["t"]) == len(ts["s_left"]) == len(ts["s_right"])

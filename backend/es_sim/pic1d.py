@@ -265,8 +265,16 @@ class Pic1dSimulation:
         self._cycle_ni: np.ndarray | None = None
         self._cycle_ion: np.ndarray | None = None
         self._cycle_count: np.ndarray | None = None
+        # シース振動 s(t) の時系列 (prompts/100)。平均区間中の毎ステップ、根が求まらなければ
+        # NaN を積む (通常の python list。avg_steps は典型的に数千〜数万程度なので numpy より
+        # 単純な list.append の方が実装が単純で、run_batch 完了時に一度だけ ndarray 化すれば十分)
+        self._accum_sheath_t: list[float] = []
+        self._accum_sheath_s_left: list[float] = []
+        self._accum_sheath_s_right: list[float] = []
         self.fields: dict | None = None
         self.cycle: dict | None = None
+        self.sheath_fft: dict | None = None  # シース振動スペクトル (prompts/100)
+        self.sheath_ts: dict | None = None    # s(t) プレビュー系列 (間引き済み、prompts/100)
         self._run_t0 = 0.0  # run_batch 開始時刻 (フレームの elapsed_s 用)
 
         # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ、vx のみ) --------
@@ -518,6 +526,9 @@ class Pic1dSimulation:
         self._cycle_ion = None
         self._cycle_count = None
         self._fn_accum_j = {"left": 0.0, "right": 0.0}  # j_avg (fn_summary) の平均区間積算
+        self._accum_sheath_t = []
+        self._accum_sheath_s_left = []
+        self._accum_sheath_s_right = []
 
     def _ensure_accumulators(self) -> None:
         if self._accum_phi is not None:
@@ -547,17 +558,44 @@ class Pic1dSimulation:
         if len(el.x):
             ke_p = 0.5 * ME * (el.v[:, 0] ** 2 + el.v[:, 1] ** 2 + el.v[:, 2] ** 2)
             self._accum_ke_e += self._cic_deposit(el.x, el.w * ke_p)
+        # 瞬時の節点密度 (n_e/n_i inst) は下のシースエッジ評価 (prompts/100) にも使い回す。
+        # ループの計算内容自体は従来と一切変えていない (len==0 ならゼロのまま、既存の
+        # bincount 経路もそのまま) ので既存の平均・位相分解結果はビット不変
+        n_e_vec = np.zeros(self.n_nodes)
+        n_i_vec = np.zeros(self.n_nodes)
         for name, sp in self.species.items():
             if len(sp.x) == 0:
                 continue
             vec = self._cic_deposit(sp.x, sp.w)
             self._accum_w[name] += vec
+            if name == "electron":
+                n_e_vec = vec
+            elif name == "ion":
+                n_i_vec = vec
             if b >= 0:
                 if name == "electron":
                     self._cycle_ne[b] += vec
                 elif name == "ion":
                     self._cycle_ni[b] += vec
         self._accum_count += 1
+
+        # ---- シース振動 s(t) の毎ステップ評価 (prompts/97 の brinkmann_sheath_edge を流用、
+        # prompts/100) ----
+        # 上ですでに堆積した瞬時密度 (n_e_vec/n_i_vec を節点体積で割っただけ) を再利用するため
+        # 追加のCIC堆積は不要。brinkmann_sheath_edge 自体は searchsorted/cumsum による
+        # O(n_nodes) のベクトル演算 (粒子ループなし) で、乱数消費も状態変更もない読み取り
+        # 専用の評価なので、毎ステップ呼んでも負荷は無視でき、既存の数値結果にも影響しない。
+        # 瞬時密度は統計ノイズを含むが、FFT (多数ステップにわたる平均的な周波数成分抽出)
+        # では均されるため問題にならない
+        n_e_inst = n_e_vec / self.node_vol
+        n_i_inst = n_i_vec / self.node_vol
+        x_b = self.gap / 2.0
+        s_left = brinkmann_sheath_edge(self.xg, n_e_inst, n_i_inst, True, x_b)
+        s_right = brinkmann_sheath_edge(self.xg, n_e_inst, n_i_inst, False, x_b)
+        self._accum_sheath_t.append(t_step)
+        # 根なし (None) のステップは NaN として積む (FFT 前処理でトリム/補間する、prompts/100)
+        self._accum_sheath_s_left.append(s_left if s_left is not None else math.nan)
+        self._accum_sheath_s_right.append(s_right if s_right is not None else math.nan)
 
     def averaged_fields(self) -> dict | None:
         """時間平均プロファイル一式 (WS done / ResultsBundle 用)。
@@ -598,6 +636,44 @@ class Pic1dSimulation:
             "bins": self._cycle_bins, "freq_hz": self._cycle_freq,
             "phi": phi, "n_e": n_e, "n_i": n_i,
         }
+
+    def sheath_ts_data(self) -> dict | None:
+        """s(t) プレビュー系列 (result["sheath_ts"]、チャート表示用、prompts/100)。
+
+        全ステップをそのまま JSON にすると保存ファイルが肥大するだけなので、最大
+        MAX_SHEATH_TS_POINTS 点になるよう一定間隔で間引く (2D フレームの
+        MAX_FRAME_PARTICLES と同じ「表示に十分な密度に間引く」考え方)。NaN (根が
+        求まらなかったステップ) はそのまま JSON の null として出す (Pic1dLineChart 等の
+        既存チャートも null で線を切る流儀に揃える)。
+        """
+        if not self._accum_sheath_t:
+            return None
+        t = np.asarray(self._accum_sheath_t)
+        sl = np.asarray(self._accum_sheath_s_left)
+        sr = np.asarray(self._accum_sheath_s_right)
+        stride = max(1, math.ceil(len(t) / MAX_SHEATH_TS_POINTS))
+        t_d = t[::stride]
+        sl_d = sl[::stride]
+        sr_d = sr[::stride]
+        return {
+            "t": t_d.tolist(),
+            "s_left": [None if math.isnan(v) else float(v) for v in sl_d],
+            "s_right": [None if math.isnan(v) else float(v) for v in sr_d],
+        }
+
+    def sheath_fft_data(self) -> dict | None:
+        """シース振動スペクトル (result["sheath_fft"]、prompts/100)。
+
+        基本周波数 f0 は cycle (位相分解) と同じ決定ロジックで決まる self._cycle_freq を
+        そのまま使う。phase_bins (位相分解のビン数) はこの FFT 機能とは無関係の別設定
+        なので、_cycle_enabled (freq かつ phase_bins>0) ではなく _cycle_freq を直接参照する
+        (phase_bins=0 で位相分解アニメーションを無効にしていても FFT は動く)。
+        """
+        if not self._accum_sheath_t:
+            return None
+        s_left = np.asarray(self._accum_sheath_s_left)
+        s_right = np.asarray(self._accum_sheath_s_right)
+        return _sheath_fft_pair(s_left, s_right, self.dt, self._cycle_freq)
 
     # ---- 1ステップ ------------------------------------------------------------
 
@@ -799,6 +875,8 @@ class Pic1dSimulation:
         self.cycle = self.cycle_data()
         self.eedf_results = self._eedf_data()
         self.fn = self.fn_summary()
+        self.sheath_ts = self.sheath_ts_data()
+        self.sheath_fft = self.sheath_fft_data()
         return self.history, frames
 
     def prepare_continue(
@@ -814,8 +892,9 @@ class Pic1dSimulation:
         (SEE/MCC)・累計カウンタ (wall/ion_events/see_events/coll_e/fn_events/fn_total_w
         および端数キャリー _fn_frac — FN のキャリーも維持しないと continue で放出数が
         ずれ、run(n+m) とビット一致しなくなる)。
-        リセットするもの: 診断 history (追加区間分のみ)・timing・平均/位相/EEDF/FN j_avg の
-        アキュムレータ。これにより run(n) → continue(m) は run(n+m) とビット一致する
+        リセットするもの: 診断 history (追加区間分のみ)・timing・平均/位相/EEDF/FN j_avg/
+        シース振動 s(t) (prompts/100) のアキュムレータ。これにより run(n) → continue(m)
+        は run(n+m) とビット一致する
         (平均区間の開始ステップは常に「現在の step_count + 今回の n_steps - avg + 1」
         という絶対ステップ番号で決まるため、区間の切り方によらず同じ結果になる)。
         """
@@ -849,6 +928,11 @@ class Pic1dSimulation:
         self.eedf_results = None
         self.fn = None
         self._fn_accum_j = {"left": 0.0, "right": 0.0}
+        self._accum_sheath_t = []
+        self._accum_sheath_s_left = []
+        self._accum_sheath_s_right = []
+        self.sheath_fft = None
+        self.sheath_ts = None
         for st in self._eedf_st:
             st["sum_w"] = 0.0
             st["sum_we"] = 0.0
@@ -950,6 +1034,134 @@ def _sheath_pair(x: np.ndarray, n_e: np.ndarray, n_i: np.ndarray, gap: float) ->
     }
 
 
+# ---- シース振動スペクトル (FFT、prompts/100) --------------------------------------------
+
+# s(t) プレビュー系列で保存ファイルに残す最大点数 (2D フレームの MAX_FRAME_PARTICLES と同じ
+# 「保存ファイル肥大化を防ぐための間引き上限」という考え方)
+MAX_SHEATH_TS_POINTS = 2048
+
+# f0 が無いときに返す帯域の上限ビン数 (Nyquist 全帯域を JSON にしても意味がなく、
+# シース振動が実際に乗る低周波側だけで十分なため)
+MAX_SHEATH_FFT_BINS_NO_F0 = 2048
+
+# f0 があるときに返す帯域の上限 (基本波の何次高調波まで見るか)。デュアル周波数駆動の
+# 混変調・低次のビート成分まで十分見渡せる範囲として 40 次を採用する
+SHEATH_FFT_MAX_HARMONIC = 40
+
+
+def sheath_fft(s: np.ndarray, dt: float, f0: float | None) -> dict | None:
+    """1系列 s(t) (dt おきの等間隔サンプル) の片側振幅スペクトルを求める (prompts/100)。
+
+    brinkmann_sheath_edge が根なし (None) を返したステップは、呼び出し側で NaN として
+    積まれている前提。手順:
+
+      1. 先頭/末尾の連続 NaN を切り落とす (プラズマ形成直後など、平均区間の入口で
+         一時的に根が求まらない場合を想定し、系列の実効窓を有効データの範囲に絞る)。
+      2. 内部 (両側を有効値に挟まれた) の孤立 NaN は線形補間で埋める。np.fft は
+         「等間隔・連続」なサンプル列を前提にしており、NaN を残すと FFT 全体に
+         NaN が伝播してしまうため。
+      3. (先頭/末尾トリム後の) 実測有効点が全体の 50% 未満なら、ほぼ補間だけで
+         合成した信頼できないスペクトルになってしまうため諦めて None を返す。
+      4. 基本周波数 f0 があれば、窓長が f0 の整数周期になるよう系列末尾からトリムする。
+         窓長が周期の整数倍でないと、打ち切りが正弦波を途中で「切断」する形になり、
+         その不連続分のエネルギーが本来のビン以外にも滲み出す (スペクトルリーケージ)。
+         整数周期に揃えれば周期関数の打ち切りが不連続を作らず、リークが実質ゼロになる。
+      5. 平均 (DC) を引いた変動分に対して np.fft.rfft を掛け、片側振幅
+         amp = 2|X_k|/N (k=0 の DC のみ 1|X_0|/N) を返す。平均自体は「シース振動の
+         中心位置」であって振動振幅ではないため mean として別出しする。
+      6. 返す帯域は f0 があれば 40·f0 まで (デュアル周波数駆動の混変調・ビートが
+         収まる範囲)、無ければ低周波側 2048 ビンまでに絞る (Nyquist 全帯域を
+         JSON 化しても保存ファイルが肥大するだけで意味がないため)。
+
+    戻り値: 有効なスペクトルが求まれば
+      {"freq_hz": ndarray, "amp": ndarray, "mean": float, "n_samples": int,
+       "df_hz": float, "f0_hz": float | None}
+    (n_samples はトリム後、FFT に実際に使ったサンプル数)。求まらなければ None。
+    """
+    s = np.asarray(s, dtype=np.float64)
+    finite = np.isfinite(s)
+    if not np.any(finite):
+        return None
+    lo = int(np.argmax(finite))
+    hi = int(len(finite) - 1 - np.argmax(finite[::-1]))
+    s = s[lo:hi + 1]
+    finite = finite[lo:hi + 1]
+
+    valid_frac = float(np.count_nonzero(finite)) / len(s)
+    if valid_frac < 0.5:
+        return None
+
+    if not np.all(finite):
+        idx = np.arange(len(s), dtype=np.float64)
+        s = np.interp(idx, idx[finite], s[finite])
+
+    n = len(s)
+    f0_used: float | None = None
+    if f0 is not None and f0 > 0.0:
+        samples_per_period = 1.0 / (f0 * dt)
+        n_periods = int(math.floor(n / samples_per_period))
+        if n_periods >= 1:
+            # 整数周期トリム (理由は上のdocstring参照)。round は「周期境界に最も近い
+            # サンプル」に丸めるだけなので、多少のリーク残差はあっても大きくは崩れない
+            n_trim = int(round(n_periods * samples_per_period))
+            n_trim = max(2, min(n_trim, n))
+            s = s[-n_trim:]
+            n = len(s)
+            f0_used = f0
+        # 1周期にも満たない極端に短い窓ではトリムのしようがないため、トリムせず
+        # 全系列をそのまま使う (f0_used=None のまま、f0 無指定と同じ扱いになる)
+
+    mean = float(np.mean(s))
+    spec = np.fft.rfft(s - mean)
+    amp = np.abs(spec) * (2.0 / n)
+    amp[0] = np.abs(spec[0]) / n  # DC (k=0) だけは 2 倍しない
+    freq = np.fft.rfftfreq(n, dt)
+    df = float(freq[1] - freq[0]) if n > 1 else 0.0
+
+    if f0_used is not None:
+        n_bins = max(1, int(np.searchsorted(freq, SHEATH_FFT_MAX_HARMONIC * f0_used, side="right")))
+    else:
+        n_bins = min(len(freq), MAX_SHEATH_FFT_BINS_NO_F0)
+    freq = freq[:n_bins]
+    amp = amp[:n_bins]
+
+    return {"freq_hz": freq, "amp": amp, "mean": mean, "n_samples": n, "df_hz": df, "f0_hz": f0_used}
+
+
+def _sheath_fft_pair(s_left: np.ndarray, s_right: np.ndarray, dt: float, f0: float | None) -> dict | None:
+    """左右シースエッジ s(t) 系列から result["sheath_fft"] の形を組み立てる。
+
+    実運用 (定常運転の平均区間) では左右とも同じステップ列を同時に評価しているため、
+    有効フラクション判定・整数周期トリムの結果 (n_samples/freq_hz) は左右で一致する。
+    片側だけ根がほとんど求まらない縮退ケース (n_samples が食い違う、または片側のみ
+    None) では、成功した側の周波数格子に揃え、失敗した側は振幅ゼロ・平均 None で埋める
+    (frontend は left/right の配列が同じ長さである前提で扱うため、常に長さを揃える)。
+    """
+    left = sheath_fft(s_left, dt, f0)
+    right = sheath_fft(s_right, dt, f0)
+    if left is None and right is None:
+        return None
+    ref = left if left is not None else right
+
+    def pick(res: dict | None) -> tuple[np.ndarray, float | None]:
+        if res is None or res["n_samples"] != ref["n_samples"]:
+            return np.zeros_like(ref["freq_hz"]), None
+        return res["amp"], res["mean"]
+
+    amp_left, mean_left = pick(left)
+    amp_right, mean_right = pick(right)
+    return {
+        "df_hz": ref["df_hz"],
+        "freq_hz": ref["freq_hz"].tolist(),
+        "amp_left": amp_left.tolist(),
+        "amp_right": amp_right.tolist(),
+        "mean_left": mean_left,
+        "mean_right": mean_right,
+        "n_samples": ref["n_samples"],
+        "f0_hz": ref["f0_hz"],
+    }
+
+
 # ---- 結果バンドル組み立て (server.py / batch.py 共通、prompts/96) -----------------------
 #
 # /ws/pic1d の done.result と batch/sweep の ResultsBundle.pic1d は同じ形にする必要がある
@@ -1031,6 +1243,10 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
         "profiles": profiles,
         "sheath": sheath,  # シースエッジ検出 (prompts/97、Brinkmann 基準)。profiles と対
         "cycle": cycle,
+        # シース振動スペクトル/プレビュー系列 (prompts/100)。sheath_fft_data/sheath_ts_data
+        # 側ですでに tolist() 済みの JSON 直列化可能な dict (または None) になっている
+        "sheath_fft": sim.sheath_fft,
+        "sheath_ts": sim.sheath_ts,
         "eedf": eedf,
         "walls": sim.wall,
         "fn": sim.fn,  # FN 電界放出サマリ (prompts/95)。両電極とも fn 未設定なら None
