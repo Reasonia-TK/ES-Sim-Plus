@@ -184,14 +184,34 @@ export default function Pic1dPanel({
   const [presetsError, setPresetsError] = useState<string | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<string>("");
   useEffect(() => {
-    api
-      .pic1dPresets()
-      .then((res) => {
-        setPresets(res);
-        const keys = Object.keys(res);
-        if (keys.length > 0) setSelectedPreset(keys[0]);
-      })
-      .catch((e) => setPresetsError(String(e)));
+    // アプリ起動直後はバックエンド (Rust側サイドカー) の起動がこのパネルの初回表示より
+    // 遅れることがあり、その場合 fetch は TypeError: Failed to fetch で失敗する。
+    // 1回だけの取得だと失敗したまま二度と取得されないため、成功するまで3秒間隔で
+    // 自動再試行する (アンマウント後の setState を防ぐため cancelled フラグ + clearTimeout で
+    // クリーンアップする)。
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = () => {
+      api
+        .pic1dPresets()
+        .then((res) => {
+          if (cancelled) return;
+          setPresets(res);
+          setPresetsError(null);
+          const keys = Object.keys(res);
+          if (keys.length > 0) setSelectedPreset(keys[0]);
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setPresetsError(String(e));
+          timer = setTimeout(load, 3000);
+        });
+    };
+    load();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, []);
   const presetEntry = presets && selectedPreset ? presets[selectedPreset] : null;
   const applyPreset = () => {
@@ -270,7 +290,9 @@ export default function Pic1dPanel({
   return (
     <>
       <h2>PIC 1D: プリセット</h2>
-      {presetsError && <div className="error">プリセット取得に失敗しました: {presetsError}</div>}
+      {presetsError && (
+        <div className="error">プリセット取得に失敗しました (自動再試行中): {presetsError}</div>
+      )}
       {presets && (
         <>
           <div className="field">

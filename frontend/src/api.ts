@@ -32,9 +32,21 @@ export const api = {
   lxcatParse: (text: string, species: "electron" | "ion"): Promise<{ processes: XsProcess[]; warnings: string[] }> =>
     post("/lxcat/parse", { text, species }),
   // 1D PIC/MCC のベンチマークプリセット一覧 (prompts/91)。project 不要な GET のみの単純なエンドポイント
-  pic1dPresets: (): Promise<
+  pic1dPresets: async (): Promise<
     Record<string, { label: string; description: string; pic1d: Pic1dSettings; note?: string }>
-  > => fetch(`${base()}/pic1d/presets`).then((r) => r.json()),
+  > => {
+    const res = await fetch(`${base()}/pic1d/presets`);
+    if (!res.ok) {
+      // 旧バックエンド (v0.1.33 未満) には本 endpoint が無く 404 になる。res.ok を見ずに
+      // r.json() すると、エラー系 JSON (detail等) を presets として扱ってしまうため注意
+      if (res.status === 404) {
+        throw new Error("バックエンドが古い可能性があります (上部バーの backend バージョンを確認してください)");
+      }
+      const detail = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(`/pic1d/presets failed: ${JSON.stringify(detail)}`);
+    }
+    return res.json();
+  },
   // パラメータスイープ (prompts/79): ケース i の結果付きJSONを取得する (loadProject と
   // 同じ形式。project 本体 + results)。未完了/失敗は 404 (呼び出し側で catch すること)
   sweepResult: async (i: number): Promise<unknown> => {
