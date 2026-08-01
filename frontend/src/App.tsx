@@ -17,6 +17,9 @@ import type {
   Tool,
 } from "./canvas/CadCanvas";
 import { sheathLineEdge } from "./sheath";
+import { COLORMAPS, DEFAULT_COLORMAP } from "./canvas/colormaps";
+import type { ColormapKey } from "./canvas/colormaps";
+import { CommitNullableNumberInput } from "./CommitInput";
 import Plot1dView from "./canvas/Plot1dView";
 import ProfilePanel from "./panels/ProfilePanel";
 import RfPhaseMonitor from "./panels/RfPhaseMonitor";
@@ -296,6 +299,7 @@ const TOOL_LABELS: Record<Tool, string> = {
   eedfbox: "EEDF領域",
   meshref: "メッシュ細分",
   sheathline: "シース評価線",
+  probe: "プローブ",
 };
 
 // 実行中の経過時間表示 (ステータスバー、prompts/86) の秒数を m:ss (1時間以上は h:mm:ss) に整形する
@@ -481,6 +485,14 @@ export default function App() {
   const [fieldView, setFieldView] = useState<FieldView>("v");
   const [showIsolines, setShowIsolines] = useState(false);
   const [showVectors, setShowVectors] = useState(false);
+  // コンター表示のカラーマップ選択 (キャンバスツールバー「配色」select、prompts/103)。
+  // project へは保存しない表示専用 state (Undo/Redo 対象外)
+  const [colormapKey, setColormapKey] = useState<ColormapKey>(DEFAULT_COLORMAP);
+  // カラーバーの手動レンジ (min/max、null=自動=従来挙動)。project へは保存しない (prompts/103)
+  const [colorRange, setColorRange] = useState<{ min: number | null; max: number | null }>({
+    min: null,
+    max: null,
+  });
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [profileLine, setProfileLine] = useState<[Point, Point] | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2162,6 +2174,17 @@ export default function App() {
   const onTraceResultNode = activeNode === "result-trace";
   const finalPicFieldView = onGasNode ? gasFieldView : (picCycleView ?? picFieldView);
 
+  // コンター配色select・プローブツールの活性化条件 (prompts/103)。CadCanvas へ実際に
+  // 渡す result/picFrame と同じ式で「何らかのフィールドが描画されうるか」を近似する
+  // (CadCanvas 内部の meshWireTakesPriority — Mesh 実行直後の一時的優先 — までは
+  // 追わないが、該当は稀な操作直後のみなので実用上ほぼ一致する。プローブ本体のクリック
+  // 判定は CadCanvas 側の activeField が正確に行うため、ここでの近似が多少ずれても
+  // 実害は無い=単にボタンの活性/非活性が一瞬ずれるだけ)
+  const fieldDisplayActive =
+    !!finalPicFieldView ||
+    (!onGasNode && picLiveFrame != null) ||
+    (!(onTraceResultNode && traceBackground === "none") && result != null);
+
   // RF位相モニタ (prompts/82) の表示条件。CadCanvas 上でライブフレームが実際に描画されている
   // 間だけ出す: 周期アニメ/結果フィールド表示 (finalPicFieldView) やガス関連ノード選択中
   // (CadCanvas への picFrame prop 自体を onGasNode で止めている) は「ライブが見えていない」
@@ -2909,6 +2932,18 @@ export default function App() {
                 シース評価線は最大{MAX_SHEATH_LINES}本に達しました
               </span>
             )}
+            <button
+              className={`tool ${tool === "probe" ? "active" : ""}`}
+              onClick={() => setTool("probe")}
+              disabled={!fieldDisplayActive}
+              title={
+                fieldDisplayActive
+                  ? "クリックした位置のフィールド値を読み取ります"
+                  : "フィールド表示中のみ使用できます"
+              }
+            >
+              プローブ
+            </button>
             <div className="sep" />
             <Toggle label="グリッドスナップ" checked={gridSnap} onChange={setGridSnap} />
             <label className="snap">
@@ -2936,6 +2971,42 @@ export default function App() {
             <Toggle label="EEDF領域" checked={showEedfRegions} onChange={setShowEedfRegions} />
             <Toggle label="メッシュ細分" checked={showEdgeMeshSizes} onChange={setShowEdgeMeshSizes} />
             <Toggle label="シースエッジ" checked={showSheathEdge} onChange={setShowSheathEdge} />
+            {/* コンター配色・カラーバー手動レンジ (prompts/103)。フィールド表示中のみ意味を
+                持つため、そうでないときは出さない (混み合ったツールバーに常時出す必要がない) */}
+            {fieldDisplayActive && (
+              <>
+                <div className="sep" />
+                <label className="snap">
+                  配色
+                  <select value={colormapKey} onChange={(e) => setColormapKey(e.target.value as ColormapKey)}>
+                    {COLORMAPS.map((cm) => (
+                      <option key={cm.key} value={cm.key}>{cm.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="snap">
+                  レンジ
+                  <CommitNullableNumberInput
+                    className="colorrange-input"
+                    value={colorRange.min ?? null}
+                    placeholder="自動"
+                    onCommit={(v) => setColorRange((r) => ({ ...r, min: v }))}
+                  />
+                  〜
+                  <CommitNullableNumberInput
+                    className="colorrange-input"
+                    value={colorRange.max ?? null}
+                    placeholder="自動"
+                    onCommit={(v) => setColorRange((r) => ({ ...r, max: v }))}
+                  />
+                </label>
+                {(colorRange.min !== null || colorRange.max !== null) && (
+                  <button className="secondary" onClick={() => setColorRange({ min: null, max: null })}>
+                    自動
+                  </button>
+                )}
+              </>
+            )}
           </div>
 
           <CadCanvas
@@ -2968,6 +3039,8 @@ export default function App() {
             sheathLines={showSheathEdge ? sheathLinesList : []}
             sheathDensity={showSheathEdge ? sheathSource : null}
             sheathAlpha={sheathAlpha}
+            colormapKey={colormapKey}
+            colorRange={colorRange}
             onSelectRegion={selectRegionFromCanvas}
             onDeleteRegion={deleteRegion}
             onAddRegion={addRegion}

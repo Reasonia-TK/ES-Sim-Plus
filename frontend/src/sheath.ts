@@ -130,10 +130,37 @@ function barycentric(
 const BARYCENTRIC_EPS = -1e-9;
 
 /**
- * 点 (x,y) を含む三角形を総当たりで探し、重心座標補間した values の値を返す。
- * 見つからなければ (ドメイン外) NaN。20k要素程度のメッシュに対して評価ライン1本
- * (n=200点) を処理する程度なら総当たりで十分 (pic.py の walk 探索のような隣接
+ * 点 (x,y) を含む三角形を総当たりで探す。見つかれば三角形インデックスと重心座標を返し、
+ * ドメイン外なら null。20k要素程度のメッシュに対して評価ライン1本 (n=200点) やクリック
+ * プローブ (単発) を処理する程度なら総当たりで十分 (pic.py の walk 探索のような隣接
  * 三角形追跡・専用の点位置特定ヘルパは既存に無いため、ここで素朴に実装する)。
+ * シースエッジ評価ライン (sampleAlongLine) とキャンバスのクリックプローブ
+ * (CadCanvas の probeValueAt、prompts/103) の両方がこれを共用する。
+ */
+export function findTriangleAt(
+  nodes: Point[],
+  triangles: [number, number, number][],
+  x: number,
+  y: number,
+): { index: number; bary: [number, number, number] } | null {
+  for (let i = 0; i < triangles.length; i++) {
+    const [a, b, c] = triangles[i];
+    const [ax, ay] = nodes[a];
+    const [bx, by] = nodes[b];
+    const [cx, cy] = nodes[c];
+    const bary = barycentric(ax, ay, bx, by, cx, cy, x, y);
+    if (!bary) continue;
+    const [l1, l2, l3] = bary;
+    if (l1 >= BARYCENTRIC_EPS && l2 >= BARYCENTRIC_EPS && l3 >= BARYCENTRIC_EPS) {
+      return { index: i, bary };
+    }
+  }
+  return null;
+}
+
+/**
+ * 点 (x,y) を含む三角形を総当たりで探し、重心座標補間した values の値を返す。
+ * 見つからなければ (ドメイン外) NaN。
  */
 function locateAndInterpolate(
   nodes: Point[],
@@ -142,19 +169,11 @@ function locateAndInterpolate(
   x: number,
   y: number,
 ): number {
-  for (const tri of triangles) {
-    const [a, b, c] = tri;
-    const [ax, ay] = nodes[a];
-    const [bx, by] = nodes[b];
-    const [cx, cy] = nodes[c];
-    const bary = barycentric(ax, ay, bx, by, cx, cy, x, y);
-    if (!bary) continue;
-    const [l1, l2, l3] = bary;
-    if (l1 >= BARYCENTRIC_EPS && l2 >= BARYCENTRIC_EPS && l3 >= BARYCENTRIC_EPS) {
-      return l1 * values[a] + l2 * values[b] + l3 * values[c];
-    }
-  }
-  return NaN;
+  const hit = findTriangleAt(nodes, triangles, x, y);
+  if (!hit) return NaN;
+  const [a, b, c] = triangles[hit.index];
+  const [l1, l2, l3] = hit.bary;
+  return l1 * values[a] + l2 * values[b] + l3 * values[c];
 }
 
 /**

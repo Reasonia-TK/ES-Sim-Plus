@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   BoundaryCondition,
   CircleShape,
@@ -12,10 +12,13 @@ import type {
   TraceResult,
 } from "../types";
 import { computeIsolines } from "./isolines";
-import { marchingTrianglesContour } from "../sheath";
+import { marchingTrianglesContour, findTriangleAt } from "../sheath";
 import { LENGTH_UNIT_LABEL, mToUnit } from "../units";
 import type { LengthUnit } from "../units";
 import { arrayMin, arrayMax } from "../mathUtils";
+import { formatNumber } from "../CommitInput";
+import { colormapCss } from "./colormaps";
+import type { ColormapKey } from "./colormaps";
 
 /**
  * CAD キャンバス
@@ -37,10 +40,24 @@ export type Tool =
   | "gasbc"
   | "eedfbox"
   | "meshref"
-  | "sheathline";
+  | "sheathline"
+  | "probe";
 
 // カラーマップの対象: 電位 V か |E|
 export type FieldView = "v" | "e_abs";
+
+// クリックプローブ・カラースケール解決が参照する「現在描画中のフィールド」の系統。
+// 描画側 (下の描画 useEffect) の3ブロックとちょうど1対1で対応する (prompts/103)
+type ActiveFieldSource = "pic" | "picFrame" | "result-v" | "result-eabs";
+interface ActiveField {
+  source: ActiveFieldSource;
+  mesh: MeshResult;
+  values: number[]; // nodeBased なら節点値、そうでなければ要素値
+  nodeBased: boolean;
+  unit: string;
+  log: boolean;
+  fixedRange?: { min: number; max: number; minPositive: number };
+}
 
 // IEDF/IADF コレクタ線分の描画用ビュー (キャンバス表示に必要な最小限のみ)
 export interface PicCollectorView {
@@ -192,6 +209,11 @@ interface Props {
   sheathDensity?: SheathDensitySource | null;
   // 準中性度の閾値 α (0.05〜0.95、PicPanel のスライダで指定。project へは保存しない)
   sheathAlpha?: number;
+  // コンター表示のカラーマップ選択 (ツールバー「配色」select。project へは保存しない、prompts/103)。
+  // 未指定時は既定 (viridis) を使う (呼び出し側の追従漏れがあっても崩れないようにする)
+  colormapKey?: ColormapKey;
+  // カラーバーの手動レンジ (min/max、null=自動=従来挙動)。未指定時は自動扱い (prompts/103)
+  colorRange?: { min: number | null; max: number | null };
   onSelectRegion: (id: string | null) => void;
   onDeleteRegion: (id: string) => void;
   onAddRegion: (geom: Point[] | CircleShape) => void;
@@ -230,17 +252,80 @@ function rulerSizeFor(fontSize: number): number {
   return Math.max(24, fontSize * 2.2);
 }
 
-// 簡易 viridis カラーマップ
-const STOPS: [number, number, number][] = [
-  [68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37],
-];
-function colormap(t: number): string {
-  const x = Math.min(0.9999, Math.max(0, t)) * (STOPS.length - 1);
-  const i = Math.floor(x);
-  const f = x - i;
-  const [r1, g1, b1] = STOPS[i];
-  const [r2, g2, b2] = STOPS[i + 1];
-  return `rgb(${r1 + (r2 - r1) * f},${g1 + (g2 - g1) * f},${b1 + (b2 - b1) * f})`;
+// カラーマップ本体 (アンカー補間+256段LUT) は canvas/colormaps.ts に分離済み (prompts/103)。
+// 複数のカラーマップから選べるようにするため、CadCanvas 側は選択キー (colormapKey) を
+// 受け取って colormapCss(key, t) を呼ぶだけにする。
+
+// フィールド描画のカラースケール解決結果。transformed は (対数表示なら log10 変換済みの)
+// 値配列そのもの。ノード平均を取る場合は「先に平均してから対数を取る」のではなく
+// この変換済み配列を平均する (対数空間での平均になり、従来の挙動と一致させるため)
+interface FieldScale {
+  transformed: number[];
+  tMin: number;
+  tMax: number;
+  // カラーバー表示用ラベル値 (常に生値の単位)。手動レンジ指定時はその値、それ以外は
+  // autoOverride (位相アニメの fixedScale 等) または自動計算値
+  labelMin: number;
+  labelMax: number;
+}
+
+/**
+ * フィールド描画のカラースケールを解決する共通ヘルパー (prompts/103)。
+ * 優先順位: 手動レンジ (manualRange、ユーザーがカラーバーの min/max を明示指定) が最優先、
+ * 次に autoOverride (位相アニメの「スケール固定」機構=fixedScale、または Solve結果のように
+ * backend が min/max を返し値配列の再走査が不要な場合)、最後に自動 (values を都度走査)。
+ * 範囲外の値は呼び出し側 (colormapCss→sampleColormap) が t を [0,1] にクランプすることで
+ * 自然に「端色にクランプ」される (ここでは特別なクランプ処理をしない)。
+ */
+function resolveFieldScale(
+  values: number[],
+  log: boolean,
+  autoOverride: { min: number; max: number; minPositive: number } | undefined,
+  manualRange: { min: number | null; max: number | null } | undefined,
+): FieldScale {
+  let rawMin: number;
+  let rawMax: number;
+  let minPositive: number;
+  if (autoOverride) {
+    rawMin = autoOverride.min;
+    rawMax = autoOverride.max;
+    minPositive = autoOverride.minPositive;
+  } else {
+    rawMin = arrayMin(values);
+    rawMax = arrayMax(values);
+    minPositive = Infinity;
+    for (const v of values) if (v > 0 && v < minPositive) minPositive = v;
+    if (!Number.isFinite(rawMin)) { rawMin = 0; rawMax = 0; }
+  }
+  const useLog = log && Number.isFinite(minPositive);
+  // 手動レンジが null (自動) の項目は自動/固定レンジ値へフォールバックする
+  const labelMin = manualRange?.min ?? rawMin;
+  const labelMax = manualRange?.max ?? rawMax;
+  const transformed = useLog ? values.map((v) => Math.log10(v > 0 ? v : minPositive)) : values;
+  // 対数スケールでは手動値もlog10空間に投影する。手動最小値が0以下 (log10不可) の場合は
+  // 従来通り (自動時と同じ) 全体の最小正値へフォールバックする
+  const toLogSpace = (v: number) => Math.log10(v > 0 ? v : minPositive);
+  const tMin = useLog ? toLogSpace(labelMin) : labelMin;
+  const tMax = useLog ? toLogSpace(labelMax) : labelMax;
+  return { transformed, tMin, tMax, labelMin, labelMax };
+}
+
+// プローブでクリックした点のフィールド値を求める。節点ベースの場は所属三角形の重心座標で
+// 線形補間、要素ベースの場は所属要素の値をそのまま返す。ドメイン外 (三角形が見つからない)
+// なら null。三角形の総当たり探索は sheath.ts (シースエッジ評価ライン) と共通化する
+function probeValueAt(
+  mesh: MeshResult,
+  values: number[],
+  nodeBased: boolean,
+  x: number,
+  y: number,
+): number | null {
+  const hit = findTriangleAt(mesh.nodes, mesh.triangles, x, y);
+  if (!hit) return null;
+  if (!nodeBased) return values[hit.index];
+  const [a, b, c] = mesh.triangles[hit.index];
+  const [l1, l2, l3] = hit.bary;
+  return l1 * values[a] + l2 * values[b] + l3 * values[c];
 }
 
 // 境界条件タイプ別の描画スタイル (色・線種・線幅)。凡例 (.bc-legend, style.css) の色と揃える
@@ -439,6 +524,8 @@ export default function CadCanvas({
   sheathLines = [],
   sheathDensity = null,
   sheathAlpha = 0.5,
+  colormapKey = "viridis",
+  colorRange = { min: null, max: null },
   onSelectRegion,
   onDeleteRegion,
   onAddRegion,
@@ -498,6 +585,65 @@ export default function CadCanvas({
   const radiusDragRef = useRef<{ regionId: string } | null>(null);
   // 半径ドラッグ中のプレビュー半径 (ワールド座標系、グリッドスナップ適用後)
   const [shapeRadiusPreview, setShapeRadiusPreview] = useState<number | null>(null);
+  // クリックプローブ (prompts/103) の最後のクリック位置 (ワールド座標)。値そのものは
+  // 保持せず、描画のたびに現在のフィールド (activeField) から再評価する。こうすることで
+  // 位相アニメでビンが切り替わっても同じ点の読み取り値が自動的に追従する
+  const [probePoint, setProbePoint] = useState<Point | null>(null);
+
+  // プローブ/描画側の両方が参照する「現在キャンバスに描画されているフィールド」の解決。
+  // 下の描画 useEffect 内の3ブロック (PIC結果/ライブ/Solve結果) と同じ優先順位
+  // (picFieldView > picFrame > result、meshWireTakesPriority ならどちらも出さない) を踏襲する。
+  // プローブのクリック判定に加え、フィールド切替 (プローブを消す条件) の識別にも使う
+  const activeField: ActiveField | null = useMemo(() => {
+    const meshWireTakesPriority = !!meshResult && meshResultIsLatest;
+    if (picFieldView) {
+      return {
+        source: "pic",
+        mesh: picFieldView.mesh,
+        values: picFieldView.values,
+        nodeBased: picFieldView.nodeBased,
+        unit: picFieldView.unit,
+        log: picFieldView.log,
+        fixedRange: picFieldView.fixedRange,
+      };
+    }
+    if (!meshWireTakesPriority && picFrame) {
+      return {
+        source: "picFrame",
+        mesh: picFrame.mesh,
+        values: picFrame.values,
+        nodeBased: picFrame.nodeBased,
+        unit: picFrame.unit,
+        log: picFrame.log,
+      };
+    }
+    if (!meshWireTakesPriority && !picFrame && result) {
+      if (fieldView === "v") {
+        return { source: "result-v", mesh: result.mesh, values: result.v, nodeBased: true, unit: "V", log: false };
+      }
+      // e_abs は要素ベース (節点値ではない) なので、要素ごとの |E| 配列を作っておく
+      const eAbs = result.mesh.triangles.map((_, i) => Math.hypot(result.e_field[i][0], result.e_field[i][1]));
+      return { source: "result-eabs", mesh: result.mesh, values: eAbs, nodeBased: false, unit: "V/m", log: false };
+    }
+    return null;
+  }, [picFieldView, picFrame, result, fieldView, meshResult, meshResultIsLatest]);
+
+  // ツールを離れたらプローブを消す (既存の drawPts と同じ「ツール切替で破棄」流儀)
+  useEffect(() => {
+    if (tool !== "probe") setProbePoint(null);
+  }, [tool]);
+
+  // フィールド表示の種別 (どの結果系統/単位/節点or要素か) が切り替わったらプローブを消す。
+  // 位相アニメのビン送りは同じ種別のまま値配列だけが変わるので、これには反応しない
+  // (識別子が同じ間は再描画のたびに新しい値で読み取り直すだけで、プローブ自体は消えない)
+  const fieldIdentity = activeField ? `${activeField.source}|${activeField.unit}|${activeField.nodeBased}` : "none";
+  const prevFieldIdentityRef = useRef(fieldIdentity);
+  useEffect(() => {
+    if (prevFieldIdentityRef.current !== fieldIdentity) {
+      setProbePoint(null);
+    }
+    prevFieldIdentityRef.current = fieldIdentity;
+  }, [fieldIdentity]);
 
   const toWorld = useCallback(
     (px: number, py: number, v: View): Point =>
@@ -599,7 +745,7 @@ export default function CadCanvas({
       const grad = ctx.createLinearGradient(0, barY, 0, barY + barH);
       const steps = 16;
       for (let i = 0; i <= steps; i++) {
-        grad.addColorStop(i / steps, colormap(1 - i / steps));
+        grad.addColorStop(i / steps, colormapCss(colormapKey, 1 - i / steps));
       }
       ctx.fillStyle = grad;
       ctx.fillRect(barX, barY, barW, barH);
@@ -627,6 +773,38 @@ export default function CadCanvas({
       }
     };
 
+    // フィールドを三角形メッシュへカラーマップで塗る共通ヘルパー (prompts/103)。
+    // 静電場 V/|E|・PICフィールド (時間平均/ライブ/位相アニメ)・DSMC ガス場のすべての
+    // コンター描画がここを通ることで、カラーマップ選択・手動レンジ (resolveFieldScale) を
+    // 一箇所の実装で全経路に効かせる (経路ごとのコピペ修正を避ける)
+    const drawFieldMesh = (
+      nodes: Point[],
+      triangles: [number, number, number][],
+      transformed: number[],
+      nodeBased: boolean,
+      tMin: number,
+      tMax: number,
+      strokeMesh: boolean,
+    ) => {
+      const range = tMax - tMin || 1;
+      for (let i = 0; i < triangles.length; i++) {
+        const [a, b, c] = triangles[i];
+        const val = nodeBased ? (transformed[a] + transformed[b] + transformed[c]) / 3 : transformed[i];
+        const t = (val - tMin) / range;
+        ctx.fillStyle = colormapCss(colormapKey, t);
+        ctx.beginPath();
+        ctx.moveTo(sx(nodes[a][0]), sy(nodes[a][1]));
+        ctx.lineTo(sx(nodes[b][0]), sy(nodes[b][1]));
+        ctx.lineTo(sx(nodes[c][0]), sy(nodes[c][1]));
+        ctx.closePath();
+        ctx.fill();
+        if (strokeMesh) {
+          ctx.strokeStyle = "rgba(0,0,0,0.25)";
+          ctx.stroke();
+        }
+      }
+    };
+
     // PIC結果フィールド表示: done後に「結果表示」セレクトでライブ以外を選んだ場合、
     // 選択したフィールドをカラーマップで描画する (節点値は要素を3節点平均で塗り、
     // 要素値(e_abs)はそのまま塗る)。対数スケール指定時は値≤0を全体の最小正値にクランプしてから
@@ -635,42 +813,8 @@ export default function CadCanvas({
     if (picFieldView) {
       const { nodes, triangles } = picFieldView.mesh;
       const { values, nodeBased, log, fixedRange } = picFieldView;
-
-      let rawMin = Infinity;
-      let rawMax = -Infinity;
-      let minPositive = Infinity;
-      for (const v of values) {
-        if (v < rawMin) rawMin = v;
-        if (v > rawMax) rawMax = v;
-        if (v > 0 && v < minPositive) minPositive = v;
-      }
-      if (!Number.isFinite(rawMin)) { rawMin = 0; rawMax = 0; }
-      // 周期アニメーション等、フレーム間で色が暴れないよう固定範囲が指定されていればそちらを使う
-      if (fixedRange) {
-        rawMin = fixedRange.min;
-        rawMax = fixedRange.max;
-        minPositive = fixedRange.minPositive;
-      }
-      const useLog = log && Number.isFinite(minPositive);
-      const transformed = useLog
-        ? values.map((v) => Math.log10(v > 0 ? v : minPositive))
-        : values;
-      const tMin = useLog ? Math.log10(minPositive) : rawMin;
-      const tMax = useLog ? Math.log10(rawMax) : rawMax;
-      const range = tMax - tMin || 1;
-
-      for (let i = 0; i < triangles.length; i++) {
-        const [a, b, c] = triangles[i];
-        const val = nodeBased ? (transformed[a] + transformed[b] + transformed[c]) / 3 : transformed[i];
-        const t = (val - tMin) / range;
-        ctx.fillStyle = colormap(t);
-        ctx.beginPath();
-        ctx.moveTo(sx(nodes[a][0]), sy(nodes[a][1]));
-        ctx.lineTo(sx(nodes[b][0]), sy(nodes[b][1]));
-        ctx.lineTo(sx(nodes[c][0]), sy(nodes[c][1]));
-        ctx.closePath();
-        ctx.fill();
-      }
+      const scale = resolveFieldScale(values, log, fixedRange, colorRange);
+      drawFieldMesh(nodes, triangles, scale.transformed, nodeBased, scale.tMin, scale.tMax, false);
 
       // 周期アニメーションの粒子スナップショット (表示トグルは App 側で particles の有無に反映済み)
       if (picFieldView.particles) {
@@ -678,7 +822,7 @@ export default function CadCanvas({
         drawSpecies(picFieldView.particles.ion, "#ff9d4d");       // イオン: オレンジ
       }
 
-      drawColorbar(rawMin, rawMax, picFieldView.unit);
+      drawColorbar(scale.labelMin, scale.labelMax, picFieldView.unit);
     }
 
     // meshResult (Mesh ボタン) が result/picFrame より「後に生成された」場合は、それらより
@@ -696,42 +840,15 @@ export default function CadCanvas({
     if (!picFieldView && !meshWireTakesPriority && picFrame) {
       const { nodes, triangles } = picFrame.mesh;
       const { values, nodeBased, log } = picFrame;
-
-      let rawMin = Infinity;
-      let rawMax = -Infinity;
-      let minPositive = Infinity;
-      for (const v of values) {
-        if (v < rawMin) rawMin = v;
-        if (v > rawMax) rawMax = v;
-        if (v > 0 && v < minPositive) minPositive = v;
-      }
-      if (!Number.isFinite(rawMin)) { rawMin = 0; rawMax = 0; }
-      const useLog = log && Number.isFinite(minPositive);
-      const transformed = useLog
-        ? values.map((v) => Math.log10(v > 0 ? v : minPositive))
-        : values;
-      const tMin = useLog ? Math.log10(minPositive) : rawMin;
-      const tMax = useLog ? Math.log10(rawMax) : rawMax;
-      const range = tMax - tMin || 1;
-
-      for (let i = 0; i < triangles.length; i++) {
-        const [a, b, c] = triangles[i];
-        const val = nodeBased ? (transformed[a] + transformed[b] + transformed[c]) / 3 : transformed[i];
-        const t = (val - tMin) / range;
-        ctx.fillStyle = colormap(t);
-        ctx.beginPath();
-        ctx.moveTo(sx(nodes[a][0]), sy(nodes[a][1]));
-        ctx.lineTo(sx(nodes[b][0]), sy(nodes[b][1]));
-        ctx.lineTo(sx(nodes[c][0]), sy(nodes[c][1]));
-        ctx.closePath();
-        ctx.fill();
-      }
+      // ライブ表示には周期アニメの fixedScale に相当する固定範囲が無いため、毎フレーム自動計算する
+      const scale = resolveFieldScale(values, log, undefined, colorRange);
+      drawFieldMesh(nodes, triangles, scale.transformed, nodeBased, scale.tMin, scale.tMax, false);
 
       // 粒子 (共通ヘルパーで描画)
       drawSpecies(picFrame.particles.electron, "#4dd4ff"); // 電子: シアン
       drawSpecies(picFrame.particles.ion, "#ff9d4d");       // イオン: オレンジ
 
-      drawColorbar(rawMin, rawMax, picFrame.unit);
+      drawColorbar(scale.labelMin, scale.labelMax, picFrame.unit);
     }
 
     // シースエッジ準中性度等値線 (n_e/n_i = α、prompts/98)。picFieldView/picFrame の
@@ -812,41 +929,14 @@ export default function CadCanvas({
       const { v, v_min, v_max, e_field, e_abs_max } = result;
 
       if (fieldView === "v") {
-        const range = v_max - v_min || 1;
-        for (let i = 0; i < triangles.length; i++) {
-          const [a, b, c] = triangles[i];
-          const t = ((v[a] + v[b] + v[c]) / 3 - v_min) / range;
-          ctx.fillStyle = colormap(t);
-          ctx.beginPath();
-          ctx.moveTo(sx(nodes[a][0]), sy(nodes[a][1]));
-          ctx.lineTo(sx(nodes[b][0]), sy(nodes[b][1]));
-          ctx.lineTo(sx(nodes[c][0]), sy(nodes[c][1]));
-          ctx.closePath();
-          ctx.fill();
-          if (showMesh) {
-            ctx.strokeStyle = "rgba(0,0,0,0.25)";
-            ctx.stroke();
-          }
-        }
+        // v_min/v_max は backend が既に返しているため、配列を再走査せずそのまま自動レンジに使う
+        const scale = resolveFieldScale(v, false, { min: v_min, max: v_max, minPositive: Infinity }, colorRange);
+        drawFieldMesh(nodes, triangles, scale.transformed, true, scale.tMin, scale.tMax, showMesh);
       } else {
-        // e_abs: 要素ごとの |E| で塗る (0〜e_abs_max の線形スケール)
-        const max = e_abs_max || 1;
-        for (let i = 0; i < triangles.length; i++) {
-          const [a, b, c] = triangles[i];
-          const [ex, ey] = e_field[i];
-          const t = Math.hypot(ex, ey) / max;
-          ctx.fillStyle = colormap(t);
-          ctx.beginPath();
-          ctx.moveTo(sx(nodes[a][0]), sy(nodes[a][1]));
-          ctx.lineTo(sx(nodes[b][0]), sy(nodes[b][1]));
-          ctx.lineTo(sx(nodes[c][0]), sy(nodes[c][1]));
-          ctx.closePath();
-          ctx.fill();
-          if (showMesh) {
-            ctx.strokeStyle = "rgba(0,0,0,0.25)";
-            ctx.stroke();
-          }
-        }
+        // e_abs: 要素ごとの |E| 配列を作ってから共通ヘルパーへ渡す (0〜e_abs_max の線形スケール、要素ベース)
+        const eAbs = triangles.map((_, i) => Math.hypot(e_field[i][0], e_field[i][1]));
+        const scale = resolveFieldScale(eAbs, false, { min: 0, max: e_abs_max || 1, minPositive: Infinity }, colorRange);
+        drawFieldMesh(nodes, triangles, scale.transformed, false, scale.tMin, scale.tMax, showMesh);
       }
 
       // 等電位線オーバーレイ (fieldView とは独立に表示可)
@@ -1495,9 +1585,71 @@ export default function CadCanvas({
     // Solve 結果のバーは出さない (結果フィールド側のバーは picFieldView ブロックで描画済み)
     if (!picFieldView && !picFrame && result) {
       const unit = fieldView === "v" ? "V" : "V/m";
-      const maxVal = fieldView === "v" ? result.v_max : result.e_abs_max;
-      const minVal = fieldView === "v" ? result.v_min : 0;
+      const autoMax = fieldView === "v" ? result.v_max : result.e_abs_max;
+      const autoMin = fieldView === "v" ? result.v_min : 0;
+      // 手動レンジ (colorRange) があればラベルに反映する (null の項目は自動値のまま)
+      const minVal = colorRange.min ?? autoMin;
+      const maxVal = colorRange.max ?? autoMax;
       drawColorbar(minVal, maxVal, unit);
+    }
+
+    // クリックプローブ (prompts/103): 直近1点のみ保持する。値は毎描画時に activeField から
+    // 再評価するため、位相アニメでビンが切り替わっても同じ点の読み取り値が自動的に更新される
+    if (probePoint && tool === "probe") {
+      const [ppx, ppy] = probePoint;
+      const cpx = sx(ppx);
+      const cpy = sy(ppy);
+
+      // 十字マーカー
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
+      const crossR = 7;
+      ctx.beginPath();
+      ctx.moveTo(cpx - crossR, cpy);
+      ctx.lineTo(cpx + crossR, cpy);
+      ctx.moveTo(cpx, cpy - crossR);
+      ctx.lineTo(cpx, cpy + crossR);
+      ctx.stroke();
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(cpx, cpy, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 読み取り値: 節点ベースの場は所属三角形の重心座標補間、要素ベースの場は所属要素の値。
+      // ドメイン外 (三角形が見つからない) なら「ドメイン外です」と表示する
+      let valueLine: string;
+      if (!activeField) {
+        valueLine = "(フィールド非表示)";
+      } else {
+        const v = probeValueAt(activeField.mesh, activeField.values, activeField.nodeBased, ppx, ppy);
+        valueLine = v === null ? "ドメイン外です" : `${formatNumber(v)} ${activeField.unit}`;
+      }
+      const coordLine =
+        `${isRzX0 ? "r" : isRz ? "z" : "x"}: ${mToUnit(ppx, lengthUnit).toFixed(3)} ${LENGTH_UNIT_LABEL[lengthUnit]}, ` +
+        `${isRzX0 ? "z" : isRz ? "r" : "y"}: ${mToUnit(ppy, lengthUnit).toFixed(3)} ${LENGTH_UNIT_LABEL[lengthUnit]}`;
+
+      ctx.font = "11px system-ui, sans-serif";
+      const boxPad = 6;
+      const lineH = 15;
+      const textW = Math.max(ctx.measureText(coordLine).width, ctx.measureText(valueLine).width);
+      const boxW = textW + boxPad * 2;
+      const boxH = lineH * 2 + boxPad * 2;
+      // 通常はクリック点の右上に出し、キャンバス右端/上端からはみ出す場合は反転させる
+      let boxX = cpx + 10;
+      let boxY = cpy - boxH - 10;
+      if (boxX + boxW > rect.width) boxX = cpx - boxW - 10;
+      if (boxY < 0) boxY = cpy + 10;
+
+      ctx.fillStyle = "rgba(20,22,28,0.9)";
+      ctx.strokeStyle = "rgba(216,220,228,0.6)";
+      ctx.lineWidth = 1;
+      ctx.fillRect(boxX, boxY, boxW, boxH);
+      ctx.strokeRect(boxX, boxY, boxW, boxH);
+      ctx.fillStyle = "#d8dce4";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(coordLine, boxX + boxPad, boxY + boxPad);
+      ctx.fillText(valueLine, boxX + boxPad, boxY + boxPad + lineH);
     }
 
     // ルーラー (常時表示のオーバーレイ。マウス座標系には影響しない)
@@ -1638,6 +1790,10 @@ export default function CadCanvas({
     isRzX0,
     isAxisym,
     lengthUnit,
+    colormapKey,
+    colorRange,
+    probePoint,
+    activeField,
   ]);
 
   // Space キーの追跡 (入力欄にフォーカス中は無視)
@@ -1949,6 +2105,10 @@ export default function CadCanvas({
               onSetSheathLine(p1, pt);
               setDrawPts([]);
             }
+          } else if (tool === "probe") {
+            // フィールドが何も描画されていなければプローブを立てない (「ドメイン外です」枠だけ
+            // 出るのを避ける)。activeField はどのフィールドが描画中かを一意に決める共通判定
+            if (activeField) setProbePoint(pt);
           }
         }}
         onDoubleClick={(e) => {
@@ -1998,6 +2158,7 @@ export default function CadCanvas({
               radiusDragRef.current = null;
               setShapeRadiusPreview(null);
             }
+            setProbePoint(null); // プローブの読み取りマーカーも既存ツールの Esc 流儀に合わせて消す
           } else if (tool === "select" && e.key === "Delete" && selectedRegionId) {
             onDeleteRegion(selectedRegionId);
           } else if (

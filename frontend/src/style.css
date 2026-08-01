@@ -180,6 +180,16 @@ button.secondary { background: var(--panel); border: 1px solid var(--border); co
   background: var(--bg); border: 1px solid var(--border); color: var(--text);
   border-radius: 3px; padding: 3px 6px; font-size: 12px;
 }
+/* コンター配色select・カラーバー手動レンジ入力 (prompts/103)。tool-toolbar 内は
+   .side 配下ではないため既存の共通 select/input スタイルが当たらず、個別に指定する */
+.tool-toolbar label.snap select {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 3px; padding: 3px 6px; font-size: 12px;
+}
+.tool-toolbar .colorrange-input {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 3px; padding: 3px 6px; font-size: 12px; width: 68px;
+}
 
 button.tool {
   background: var(--panel); border: 1px solid var(--border); color: var(--text);
