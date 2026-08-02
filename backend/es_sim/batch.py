@@ -17,9 +17,10 @@ numba/BLAS のスレッドプールもプロセスごとに独立するため、
 以下になるように調整すること。
 
 1D PIC/MCC (pic1d.py、prompts/91) にも対応する (prompts/96)。1D 流体
-(fluid1d.py、prompts/104-107) にも対応する (prompts/107)。--module で
-"pic"/"pic1d"/"fluid1d"/"auto" (既定、project の pic → pic1d → fluid1d の
-優先順で判定) を選べる。
+(fluid1d.py、prompts/104-107) にも対応する (prompts/107)。2D/軸対称流体
+(fluid2d.py、prompts/111-112) にも対応する (prompts/112)。--module で
+"pic"/"pic1d"/"fluid1d"/"fluid2d"/"auto" (既定、project の
+pic → pic1d → fluid1d → fluid2d の優先順で判定) を選べる。
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ import numpy as np
 from .pic import PicSimulation
 from .pic1d import Pic1dSimulation, build_pic1d_result
 from .fluid1d import Fluid1dSimulation, build_fluid1d_result
+from .fluid2d import Fluid2dSimulation, build_fluid2d_result
 from .schema import Project
 
 # frontend/src/types.ts の PicDiag と同じキー順 (toDiagArray が組み立てる行の形に合わせる)。
@@ -174,11 +176,12 @@ def _build_results_bundle(sim: PicSimulation, step_offset: int, elapsed_s: float
 
 
 def _resolve_module(project: Project, module: str) -> str:
-    """module="auto" を project の中身から解決する (バッチ CLI の --module auto、prompts/96・107)。
+    """module="auto" を project の中身から解決する
+    (バッチ CLI の --module auto、prompts/96・107・112)。
 
-    "pic"/"pic1d"/"fluid1d" 指定はそのまま返す (呼び出し側の明示指定を優先。GUI
-    スイープは常にこちらの経路 — サーバー側で解決済みの値をそのまま渡す)。
-    project にどれが設定されているかで判定する優先順位は pic → pic1d → fluid1d
+    "pic"/"pic1d"/"fluid1d"/"fluid2d" 指定はそのまま返す (呼び出し側の明示指定を優先。
+    GUI スイープは常にこちらの経路 — サーバー側で解決済みの値をそのまま渡す)。
+    project にどれが設定されているかで判定する優先順位は pic → pic1d → fluid1d → fluid2d
     (複数設定されていても最初に見つかったものを使う。1つも無ければ auto では
     判定できないためエラーにする)。
     """
@@ -190,7 +193,11 @@ def _resolve_module(project: Project, module: str) -> str:
         return "pic1d"
     if project.fluid1d is not None:
         return "fluid1d"
-    raise ValueError("project に pic も pic1d も fluid1d もありません (module=auto では判定できません)")
+    if project.fluid2d is not None:
+        return "fluid2d"
+    raise ValueError(
+        "project に pic も pic1d も fluid1d も fluid2d もありません (module=auto では判定できません)"
+    )
 
 
 def _worker(
@@ -199,10 +206,11 @@ def _worker(
     """1ケース分の実行本体。spawn 起動のためモジュールレベルの picklable な関数にする。
 
     module は "pic" (既定、2D FEM-PIC。既存呼び出し・既存挙動とビット不変)・"pic1d"
-    (1D PIC/MCC、prompts/96)・"fluid1d" (1D ドリフト拡散流体、prompts/107)・"auto"
-    (project の中身から解決、バッチ CLI の既定) のいずれか。GUI スイープ
-    (sweep.py) は常に解決済みの "pic"/"pic1d"/"fluid1d" を渡す (対象パラメータ
-    パスから判定するため、project の中身だけでは判定できない場合がある)。
+    (1D PIC/MCC、prompts/96)・"fluid1d" (1D ドリフト拡散流体、prompts/107)・
+    "fluid2d" (2D/軸対称 ドリフト拡散流体、prompts/112)・"auto" (project の中身から
+    解決、バッチ CLI の既定) のいずれか。GUI スイープ (sweep.py) は常に解決済みの
+    "pic"/"pic1d"/"fluid1d"/"fluid2d" を渡す (対象パラメータパスから判定するため、
+    project の中身だけでは判定できない場合がある)。
 
     成否・所要時間は例外にせず progress_q へ dict で通知する (親プロセスは Process の
     exitcode だけでは失敗理由が分からないため)。
@@ -299,10 +307,37 @@ def _worker(
             elapsed_s = time.perf_counter() - t_run0
             # server.py の _stream_run_fluid1d (build_fluid1d_result) と同一の形にする
             bundle = {"version": 1, "fluid1d": build_fluid1d_result(simf, elapsed_s)}
+        elif resolved == "fluid2d":
+            if project.fluid2d is None:
+                raise ValueError(
+                    "fluid2d 設定がありません (module=fluid2d を指定するには project.fluid2d が必要です)"
+                )
+            # fluid1d と同様、粒子もMCCも無い (use_dsmc_gas 相当の制約が存在しない) ので
+            # 追加チェックは不要。Fluid2dSimulation のコンストラクタが project から
+            # メッシュ・EAFE エッジ重み・Poisson の splu 事前分解を組み立てる
+            # (server.py の _run_fluid2d_session と同じ構築経路)
+            simf2 = Fluid2dSimulation(project)
+            n_steps_f2 = simf2.s.n_steps
+            last_sent_f2 = 0.0
+
+            def on_frame_f2(frame: dict) -> None:
+                nonlocal last_sent_f2
+                now = time.perf_counter()
+                if now - last_sent_f2 >= _PROGRESS_INTERVAL_S or frame["step"] >= n_steps_f2:
+                    last_sent_f2 = now
+                    progress_q.put(
+                        {"case": case_name, "kind": "progress", "step": frame["step"], "n_steps": n_steps_f2}
+                    )
+
+            t_run0 = time.perf_counter()
+            simf2.run_batch(on_frame_f2, lambda: False, False)
+            elapsed_s = time.perf_counter() - t_run0
+            # server.py の _stream_run_fluid2d (build_fluid2d_result) と同一の形にする
+            bundle = {"version": 1, "fluid2d": build_fluid2d_result(simf2, elapsed_s)}
         else:
             raise ValueError(
                 f"不明な module です: {module!r} "
-                "('pic'/'pic1d'/'fluid1d'/'auto' のいずれかを指定してください)"
+                "('pic'/'pic1d'/'fluid1d'/'fluid2d'/'auto' のいずれかを指定してください)"
             )
 
         out_obj = {**project_dict, "results": bundle}
@@ -341,10 +376,10 @@ def run_files(
     """複数ケースを (最大 parallel 並列で) 実行し、サマリを表示する。全成功なら0、1件でも失敗があれば1を返す。
 
     module は全ファイル共通の指定 (CLI の --module、既定 "auto": ファイルごとに
-    project の pic → pic1d → fluid1d の優先順で "pic"/"pic1d"/"fluid1d" を判定する。
-    1バッチ内に 2D PIC/1D PIC/1D 流体の混在も可)。既存呼び出し (module を指定
-    しない = "auto") でも 2D 専用プロジェクトなら常に "pic" に解決されるため、
-    既存の 2D バッチとビット不変。
+    project の pic → pic1d → fluid1d → fluid2d の優先順で
+    "pic"/"pic1d"/"fluid1d"/"fluid2d" を判定する。1バッチ内に 2D PIC/1D PIC/
+    1D 流体/2D 流体の混在も可)。既存呼び出し (module を指定しない = "auto") でも
+    2D PIC 専用プロジェクトなら常に "pic" に解決されるため、既存の 2D バッチとビット不変。
     """
     parallel = max(1, parallel)
     # spawn を明示: fork だと numba/BLAS のスレッドプール等が親プロセスの状態を引きずり、
@@ -443,9 +478,9 @@ def build_argparser() -> argparse.ArgumentParser:
         "--suffix", default="_results", help='出力ファイル名サフィックス (既定 "_results" → case1_results.json)'
     )
     run_p.add_argument(
-        "--module", choices=["auto", "pic", "pic1d", "fluid1d"], default="auto",
-        help="実行するソルバー (既定 auto: ファイルごとに project.pic → pic1d → fluid1d の"
-        "優先順で最初に見つかったものを使う。いずれも無ければエラー。prompts/96・107)",
+        "--module", choices=["auto", "pic", "pic1d", "fluid1d", "fluid2d"], default="auto",
+        help="実行するソルバー (既定 auto: ファイルごとに project.pic → pic1d → fluid1d → "
+        "fluid2d の優先順で最初に見つかったものを使う。いずれも無ければエラー。prompts/96・107・112)",
     )
     return parser
 

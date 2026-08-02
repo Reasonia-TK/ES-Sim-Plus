@@ -645,6 +645,42 @@ class Fluid1dSettings(BaseModel):
         return self
 
 
+# ---- 2D/軸対称 プラズマ流体 (EAFE/FEM-SG、prompts/111) -----------------------------
+#
+# fluid1d の 2D/軸対称拡張。geometry/mesh・境界条件 (Dirichlet 電圧・voltage_rf・
+# waveform・symmetry・see_gamma・conductor/dielectric 領域) は既存のプロジェクト設定を
+# そのまま使う (pic (2D PIC) と同じ流儀) ため、fluid1d のように専用の
+# 左右電極フィールドは持たない。
+
+
+class Fluid2dSettings(BaseModel):
+    """2D/軸対称 プラズマ流体 (ドリフト拡散 + 電子エネルギー、EAFE/FEM-SG、prompts/111)。
+
+    null なら無効。geometry/mesh (非構造 or 構造格子の三角形メッシュ)・境界条件は
+    既存のプロジェクト設定 (Project.geometry.boundaries の dirichlet/symmetry、
+    Region の conductor/dielectric/voltage/voltage_rf/see_gamma) をそのまま使う —
+    2D PIC (pic.py) と同一条件で直接比較できることが設計目標。
+    periodic 境界は未対応 (fluid2d.py の Fluid2dSimulation.__init__ で ValueError)。
+    """
+
+    init_density_m3: float = Field(..., gt=0, description="初期プラズマ密度 (一様、準中性) [m^-3]")
+    init_te_ev: float = Field(2.0, gt=0)
+    gas_pressure_pa: float = Field(..., gt=0, description="一様背景ガス圧 [Pa]")
+    gas_temperature_k: float = Field(300.0, gt=0)
+    ion_mass_amu: float = Field(39.948, gt=0, description="イオン質量 [amu]")
+    # イオン低電界移動度 (fluid1d.py と同じ規約: μ_i = mu_i_ref・(n_ref_m3/n_g))
+    mu_i_ref: float = Field(1.45e-1, gt=0, description="μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)")
+    n_ref_m3: float = Field(3.22e22, gt=0, description="mu_i_ref の基準ガス密度 [m^-3]")
+    t_i_ev: float = Field(0.026, gt=0, description="イオン温度 (D_i = μ_i・T_i)")
+    electron_processes: list[XsProcess] = []  # 空なら eduPIC Ar 解析式を既定使用
+    dt: float | None = Field(None, gt=0, description="秒。None なら RF周期/2000 と 1e-10 の小さい方")
+    n_steps: int = Field(20000, gt=0)
+    frame_every: int = Field(200, gt=0)
+    avg_steps: int | None = Field(None, gt=0)
+    phase_bins: int = Field(0, ge=0)
+    # seed は不要 (流体は決定論的で乱数を使わない)
+
+
 # ---- VHF 定在波 (非線形径方向伝送線路モデル、prompts/101) -----------------------------
 
 
@@ -793,6 +829,9 @@ class Project(BaseModel):
     # 1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、prompts/104-106)。null なら無効。
     # pic1d と同一条件で比較できるよう設計された専用ソルバー (fluid1d.py)
     fluid1d: Fluid1dSettings | None = None
+    # 2D/軸対称 プラズマ流体 (ドリフト拡散 + 電子エネルギー、EAFE/FEM-SG、prompts/111)。
+    # null なら無効。geometry/mesh・境界条件は既存のプロジェクト設定をそのまま使う
+    fluid2d: Fluid2dSettings | None = None
     # VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。null なら無効。
     # pic1d 同様 geometry/mesh とは無関係な専用ソルバー (tl.py)
     tl: TlSettings | None = None

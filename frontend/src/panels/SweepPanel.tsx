@@ -141,15 +141,31 @@ export function buildSweepCandidates(project: Project): Candidate[] {
     });
   }
 
+  // 2D/軸対称 プラズマ流体 (fluid2d、prompts/111-113) の候補パス。fluid2d はジオメトリ・
+  // 電極電圧を既存のプロジェクト設定 (上記 boundaries/regions の候補) と共有するため、
+  // 電圧系のパスは新設せず流用する (prompts/113 の指示どおり)。ここでは fluid2d 固有の
+  // パラメータ (初期密度・ガス圧) のみを候補として追加する
+  if (project.fluid2d) {
+    candidates.push({ label: "流体2D: 初期密度 [m^-3]", path: "fluid2d.init_density_m3" });
+    candidates.push({ label: "流体2D: ガス圧 [Pa]", path: "fluid2d.gas_pressure_pa" });
+  }
+
   return candidates;
 }
 
-// 対象パラメータパスから実行モジュールを判定する (prompts/96・107)。
+// 対象パラメータパスから実行モジュールを判定する (prompts/96・107・112)。
 // backend の resolve_sweep_module と同じ規則 (pic1d. で始まれば "pic1d"、fluid1d. で始まれば
-// "fluid1d"、それ以外は "pic")。フロントは自動判定に頼らずこの結果を module として明示送信する
-export function sweepModuleForPath(path: string): "pic" | "pic1d" | "fluid1d" {
+// "fluid1d"、fluid2d. で始まれば "fluid2d"、それ以外は "pic")。フロントは自動判定に頼らず
+// この結果を module として明示送信する。
+// 制約 (prompts/113 で明示的に許容された簡略化): geometry.boundaries/regions の電圧系パスは
+// 2D PIC と fluid2d の両方から共有される候補のため、このパス文字列だけでは fluid2d 実行を
+// 意図しているかを判別できず、常に "pic" に解決される (project.pic が無い fluid2d 専用
+// プロジェクトでジオメトリ電圧をスイープすると backend 側でエラーになる)。値そのものが
+// fluid2d 固有の上記2パスのみ明示的に "fluid2d" に解決する
+export function sweepModuleForPath(path: string): "pic" | "pic1d" | "fluid1d" | "fluid2d" {
   if (path.startsWith("pic1d.")) return "pic1d";
   if (path.startsWith("fluid1d.")) return "fluid1d";
+  if (path.startsWith("fluid2d.")) return "fluid2d";
   return "pic";
 }
 
@@ -213,8 +229,13 @@ interface Props {
   project: Project;
   canRun: boolean;
   running: boolean;
-  // module は自動判定に頼らず、選択パスから決定した値をここで明示送信する (prompts/96・107)
-  onStart: (paramPath: string, values: number[], parallel: number, module: "pic" | "pic1d" | "fluid1d") => void;
+  // module は自動判定に頼らず、選択パスから決定した値をここで明示送信する (prompts/96・107・112)
+  onStart: (
+    paramPath: string,
+    values: number[],
+    parallel: number,
+    module: "pic" | "pic1d" | "fluid1d" | "fluid2d",
+  ) => void;
   onStop: () => void;
   started: SweepStartedMsg | null;
   cases: SweepCaseState[];
@@ -306,6 +327,7 @@ export default function SweepPanel({
       </div>
       {targetModule === "pic1d" && <p className="hint">対象: PIC-MCC 1D</p>}
       {targetModule === "fluid1d" && <p className="hint">対象: 1D プラズマ流体</p>}
+      {targetModule === "fluid2d" && <p className="hint">対象: 2D/軸対称 プラズマ流体</p>}
 
       <h3>値リスト</h3>
       <div className="field">

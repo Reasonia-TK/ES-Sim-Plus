@@ -104,6 +104,56 @@ def assemble(project: Project, mesh: Mesh):
     return k, f
 
 
+def assemble_transport_operator(
+    mesh: Mesh, coord: str, elem_mask: np.ndarray | None = None
+) -> tuple[sp.csr_matrix, np.ndarray]:
+    """一様係数 (=1) の P1 剛性行列 K と節点の集中体積 V を返す (prompts/111)。
+
+    fluid2d.py の EAFE (Edge-Averaged Finite Element) 離散化が使うヘルパー。
+    種ごとの拡散係数はここでは掛けず、幾何だけで決まる「単位拡散係数」の剛性行列を
+    返す (fluid2d が種の D_s を後から掛ける)。K のオフ対角 K_ij を反転した
+    w_ij=-K_ij がエッジの実効重みになる (assemble() と全く同じ要素幾何・rz の
+    r 重み積分を流用するので、既存の場ソルバーが正しく扱っている軸対称性が
+    そのまま流体側にも伝わる — これが本ヘルパーを追加した理由)。
+
+    elem_mask (要素数と同じ長さの bool 配列) を渡すと、その要素だけで組む
+    (固体 (誘電体) 要素を除いた輸送領域だけで K・V を作る用途を想定)。
+    elem_mask=None は全要素を使う (assemble() の ε=1 版に相当)。
+
+    fem.assemble()/_electrode_charges() は 2π を「後から」掛ける流儀 (電荷を
+    最後に物理単位へ直す) だが、ここでは rz で 2π を最初から掛けて返す —
+    pic.py の elem_vol (2π 込み) と同じ流儀に合わせることで、fluid2d.py 側は
+    K と V のどちらも常に「物理単位のまま」足し引きでき、電荷や粒子数の
+    診断で 2π を掛け忘れる/二重に掛けるミスを避けられる (assemble() 自体の
+    挙動・呼び出し元は一切変更しないので、fem.py の既存テストはビット不変)。
+    """
+    tris = mesh.triangles
+    n = len(mesh.nodes)
+    b, c, area = _element_geometry(mesh.nodes, tris)
+    if elem_mask is not None:
+        b, c, area, tris = b[elem_mask], c[elem_mask], area[elem_mask], tris[elem_mask]
+    if len(tris) == 0:
+        return sp.csr_matrix((n, n)), np.zeros(n)
+
+    ridx = _radial_index(coord)
+    if ridx is not None:
+        r_nodes = mesh.nodes[tris][:, :, ridx]
+        r_bar = r_nodes.mean(axis=1)
+        coef = (2.0 * np.pi * r_bar / (4.0 * area))[:, None, None]
+        ke = coef * (b[:, :, None] * b[:, None, :] + c[:, :, None] * c[:, None, :])
+        vol_w = 2.0 * np.pi * (area / 12.0)[:, None] * (r_nodes + 3.0 * r_bar[:, None])
+        node_vol = np.bincount(tris.ravel(), weights=vol_w.ravel(), minlength=n)
+    else:
+        coef = (1.0 / (4.0 * area))[:, None, None]
+        ke = coef * (b[:, :, None] * b[:, None, :] + c[:, :, None] * c[:, None, :])
+        node_vol = np.bincount(tris.ravel(), weights=np.repeat(area / 3.0, 3), minlength=n)
+
+    rows = np.repeat(tris, 3, axis=1).ravel()
+    cols = np.tile(tris, (1, 3)).ravel()
+    k = sp.coo_matrix((ke.ravel(), (rows, cols)), shape=(n, n)).tocsr()
+    return k, node_vol
+
+
 def _label_order(project: Project) -> list[str]:
     """電極ラベルの表示順を決める (エッジ境界の指定順 → conductor 領域の定義順)。
 

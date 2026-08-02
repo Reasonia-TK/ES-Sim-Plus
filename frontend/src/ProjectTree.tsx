@@ -9,6 +9,9 @@ import type {
   Fluid1dFrameMsg,
   Fluid1dResult,
   Fluid1dStartedMsg,
+  Fluid2dFrameMsg,
+  Fluid2dResult,
+  Fluid2dStartedMsg,
   Pic1dFrameMsg,
   Pic1dResult,
   Pic1dStartedMsg,
@@ -41,6 +44,7 @@ export type TreeNode =
   | "study-pic"
   | "study-pic1d"
   | "study-fluid1d"
+  | "study-fluid2d"
   | "study-tl"
   | "study-gas"
   | "study-sweep"
@@ -49,6 +53,7 @@ export type TreeNode =
   | "result-pic"
   | "result-pic1d"
   | "result-fluid1d"
+  | "result-fluid2d"
   | "result-tl"
   | "result-gas";
 
@@ -91,6 +96,13 @@ interface Props {
   fluid1dFrame?: Fluid1dFrameMsg | null;
   fluid1dError?: string | null;
   fluid1dResult?: Fluid1dResult | null;
+  // 2D/軸対称 プラズマ流体 (prompts/111-113)。fluid1d と同様 optional にしているのは、
+  // App.tsx への統合が同じ Phase の作業であり、型検査だけ先に通したい場合に備えるため
+  fluid2dRunning?: boolean;
+  fluid2dStarted?: Fluid2dStartedMsg | null;
+  fluid2dFrame?: Fluid2dFrameMsg | null;
+  fluid2dError?: string | null;
+  fluid2dResult?: Fluid2dResult | null;
   // VHF 定在波 (prompts/101)。continue が無いので進捗は started/progress のステップ数のみ
   tlRunning: boolean;
   tlStarted: TlStartedMsg | null;
@@ -149,6 +161,11 @@ export default function ProjectTree({
   fluid1dFrame = null,
   fluid1dError = null,
   fluid1dResult = null,
+  fluid2dRunning = false,
+  fluid2dStarted = null,
+  fluid2dFrame = null,
+  fluid2dError = null,
+  fluid2dResult = null,
   tlRunning,
   tlStarted,
   tlProgressStep,
@@ -227,6 +244,15 @@ export default function ProjectTree({
     }
     if (fluid1dError) return { text: "エラー", kind: "error" };
     if (fluid1dResult) return { text: "✓完了", kind: "done" };
+    return { text: "未実行", kind: "idle" };
+  };
+  const fluid2dBadge = (): { text: string; kind: BadgeKind } => {
+    if (fluid2dRunning) {
+      const p = pct(fluid2dFrame?.step ?? 0, fluid2dStarted?.n_steps ?? 0);
+      return { text: `実行中 ${p}%`, kind: "busy" };
+    }
+    if (fluid2dError) return { text: "エラー", kind: "error" };
+    if (fluid2dResult) return { text: "✓完了", kind: "done" };
     return { text: "未実行", kind: "idle" };
   };
   const tlBadge = (): { text: string; kind: BadgeKind } => {
@@ -413,6 +439,15 @@ export default function ProjectTree({
                   <StatusBadge {...fluid1dBadge()} />
                 </div>
               )}
+              {match("流体 (2D)") && (
+                <div
+                  className={`tree-row ${activeNode === "study-fluid2d" ? "active" : ""}`}
+                  onClick={() => onSelectNode("study-fluid2d")}
+                >
+                  <span>流体 (2D)</span>
+                  <StatusBadge {...fluid2dBadge()} />
+                </div>
+              )}
               {match("VHF定在波") && (
                 <div
                   className={`tree-row ${activeNode === "study-tl" ? "active" : ""}`}
@@ -493,6 +528,14 @@ export default function ProjectTree({
                   onClick={() => onSelectNode("result-fluid1d")}
                 >
                   流体 (1D)
+                </div>
+              )}
+              {match("流体 (2D)") && (
+                <div
+                  className={`tree-row ${activeNode === "result-fluid2d" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-fluid2d")}
+                >
+                  流体 (2D)
                 </div>
               )}
               {match("VHF定在波") && (

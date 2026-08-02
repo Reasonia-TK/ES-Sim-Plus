@@ -93,15 +93,16 @@ export class SweepClient {
     };
   }
 
-  // 接続して start コマンドを送る (project は pic/pic1d/fluid1d/particles 等を合成済みのものを渡すこと)。
-  // module は自動判定に頼らず、UI (SweepPanel) で確定した対象 ("pic"/"pic1d"/"fluid1d") を明示送信する
-  // (prompts/96・107)。サーバーは同じ値を started.module としてそのまま返す
+  // 接続して start コマンドを送る (project は pic/pic1d/fluid1d/fluid2d/particles 等を合成済みの
+  // ものを渡すこと)。module は自動判定に頼らず、UI (SweepPanel) で確定した対象
+  // ("pic"/"pic1d"/"fluid1d"/"fluid2d") を明示送信する (prompts/96・107・112)。
+  // サーバーは同じ値を started.module としてそのまま返す
   start(
     project: Project,
     paramPath: string,
     values: number[],
     parallel: number,
-    module: "pic" | "pic1d" | "fluid1d",
+    module: "pic" | "pic1d" | "fluid1d" | "fluid2d",
   ): void {
     this.connect((ws) => {
       const cmd: SweepClientCommand = {

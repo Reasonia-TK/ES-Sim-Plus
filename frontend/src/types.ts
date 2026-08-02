@@ -599,6 +599,140 @@ export type Fluid1dClientCommand =
       phase_bins?: number | null;
     };
 
+// ---- 2D/軸対称 プラズマ流体 (ドリフト拡散 + 電子エネルギー、EAFE/FEM-SG、
+// backend/es_sim/schema.py Fluid2dSettings・fluid2d.py build_fluid2d_result と手動同期、
+// prompts/111-113) ---------------------------------------------------------------------
+// fluid1d の 2D/軸対称拡張だが、geometry/mesh・境界条件 (Dirichlet 電圧・voltage_rf・
+// voltage_waveform・symmetry・see_gamma・conductor/dielectric 領域) は pic1d/fluid1d のような
+// 専用設定を持たず、既存のプロジェクト設定 (Project.geometry) をそのまま使う (2D PIC と
+// 同一条件で比較できることが設計目標)。このためフロントのキャンバスも CadCanvas のまま
+// (1D のような専用 PlotView は作らない) で、フィールド表示は既存の picFieldView/picFrame と
+// 同じ汎用機構に載せる (App.tsx 参照)。
+
+export interface Fluid2dSettings {
+  init_density_m3: number;    // 初期プラズマ密度 (一様、準中性) [m^-3]
+  init_te_ev?: number;
+  gas_pressure_pa: number;    // 一様背景ガス圧 [Pa]
+  gas_temperature_k?: number;
+  ion_mass_amu?: number;
+  // イオン低電界移動度 (fluid1d.py と同じ規約: μ_i = mu_i_ref・(n_ref_m3/n_g))
+  mu_i_ref?: number;
+  n_ref_m3?: number;
+  t_i_ev?: number;             // イオン温度 (D_i = μ_i・T_i)
+  electron_processes?: XsProcess[]; // 空/未指定なら eduPIC Ar 解析式を既定使用
+  dt?: number | null;          // 秒。null なら RF周期/2000 と 1e-10 の小さい方
+  n_steps?: number;
+  frame_every?: number;
+  avg_steps?: number | null;   // 完了時に返す時間平均フィールドの平均ステップ数。null = 最後の25%
+  phase_bins?: number;         // RF 1周期の位相分解ビン数 (0=無効、既定0)
+}
+
+// server → client (/ws/fluid2d)。2D PIC (/ws/pic) の started と異なりメッシュを含まない —
+// フロントは既に POST /mesh の結果 (同じ project から生成) を持っている前提で、
+// 節点番号・座標がそのまま一致する (server.py のコメント参照)
+export interface Fluid2dStartedMsg {
+  type: "started";
+  n_steps: number;
+  step_offset: number; // 続き実行では前回までの累計 (frame.step が通算で進む)
+  dt: number;
+  warnings: string[];
+}
+
+// フレームは phi/n_e/n_i/t_e すべて全節点長の配列 (fluid2d.py _make_frame と同じ規約。
+// 粒子を追わないため PicFrameMsg のような particles は持たない)
+export interface Fluid2dFrameMsg {
+  type: "frame";
+  step: number;
+  t: number;
+  phi: number[]; // 節点値 [V]
+  n_e: number[]; // 節点値 [m^-3]
+  n_i: number[]; // 節点値 [m^-3]
+  t_e: number[]; // 節点値 [eV]
+  counts: Record<string, number>; // history の各キーの最新値 (step/t/n_e_total/n_i_total/wall_*/gen_total)
+  elapsed_s: number;
+}
+
+// done メッセージの history (列ごとの辞書。fluid2d.py の _HISTORY_KEYS と同じキー。
+// 2D は壁が多数になり得るため左右の区別をせず全壁合計にまとめる、fluid1d との差分)
+export interface Fluid2dHistoryDict {
+  step: number[];
+  t: number[];
+  n_e_total: number[]; // 輸送領域全体の積算実密度 (体積重み和)
+  n_i_total: number[];
+  wall_e: number[]; // 全壁合計の電子吸収 (累計)
+  wall_i: number[]; // 全壁合計のイオン吸収 (累計)
+  gen_total: number[]; // 電離による累計生成数
+}
+
+// 完了時の時間平均フィールド一式 (done メッセージの result.fields)。phi/n_e/n_i/t_e/ionization は
+// 全節点長 (非輸送領域の節点は0)、e_abs のみ要素長 (E ベクトルを平均してから絶対値、pic.py と同じ規約)
+export interface Fluid2dFields {
+  phi: number[];
+  e_abs: number[];
+  n_e: number[];
+  n_i: number[];
+  t_e: number[];
+  ionization: number[];
+  avg_steps: number; // 実際に平均したステップ数
+}
+
+// RF 1周期の位相分解データ (done メッセージの result.cycle、アニメーション用)。PicCycle と異なり
+// period_s ではなく freq_hz を持ち (fluid2d.py cycle_data と同じキー)、粒子スナップショットは無い
+export interface Fluid2dCycle {
+  bins: number;
+  freq_hz: number;
+  phi: number[][]; // bins × 節点
+  n_e: number[][];
+  n_i: number[][];
+  t_e: number[][];
+}
+
+// 壁 (吸収境界) の累計吸収数。2D は左右の区別をせず全壁合計 (fluid2d.py Fluid2dSimulation.wall と同じ)
+export interface Fluid2dWallCounts {
+  electron: number;
+  ion: number;
+}
+
+// /ws/fluid2d の done.result (= ResultsBundle.fluid2d に保存する形そのもの)
+export interface Fluid2dResult {
+  history: Fluid2dHistoryDict;
+  fields: Fluid2dFields | null;
+  cycle: Fluid2dCycle | null;
+  walls: Fluid2dWallCounts;
+  gen_total: number; // 電離による累計生成数 (history とは別に累計値そのものを持つ)
+  elapsed_s: number;
+  timing: Record<string, number>; // poisson/transport/energy/other (+ total、server 側で加算)
+  settings: Fluid2dSettings; // 実行に使った設定 (グリッド再構成に使える)
+}
+
+export interface Fluid2dDoneMsg {
+  type: "done";
+  result: Fluid2dResult;
+}
+
+export interface Fluid2dErrorMsg {
+  type: "error";
+  detail: string;
+}
+
+export type Fluid2dServerMessage =
+  | Fluid2dStartedMsg
+  | Fluid2dFrameMsg
+  | Fluid2dDoneMsg
+  | Fluid2dErrorMsg;
+
+// client → server コマンド (/ws/fluid2d)。fluid1d と同じく continue の extra_steps は必須
+export type Fluid2dClientCommand =
+  | { cmd: "start"; project: Project }
+  | { cmd: "stop" }
+  | {
+      cmd: "continue";
+      extra_steps: number;
+      frame_every?: number;
+      avg_steps?: number | null;
+      phase_bins?: number | null;
+    };
+
 // ---- DSMC (定常ガス流れ、prompts/54、backend/es_sim/schema.py と手動同期) ----------------
 
 // DSMC のガス分子モデル (VHS: Variable Hard Sphere)。既定は Ar
@@ -1091,6 +1225,10 @@ export interface Project {
   // 1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、prompts/104-108)。null/undefined なら無効。
   // pic1d と同一条件で比較できるよう設計された専用ソルバー (backend/es_sim/fluid1d.py)
   fluid1d?: Fluid1dSettings | null;
+  // 2D/軸対称 プラズマ流体 (ドリフト拡散 + 電子エネルギー、EAFE/FEM-SG、prompts/111-113)。
+  // null/undefined なら無効。geometry/mesh・境界条件は既存のプロジェクト設定をそのまま使う
+  // (backend/es_sim/fluid2d.py)。pic と同様キャンバスは CadCanvas を使う
+  fluid2d?: Fluid2dSettings | null;
   // VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。null/undefined なら無効。
   // pic1d 同様 geometry/mesh とは無関係な専用ソルバー (backend/es_sim/tl.py)
   tl?: TlSettings | null;
@@ -1170,10 +1308,10 @@ export interface SweepStartedMsg {
   n_cases: number;
   param_path: string;
   values: number[];
-  // 解決済みの実行対象 ("pic"=2D FEM-PIC / "pic1d"=1D PIC-MCC / "fluid1d"=1D プラズマ流体)。
-  // 未指定リクエストでも server 側 (resolve_sweep_module) が必ず解決して返す
-  // (表示用、prompts/96・107)
-  module: "pic" | "pic1d" | "fluid1d";
+  // 解決済みの実行対象 ("pic"=2D FEM-PIC / "pic1d"=1D PIC-MCC / "fluid1d"=1D プラズマ流体 /
+  // "fluid2d"=2D/軸対称プラズマ流体)。未指定リクエストでも server 側 (resolve_sweep_module) が
+  // 必ず解決して返す (表示用、prompts/96・107・112)
+  module: "pic" | "pic1d" | "fluid1d" | "fluid2d";
 }
 
 // 数百ms〜数秒間隔でケースごとに届く進捗 (batch.py の間引きに準じる)
@@ -1215,7 +1353,7 @@ export type SweepServerMessage =
   | SweepDoneMsg
   | SweepErrorMsg;
 
-// client→server コマンド。module は自動判定に頼らず UI 確定値を明示送信する (prompts/96)
+// client→server コマンド。module は自動判定に頼らず UI 確定値を明示送信する (prompts/96・112)
 export type SweepClientCommand =
   | {
       cmd: "start";
@@ -1223,7 +1361,7 @@ export type SweepClientCommand =
       param_path: string;
       values: number[];
       parallel: number;
-      module: "pic" | "pic1d" | "fluid1d";
+      module: "pic" | "pic1d" | "fluid1d" | "fluid2d";
     }
   | { cmd: "stop" };
 
@@ -1262,6 +1400,9 @@ export interface ResultsBundle {
   pic1d?: Pic1dResult | null;
   // 1D プラズマ流体の完了結果一式 (prompts/104-108)。done.result そのもの (settings を含み自己完結)
   fluid1d?: Fluid1dResult | null;
+  // 2D/軸対称 プラズマ流体の完了結果一式 (prompts/111-113)。done.result そのもの
+  // (settings を含み自己完結)。mesh は含まない (既存の mesh 結果を流用する、Fluid2dResult 参照)
+  fluid2d?: Fluid2dResult | null;
   // VHF 定在波の完了結果一式 (prompts/101)。done.result そのもの (settings を含み自己完結)
   tl?: TlResult | null;
 }

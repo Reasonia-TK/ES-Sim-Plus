@@ -33,6 +33,12 @@ import type { CyclePicField, PicLiveField, PicResultField } from "./panels/PicPa
 import Pic1dPanel from "./panels/Pic1dPanel";
 import Fluid1dPanel, { DEFAULT_FLUID1D } from "./panels/Fluid1dPanel";
 import Fluid1dPlotView from "./canvas/Fluid1dPlotView";
+import Fluid2dPanel, { DEFAULT_FLUID2D, FLUID2D_FIELD_META } from "./panels/Fluid2dPanel";
+import type {
+  Fluid2dCycleField,
+  Fluid2dLiveField,
+  Fluid2dResultField,
+} from "./panels/Fluid2dPanel";
 import TlPanel from "./panels/TlPanel";
 import TlPlotView from "./canvas/TlPlotView";
 import GasPanel, { DEFAULT_BOUNDARY, DEFAULT_DSMC, GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
@@ -45,6 +51,8 @@ import { Pic1dClient } from "./pic1dClient";
 import type { Pic1dClientCallbacks } from "./pic1dClient";
 import { Fluid1dClient } from "./fluid1dClient";
 import type { Fluid1dClientCallbacks } from "./fluid1dClient";
+import { Fluid2dClient } from "./fluid2dClient";
+import type { Fluid2dClientCallbacks } from "./fluid2dClient";
 import { TlClient } from "./tlClient";
 import type { TlClientCallbacks } from "./tlClient";
 import { DsmcClient } from "./dsmcClient";
@@ -68,6 +76,11 @@ import type {
   Fluid1dResult,
   Fluid1dSettings,
   Fluid1dStartedMsg,
+  Fluid2dCycle,
+  Fluid2dFrameMsg,
+  Fluid2dResult,
+  Fluid2dSettings,
+  Fluid2dStartedMsg,
   Health,
   MeshResult,
   ParticleSettings,
@@ -284,6 +297,7 @@ const NODE_TITLES: Record<TreeNode, string> = {
   "study-pic": "スタディ — PIC-MCC",
   "study-pic1d": "スタディ — PIC-MCC 1D",
   "study-fluid1d": "スタディ — 流体1D",
+  "study-fluid2d": "スタディ — 流体2D",
   "study-tl": "スタディ — VHF定在波",
   "study-gas": "スタディ — DSMC",
   "study-sweep": "スタディ — パラメータスイープ",
@@ -292,6 +306,7 @@ const NODE_TITLES: Record<TreeNode, string> = {
   "result-pic": "結果 — PIC-MCC",
   "result-pic1d": "結果 — PIC-MCC 1D",
   "result-fluid1d": "結果 — 流体1D",
+  "result-fluid2d": "結果 — 流体2D",
   "result-tl": "結果 — VHF定在波",
   "result-gas": "結果 — DSMC",
 };
@@ -473,6 +488,7 @@ export default function App() {
   const picStartTimeRef = useRef<number | null>(null);
   const pic1dStartTimeRef = useRef<number | null>(null);
   const fluid1dStartTimeRef = useRef<number | null>(null);
+  const fluid2dStartTimeRef = useRef<number | null>(null);
   const tlStartTimeRef = useRef<number | null>(null);
   const gasStartTimeRef = useRef<number | null>(null);
   const sweepStartTimeRef = useRef<number | null>(null);
@@ -621,6 +637,43 @@ export default function App() {
   // pic1d と同じく geometry/mesh に依存しないため「食い違いで無効化する」概念は無い
   const [fluid1dContinueReady, setFluid1dContinueReady] = useState(false);
 
+  // 2D/軸対称 プラズマ流体 (ドリフト拡散 + 電子エネルギー、EAFE/FEM-SG、prompts/111-113)。
+  // fluid1d と異なりジオメトリ・メッシュ・境界条件は既存のプロジェクト設定をそのまま使う
+  // (2D PIC と同一条件で比較できる設計目標) が、実行状態・設定自体は他の * d 系と同じく
+  // project 本体とは独立の state で持つ (サーバー側のロック・保持スロットも別、fluid2dClient.ts 参照)。
+  // キャンバス表示は CadCanvas の既存汎用機構 (picFieldView/picFrame) に載せるため、
+  // 2D PIC (pic) と同じ「結果表示/ライブ表示/周期アニメ」の選択状態一式を持つ
+  const [fluid2d, setFluid2d] = useState<Fluid2dSettings>(DEFAULT_FLUID2D);
+  const [fluid2dRunning, setFluid2dRunning] = useState(false);
+  const [fluid2dStarted, setFluid2dStarted] = useState<Fluid2dStartedMsg | null>(null);
+  const [fluid2dFrame, setFluid2dFrame] = useState<Fluid2dFrameMsg | null>(null);
+  // done メッセージで受け取った結果一式 (settings を含み自己完結。fields/cycle もここから読む —
+  // PIC と違い fluid2d の done は結果を1つの result にまとめて返すため、fields/cycle 用に
+  // 別の state を重複して持たない、fluid1d/tl と同じ設計)
+  const [fluid2dResult, setFluid2dResult] = useState<Fluid2dResult | null>(null);
+  const [fluid2dError, setFluid2dError] = useState<string | null>(null);
+  const fluid2dClientRef = useRef<Fluid2dClient | null>(null);
+  const [fluid2dContinueReady, setFluid2dContinueReady] = useState(false);
+  // 「続きから」無効化その2: fluid2d はジオメトリに依存する (2D PIC の picProjectChangedSinceRun
+  // と同じ理由) ため、前回実行以降にジオメトリ・境界条件が編集されたら続き実行を無効化する
+  const [fluid2dProjectChangedSinceRun, setFluid2dProjectChangedSinceRun] = useState(false);
+  // 「結果表示」セレクトの選択と対数スケール (2D PIC の picResultField/picLogScale と同じ役割)
+  const [fluid2dResultField, setFluid2dResultField] = useState<Fluid2dResultField>("live");
+  const [fluid2dLogScale, setFluid2dLogScale] = useState(false);
+  // ライブモニタの表示フィールドと対数スケール (2D PIC の picLiveField/picLiveLogScale と同じ役割)
+  const [fluid2dLiveField, setFluid2dLiveField] = useState<Fluid2dLiveField>("phi");
+  const [fluid2dLiveLogScale, setFluid2dLiveLogScale] = useState(false);
+  // 周期アニメーションプレイヤーの状態一式 (2D PIC の cycleField 等と同じ役割)。データ自体
+  // (fluid2dResult.cycle) とは別に、UI の選択状態のみをここで持つ
+  const [fluid2dCycleField, setFluid2dCycleField] = useState<Fluid2dCycleField>("phi");
+  const [fluid2dCycleLogScale, setFluid2dCycleLogScale] = useState(false);
+  const [fluid2dCyclePlaying, setFluid2dCyclePlaying] = useState(false);
+  const [fluid2dCycleBinIndex, setFluid2dCycleBinIndex] = useState(0);
+  const [fluid2dCycleFps, setFluid2dCycleFps] = useState(10);
+  // 周期アニメーションが「結果表示より優先して描画される」のは、ユーザーがアニメを操作している
+  // 間だけにする (2D PIC の cycleViewActive と同じ不具合修正の考え方)
+  const [fluid2dCycleViewActive, setFluid2dCycleViewActive] = useState(false);
+
   // VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。pic1d と同様 geometry/mesh とは
   // 無関係な独立 state (Undo/Redo 対象外)。continue が無いため pic1d の *ContinueReady に
   // 相当する state は不要 (毎回フルの定常化をやり直すだけ、tl.py の docstring 参照)
@@ -676,7 +729,8 @@ export default function App() {
   // 実行経過時間のリアルタイム表示 (ステータスバー、prompts/86)。何か実行中の間だけ
   // 1秒間隔で再レンダーする (アイドル時に setInterval を張り続けて無駄な再レンダーを
   // 起こさないようにするため、実行中フラグが1つでも立っているときだけ張る)
-  const anyRunning = busy || picRunning || pic1dRunning || fluid1dRunning || tlRunning || gasRunning || sweepRunning;
+  const anyRunning =
+    busy || picRunning || pic1dRunning || fluid1dRunning || fluid2dRunning || tlRunning || gasRunning || sweepRunning;
   useEffect(() => {
     if (!anyRunning) return;
     const id = setInterval(() => setElapsedTick((t) => t + 1), 1000);
@@ -694,12 +748,25 @@ export default function App() {
     return () => clearInterval(id);
   }, [cyclePlaying, cycleFps, picCycle]);
 
+  // 流体 (2D) の周期アニメーション再生ループ (上記 PIC のものと同じ設計。データは
+  // fluid2dResult.cycle から読む点のみが異なる)
+  useEffect(() => {
+    const cycle = fluid2dResult?.cycle;
+    if (!fluid2dCyclePlaying || !cycle || cycle.bins <= 0) return;
+    const bins = cycle.bins;
+    const id = setInterval(() => {
+      setFluid2dCycleBinIndex((i) => (i + 1) % bins);
+    }, 1000 / fluid2dCycleFps);
+    return () => clearInterval(id);
+  }, [fluid2dCyclePlaying, fluid2dCycleFps, fluid2dResult]);
+
   // アンマウント時に WebSocket 接続を確実に閉じる
   useEffect(() => {
     return () => {
       picClientRef.current?.close();
       pic1dClientRef.current?.close();
       fluid1dClientRef.current?.close();
+      fluid2dClientRef.current?.close();
       tlClientRef.current?.close();
       dsmcClientRef.current?.close();
       sweepClientRef.current?.close();
@@ -764,6 +831,7 @@ export default function App() {
     setTraceElapsedS(null);
     setGasResult(null); // メッシュが変わりうるため DSMC 結果 (要素値) も破棄する
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
+    setFluid2dProjectChangedSinceRun(true); // 流体2D続き実行も同じ理由で無効化する
     // DSMC続き実行の無効化は n_steps/avg_steps/threads/smoothing_passes 以外が変わったときだけ
     // (dsmcContinueRelevantKey 参照)。ステップ数を増やして続き実行、を妨げないための例外
     if (dsmcContinueRelevantKey(prev) !== dsmcContinueRelevantKey(next)) {
@@ -787,6 +855,7 @@ export default function App() {
     setSelectedRegionId((sel) => ensureSelection(prev, sel));
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
     setGasProjectChangedSinceRun(true); // Undo は任意の過去状態へ飛びうるため常に無効化する
+    setFluid2dProjectChangedSinceRun(true); // 流体2D続き実行も同様に常に無効化する
   }, [history, ensureSelection]);
 
   const doRedo = useCallback(() => {
@@ -804,6 +873,7 @@ export default function App() {
     setSelectedRegionId((sel) => ensureSelection(next, sel));
     setPicProjectChangedSinceRun(true); // PIC続き実行はサーバー状態と食い違うため無効化する
     setGasProjectChangedSinceRun(true); // Redo も任意の過去状態へ飛びうるため常に無効化する
+    setFluid2dProjectChangedSinceRun(true); // 流体2D続き実行も同様に常に無効化する
   }, [history, ensureSelection]);
 
   // キーボードショートカット: Ctrl+Z (Undo) / Ctrl+Y, Ctrl+Shift+Z (Redo)
@@ -970,6 +1040,7 @@ export default function App() {
     pic: withInjectionEmitter(pic, particles.emitter),
     pic1d,
     fluid1d,
+    fluid2d,
   };
 
   // スイープ実行中のコールバック生成 (PIC/DSMC の makePicCallbacks/makeDsmcCallbacks と同じ考え方)
@@ -1051,7 +1122,7 @@ export default function App() {
     paramPath: string,
     values: number[],
     parallel: number,
-    module: "pic" | "pic1d" | "fluid1d",
+    module: "pic" | "pic1d" | "fluid1d" | "fluid2d",
   ) => {
     sweepStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setSweepError(null);
@@ -1298,6 +1369,98 @@ export default function App() {
 
   const runFluid1dStop = () => {
     fluid1dClientRef.current?.stop();
+  };
+
+  // 流体 (2D) 実行中のコールバック生成 (2D PIC の makePicCallbacks と同じ設計だが、
+  // done.result が settings を含み自己完結した1つのバンドルを返す点は fluid1d と同じ)
+  const makeFluid2dCallbacks = (): Fluid2dClientCallbacks => ({
+    onStarted: (msg) => {
+      setFluid2dStarted(msg);
+      setFluid2dFrame(null); // ライブ表示を新しい実行区間の内容に自然に切り替える
+    },
+    onFrame: (msg) => {
+      setFluid2dFrame(msg);
+    },
+    onDone: (msg) => {
+      setFluid2dResult(msg.result);
+      setFluid2dRunning(false);
+      setFluid2dContinueReady(true); // done (stop 済みも含む) したので続き実行が可能になる
+    },
+    onError: (detail) => {
+      setFluid2dError(detail);
+      setFluid2dRunning(false);
+      setFluid2dContinueReady(false); // エラー後の状態は不定なので続き実行は無効のままにする
+    },
+    onClose: () => setFluid2dRunning(false),
+  });
+
+  // 流体2D開始: /ws/fluid2d の started はメッシュを含まない (server.py のコメント参照) ため、
+  // 2D PIC 開始時の「バックエンドが返すメッシュをそのまま使う」挙動に相当するものとして、
+  // 開始前にフロント側で POST /mesh を実行し直し、フィールド描画に使う meshResult を
+  // 現在の project (fluid2d 実行に使われるものと同じ geometry/mesh) と確実に整合させる
+  // (prompts/113 の「実行前にメッシュ未生成なら2D PICと同じ挙動」の指示に対する対応:
+  // 2D PIC はバックエンドがメッシュを返すため自動的に整合するが、fluid2d はメッシュを
+  // 返さないため、フロント側の自動再生成でこれに揃える)
+  const runFluid2dStart = async () => {
+    fluid2dStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用
+    setFluid2dError(null);
+    setFluid2dStarted(null);
+    setFluid2dFrame(null);
+    setFluid2dRunning(true);
+    setFluid2dContinueReady(false);
+    setMeshPreviewFresh(false); // 新しい実行のライブ表示を優先する (2D PIC と同じ、prompts/89 ②)
+    // 新しい実行を開始したら結果フィールド表示 (前回 done の残骸) をリセットする
+    setFluid2dResult(null);
+    setFluid2dResultField("live");
+    setFluid2dLogScale(false);
+    setFluid2dCycleField("phi");
+    setFluid2dCycleLogScale(false);
+    setFluid2dCyclePlaying(false);
+    setFluid2dCycleBinIndex(0);
+    setFluid2dCycleViewActive(false);
+    try {
+      setMeshResult(await api.mesh(project));
+    } catch (e) {
+      setFluid2dError(String(e));
+      setFluid2dRunning(false);
+      return;
+    }
+    const client = new Fluid2dClient(makeFluid2dCallbacks());
+    fluid2dClientRef.current = client;
+    // 現在のプロジェクト状態をサーバーへ送るので、続き実行の食い違いフラグをここで解消する
+    setFluid2dProjectChangedSinceRun(false);
+    client.start({ ...project, fluid2d });
+  };
+
+  // 流体2D続きから実行: 保持中のシミュレーション状態 (場・時刻) を維持したまま
+  // extraSteps 分だけ追加実行する。フレーム間隔・平均ステップ数・位相ビン数は現在の fluid2d 設定を使う
+  // (メッシュは前回 start 時のものをサーバー側がそのまま保持しているため、ここでは再取得しない)
+  const runFluid2dContinue = (extraSteps: number) => {
+    if (!fluid2dClientRef.current || fluid2dRunning || !fluid2dContinueReady || fluid2dProjectChangedSinceRun) return;
+    fluid2dStartTimeRef.current = Date.now();
+    setFluid2dError(null);
+    setFluid2dRunning(true);
+    setFluid2dContinueReady(false);
+    setMeshPreviewFresh(false);
+    // 表示状態を新規実行と同様にリセットする (2D PIC の runPicContinue と同じ不具合修正の考え方:
+    // 前回 done の cycle / 結果フィールド選択が残っているとライブ表示が隠れてしまう)
+    setFluid2dResult(null);
+    setFluid2dResultField("live");
+    setFluid2dLogScale(false);
+    setFluid2dCyclePlaying(false);
+    setFluid2dCycleBinIndex(0);
+    setFluid2dCycleViewActive(false);
+    fluid2dClientRef.current.setCallbacks(makeFluid2dCallbacks());
+    fluid2dClientRef.current.continueRun({
+      extra_steps: extraSteps,
+      frame_every: fluid2d.frame_every,
+      avg_steps: fluid2d.avg_steps ?? null,
+      phase_bins: fluid2d.phase_bins ?? null,
+    });
+  };
+
+  const runFluid2dStop = () => {
+    fluid2dClientRef.current?.stop();
   };
 
   // VHF 定在波 (prompts/101) 実行中のコールバック生成。continue が無いため
@@ -1863,6 +2026,7 @@ export default function App() {
       pic: withInjectionEmitter(pic, particles.emitter),
       pic1d,
       fluid1d,
+      fluid2d,
       tl,
     };
     saveTextFile("project.json", JSON.stringify(toSave, null, 2), "JSON", ["json"]).catch((err) => {
@@ -1879,6 +2043,7 @@ export default function App() {
       pic: withInjectionEmitter(pic, particles.emitter),
       pic1d,
       fluid1d,
+      fluid2d,
       tl,
     };
     // pic 結果は picStarted (mesh を含む) が無いと描画できないため、それが無い場合は同梱しない
@@ -1904,6 +2069,9 @@ export default function App() {
       pic1d: pic1dResult,
       // fluid1d 結果も同様に settings を含み自己完結 (done.result そのもの、prompts/104-109)
       fluid1d: fluid1dResult,
+      // fluid2d 結果も同様に settings を含み自己完結 (done.result そのもの)。mesh は含まない
+      // (フィールド描画には上記 meshResult を流用する、prompts/111-113)
+      fluid2d: fluid2dResult,
       // tl 結果も同様に settings を含み自己完結 (done.result そのもの、prompts/101)
       tl: tlResult,
     };
@@ -1953,6 +2121,9 @@ export default function App() {
     // 1D 流体設定も同様 (fluid1d が無い旧形式ファイルは丸ごと既定値に戻す、prompts/104-109)
     const loadedFluid1d = raw.fluid1d;
     setFluid1d(loadedFluid1d ? { ...DEFAULT_FLUID1D, ...loadedFluid1d } : DEFAULT_FLUID1D);
+    // 2D 流体設定も同様 (fluid2d が無い旧形式ファイルは丸ごと既定値に戻す、prompts/111-113)
+    const loadedFluid2d = raw.fluid2d;
+    setFluid2d(loadedFluid2d ? { ...DEFAULT_FLUID2D, ...loadedFluid2d } : DEFAULT_FLUID2D);
     // VHF 定在波設定も同様 (tl が無い旧形式ファイルは丸ごと既定値に戻す、prompts/101)
     const loadedTl = raw.tl;
     setTl(loadedTl ? { ...DEFAULT_TL, ...loadedTl } : DEFAULT_TL);
@@ -1988,6 +2159,20 @@ export default function App() {
       setFluid1dFrame(null);
       setFluid1dResult(results.fluid1d ?? null);
       setFluid1dContinueReady(false); // サーバー側に保持状態が無いため続き実行は無効にする
+      // 2D 流体の結果 (settings を含み自己完結)。started/frame は保存対象に含めていないため
+      // 常に null に戻す (result-fluid2d ページはこの fluid2dResult の有無だけで結果表示に切り替わる)
+      setFluid2dStarted(null);
+      setFluid2dFrame(null);
+      setFluid2dResult(results.fluid2d ?? null);
+      setFluid2dContinueReady(false); // サーバー側に保持状態が無いため続き実行は無効にする
+      setFluid2dProjectChangedSinceRun(true);
+      // 結果表示セレクト・周期アニメの再生系も既定値へ戻す (フィールド選択・データ自体は
+      // 復元済みの値を保つ、2D PIC の picCycle 系リセットと同じ考え方)
+      setFluid2dResultField("live");
+      setFluid2dLogScale(false);
+      setFluid2dCyclePlaying(false);
+      setFluid2dCycleBinIndex(0);
+      setFluid2dCycleViewActive(false);
       // VHF 定在波の結果 (settings を含み自己完結)。started/progress は保存対象に含めていないため
       // 常に null に戻す (result-tl ページはこの tlResult の有無だけで結果表示に切り替わる、prompts/101)
       setTlStarted(null);
@@ -2050,6 +2235,7 @@ export default function App() {
     !!picStarted ||
     !!pic1dResult ||
     !!fluid1dResult ||
+    !!fluid2dResult ||
     !!tlResult;
 
   // 「続きから実行」ボタンの有効条件: 直前の実行が done/stop 済みで現在実行中でなく、
@@ -2062,6 +2248,10 @@ export default function App() {
 
   // 1D 流体の「続きから」有効条件。pic1dCanContinue と同じ考え方
   const fluid1dCanContinue = !!health && fluid1dContinueReady && !fluid1dRunning;
+
+  // 2D 流体の「続きから」有効条件。ジオメトリに依存するため picCanContinue と同じ考え方
+  const fluid2dCanContinue =
+    !!health && fluid2dContinueReady && !fluid2dRunning && !fluid2dProjectChangedSinceRun;
 
   // DSMC「続きから実行」ボタンの有効条件 (PIC の picCanContinue と同じ考え方)
   const gasCanContinue = !!health && gasContinueReady && !gasRunning && !gasProjectChangedSinceRun;
@@ -2191,11 +2381,103 @@ export default function App() {
         })()
       : null;
 
+  // 流体 (2D) の done 結果 (fields/cycle)。fluid2dResult が1つのバンドルなので、PIC の
+  // ような複数 state への分解はせず、ここで簡潔な別名として取り出すだけにする
+  const fluid2dFields = fluid2dResult?.fields ?? null;
+  const fluid2dCycle = fluid2dResult?.cycle ?? null;
+
+  // 流体 (2D) ライブ描画用ビュー (picLiveFrame と同じ設計。フレームは phi/n_e/n_i/t_e が
+  // 全て全節点値なので nodeBased は常に true、粒子を追わないため particles は常に空にする —
+  // CadCanvas 側の picFrame 経路 (drawSpecies に空配列を渡すだけ) をそのまま使うためのダミー)
+  const fluid2dLiveFrame: PicLiveFrame | null =
+    fluid2dStarted && fluid2dFrame && meshResult
+      ? (() => {
+          const density =
+            fluid2dLiveField === "n_e" ? fluid2dFrame.n_e :
+            fluid2dLiveField === "n_i" ? fluid2dFrame.n_i :
+            fluid2dLiveField === "t_e" ? fluid2dFrame.t_e : undefined;
+          const useDensity = fluid2dLiveField !== "phi" && density !== undefined;
+          return {
+            mesh: meshResult,
+            values: useDensity ? (density as number[]) : fluid2dFrame.phi,
+            nodeBased: true,
+            unit: useDensity ? FLUID2D_FIELD_META[fluid2dLiveField].unit : "V",
+            log: useDensity && fluid2dLiveLogScale,
+            particles: { electron: [], ion: [] },
+          };
+        })()
+      : null;
+
+  // 流体 (2D) 結果フィールド表示用ビュー (picFieldView と同じ設計)
+  const fluid2dFieldView: PicFieldView | null =
+    fluid2dResultField !== "live" && fluid2dFields && meshResult
+      ? {
+          mesh: meshResult,
+          values: fluid2dFields[fluid2dResultField],
+          nodeBased: FLUID2D_FIELD_META[fluid2dResultField].nodeBased,
+          unit: FLUID2D_FIELD_META[fluid2dResultField].unit,
+          log: fluid2dLogScale,
+        }
+      : null;
+
+  // 流体 (2D) 周期アニメーション用の固定カラースケール (cycleFixedRange と同じ設計)
+  const fluid2dCycleFixedRange = useMemo(() => {
+    if (!fluid2dCycle) return null;
+    const rows = fluid2dCycle[fluid2dCycleField];
+    if (!rows) return null;
+    let min = Infinity;
+    let max = -Infinity;
+    let minPositive = Infinity;
+    for (const row of rows) {
+      for (const v of row) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+        if (v > 0 && v < minPositive) minPositive = v;
+      }
+    }
+    if (!Number.isFinite(min)) { min = 0; max = 0; }
+    return { min, max, minPositive };
+  }, [fluid2dCycle, fluid2dCycleField]);
+
+  // 流体 (2D) 周期アニメーション表示用ビュー (picCycleView と同じ設計。粒子スナップショットは無い)
+  const fluid2dCycleView: PicFieldView | null =
+    fluid2dCycleViewActive && fluid2dCycle && meshResult && fluid2dCycleFixedRange
+      ? (() => {
+          const rows = fluid2dCycle[fluid2dCycleField];
+          if (!rows) return null;
+          const bin = Math.min(fluid2dCycleBinIndex, fluid2dCycle.bins - 1);
+          return {
+            mesh: meshResult,
+            values: rows[bin],
+            nodeBased: true,
+            unit: FLUID2D_FIELD_META[fluid2dCycleField].unit,
+            log: fluid2dCycleLogScale,
+            fixedRange: fluid2dCycleFixedRange,
+          };
+        })()
+      : null;
+
+  // 「結果 — 流体 (2D)」ノード選択中かどうか (onGasNode と同じ役割の判定)
+  const onFluid2dNode = activeNode === "study-fluid2d" || activeNode === "result-fluid2d";
+
   // シースエッジ用の n_e/n_i 密度ソース (prompts/98)。位相アニメ表示中はその現在ビン、
   // そうでなければ時間平均フィールドを使う (picCycleView の density 版という位置づけ)。
-  // どちらも無ければ null (等値線・評価ラインの計算そのものをスキップする)
-  const sheathSource: SheathDensitySource | null =
-    cycleViewActive && picCycle && picStarted
+  // どちらも無ければ null (等値線・評価ラインの計算そのものをスキップする)。
+  // 流体 (2D) ノード選択中は同じ機構を fluid2d 側のデータで解決する (onFluid2dNode で分岐、
+  // onGasNode と同じ設計) — シースエッジ等値線が流体フィールドでも自動的に効くようにするための配線
+  const sheathSource: SheathDensitySource | null = onFluid2dNode
+    ? (fluid2dCycleViewActive && fluid2dCycle && meshResult
+        ? (() => {
+            const bin = Math.min(fluid2dCycleBinIndex, fluid2dCycle.bins - 1);
+            const nE = fluid2dCycle.n_e[bin];
+            const nI = fluid2dCycle.n_i[bin];
+            if (!nE || !nI) return null;
+            return { mesh: meshResult, nE, nI };
+          })()
+        : fluid2dFields && meshResult
+          ? { mesh: meshResult, nE: fluid2dFields.n_e, nI: fluid2dFields.n_i }
+          : null)
+    : cycleViewActive && picCycle && picStarted
       ? (() => {
           const bin = Math.min(cycleBinIndex, picCycle.bins - 1);
           const nE = picCycle.n_e[bin];
@@ -2295,12 +2577,14 @@ export default function App() {
         }
       : null;
 
-  // 描画優先順位: 周期アニメーション > 結果フィールド表示 (PIC) > ガス流れ結果表示
+  // 描画優先順位: 周期アニメーション > 結果フィールド表示 (PIC/流体2D) > ガス流れ結果表示
   // (> ライブ表示 > Solve結果、CadCanvas側で処理)。
   // CadCanvas へは既存の picFieldView prop をそのまま使い回す (新規propは増やさない)。
-  // ただしガス関連ノード選択中は PIC 側のビュー (周期アニメ・結果フィールド・ライブ) を
-  // 抑止してガス結果を優先する (不具合修正: PIC 実行後に「ガス流れ結果」を開いても
-  // PIC の結果フィールドが優先チェーンで勝ち続け、DSMC の数密度等が見えなかった)
+  // ガス関連ノード選択中は PIC 側のビュー (周期アニメ・結果フィールド・ライブ) を抑止して
+  // ガス結果を優先する (不具合修正: PIC 実行後に「ガス流れ結果」を開いても PIC の結果
+  // フィールドが優先チェーンで勝ち続け、DSMC の数密度等が見えなかった)。
+  // 流体 (2D) ノード選択中も同じ理由で PIC/ガス側のビューを抑止し、fluid2d 側 (onFluid2dNode、
+  // 上記シースエッジ計算のすぐ上で定義済み) を優先する
   const onGasNode = activeNode === "study-gas" || activeNode === "result-gas";
   // PIC-MCC 1D (prompts/91) 選択中は CadCanvas の代わりに Plot1dView を表示する
   // (1D は geometry/mesh と無関係なので CAD キャンバス自体が意味を持たない)
@@ -2314,7 +2598,11 @@ export default function App() {
   // 「結果 — 粒子追跡」ノード選択中は背景表示 (traceBackground) を CadCanvas の
   // result/fieldView に反映する (なし=背景の色マップ・等値線・ベクトルを消す)
   const onTraceResultNode = activeNode === "result-trace";
-  const finalPicFieldView = onGasNode ? gasFieldView : (picCycleView ?? picFieldView);
+  const finalPicFieldView = onFluid2dNode
+    ? (fluid2dCycleView ?? fluid2dFieldView)
+    : onGasNode
+      ? gasFieldView
+      : (picCycleView ?? picFieldView);
 
   // コンター配色select・プローブツールの活性化条件 (prompts/103)。CadCanvas へ実際に
   // 渡す result/picFrame と同じ式で「何らかのフィールドが描画されうるか」を近似する
@@ -2324,14 +2612,16 @@ export default function App() {
   // 実害は無い=単にボタンの活性/非活性が一瞬ずれるだけ)
   const fieldDisplayActive =
     !!finalPicFieldView ||
-    (!onGasNode && picLiveFrame != null) ||
+    (onFluid2dNode ? fluid2dLiveFrame != null : !onGasNode && picLiveFrame != null) ||
     (!(onTraceResultNode && traceBackground === "none") && result != null);
 
   // RF位相モニタ (prompts/82) の表示条件。CadCanvas 上でライブフレームが実際に描画されている
   // 間だけ出す: 周期アニメ/結果フィールド表示 (finalPicFieldView) やガス関連ノード選択中
   // (CadCanvas への picFrame prop 自体を onGasNode で止めている) は「ライブが見えていない」
-  // 状態なので合わせて非表示にする (描画優先ロジックの派生値をそのまま流用)
-  const showRfMonitorPanel = showRfMonitor && picFrame != null && !onGasNode && !finalPicFieldView;
+  // 状態なので合わせて非表示にする (描画優先ロジックの派生値をそのまま流用)。
+  // 流体 (2D) ノード選択中は PIC の RF位相モニタと無関係なので合わせて非表示にする
+  const showRfMonitorPanel =
+    showRfMonitor && picFrame != null && !onGasNode && !onFluid2dNode && !finalPicFieldView;
 
   // --- インスペクタ (中カラム) の表示制御 ---
   // FieldPanel は1インスタンスのみ mount し、選択ノードに応じて sections/edgeFilter を切替える
@@ -2356,6 +2646,10 @@ export default function App() {
   const showPic1dPage = activeNode === "study-pic1d" || activeNode === "result-pic1d";
   // 1D 流体 (prompts/104-109) も pic1d と同じ理由で study/result 共通の単一インスタンス
   const showFluid1dPage = activeNode === "study-fluid1d" || activeNode === "result-fluid1d";
+  // 2D 流体 (prompts/111-113) は CadCanvas を使う (2D PIC と同じ設計) ため、
+  // PicPanel と同じ setup/results 2インスタンス分割にする (pic1d/fluid1d の単一インスタンスとは異なる)
+  const showFluid2dSetupPage = activeNode === "study-fluid2d";
+  const showFluid2dResultsPage = activeNode === "result-fluid2d";
   // VHF 定在波 (prompts/101) も pic1d と同じ理由で study/result 共通の単一インスタンス
   const showTlPage = activeNode === "study-tl" || activeNode === "result-tl";
   const showGasSetupPage = activeNode === "study-gas";
@@ -2376,9 +2670,10 @@ export default function App() {
         : NODE_TITLES[activeNode];
 
   // --- 下部ステータスバー ---
-  // エラーは error → picError → pic1dError → fluid1dError → tlError → gasError → sweepError の
-  // 順で最初の非null を優先表示する
-  const statusError = error ?? picError ?? pic1dError ?? fluid1dError ?? tlError ?? gasError ?? sweepError;
+  // エラーは error → picError → pic1dError → fluid1dError → fluid2dError → tlError → gasError →
+  // sweepError の順で最初の非null を優先表示する
+  const statusError =
+    error ?? picError ?? pic1dError ?? fluid1dError ?? fluid2dError ?? tlError ?? gasError ?? sweepError;
   // ステータスバーのエラーを閉じる (各エラー state を一括クリア)。パネル内の
   // エラー表示は各パネルの error prop 経由で残したいが、実体は同じ state なので
   // ここでは「ステータスバーに居座る」問題の解消を優先して両方消える仕様とする
@@ -2387,6 +2682,7 @@ export default function App() {
     setPicError(null);
     setPic1dError(null);
     setFluid1dError(null);
+    setFluid2dError(null);
     setTlError(null);
     setGasError(null);
     setSweepError(null);
@@ -2412,6 +2708,12 @@ export default function App() {
   const fluid1dPct = fluid1dStarted && fluid1dStarted.n_steps > 0
     ? Math.min(100, Math.round((fluid1dSegStep / fluid1dStarted.n_steps) * 100))
     : 0;
+  // 2D 流体も続き実行で step が通算するため同じ考え方で区間内ステップを求める
+  const fluid2dStepOffset = fluid2dStarted?.step_offset ?? 0;
+  const fluid2dSegStep = Math.max(0, (fluid2dFrame?.step ?? fluid2dStepOffset) - fluid2dStepOffset);
+  const fluid2dPct = fluid2dStarted && fluid2dStarted.n_steps > 0
+    ? Math.min(100, Math.round((fluid2dSegStep / fluid2dStarted.n_steps) * 100))
+    : 0;
   const gasPct = gasProgress && gasProgress.nSteps > 0 ? Math.round((gasProgress.step / gasProgress.nSteps) * 100) : 0;
   // VHF 定在波 (prompts/101) は continue が無いため step は常に区間内の値そのもの (オフセット不要)
   const tlPct = tlProgress && tlProgress.nSteps > 0 ? Math.round((tlProgress.step / tlProgress.nSteps) * 100) : 0;
@@ -2423,6 +2725,7 @@ export default function App() {
   const picElapsedSec = picRunning && picStartTimeRef.current != null ? (Date.now() - picStartTimeRef.current) / 1000 : 0;
   const pic1dElapsedSec = pic1dRunning && pic1dStartTimeRef.current != null ? (Date.now() - pic1dStartTimeRef.current) / 1000 : 0;
   const fluid1dElapsedSec = fluid1dRunning && fluid1dStartTimeRef.current != null ? (Date.now() - fluid1dStartTimeRef.current) / 1000 : 0;
+  const fluid2dElapsedSec = fluid2dRunning && fluid2dStartTimeRef.current != null ? (Date.now() - fluid2dStartTimeRef.current) / 1000 : 0;
   const tlElapsedSec = tlRunning && tlStartTimeRef.current != null ? (Date.now() - tlStartTimeRef.current) / 1000 : 0;
   const gasElapsedSec = gasRunning && gasStartTimeRef.current != null ? (Date.now() - gasStartTimeRef.current) / 1000 : 0;
   const sweepElapsedSec = sweepRunning && sweepStartTimeRef.current != null ? (Date.now() - sweepStartTimeRef.current) / 1000 : 0;
@@ -2548,6 +2851,11 @@ export default function App() {
             fluid1dFrame={fluid1dFrame}
             fluid1dError={fluid1dError}
             fluid1dResult={fluid1dResult}
+            fluid2dRunning={fluid2dRunning}
+            fluid2dStarted={fluid2dStarted}
+            fluid2dFrame={fluid2dFrame}
+            fluid2dError={fluid2dError}
+            fluid2dResult={fluid2dResult}
             tlRunning={tlRunning}
             tlStarted={tlStarted}
             tlProgressStep={tlProgress?.step ?? null}
@@ -2832,6 +3140,99 @@ export default function App() {
                 frame={fluid1dFrame}
                 error={fluid1dError}
                 pic1d={pic1d}
+              />
+            </div>
+
+            {/* 2D/軸対称 流体 (prompts/111-113): CadCanvas を使う (2D PIC と同じ設計) ため、
+                study-fluid2d (設定+実行UI) と result-fluid2d (結果専用) は同じ props を渡す
+                Fluid2dPanel の2インスタンスで、mode だけを切り替えて表示する (PicPanel と同じ流儀) */}
+            <div style={{ display: showFluid2dSetupPage ? "block" : "none" }}>
+              <Fluid2dPanel
+                project={project}
+                fluid2d={fluid2d}
+                onChange={setFluid2d}
+                canRun={!!health}
+                running={fluid2dRunning}
+                onStart={runFluid2dStart}
+                onStop={runFluid2dStop}
+                canContinue={fluid2dCanContinue}
+                onContinue={runFluid2dContinue}
+                continueDisabledByProjectChange={fluid2dProjectChangedSinceRun}
+                started={fluid2dStarted}
+                frame={fluid2dFrame}
+                error={fluid2dError}
+                fluid1d={fluid1d}
+                result={fluid2dResult}
+                meshResult={meshResult}
+                resultField={fluid2dResultField}
+                onResultFieldChange={(v) => {
+                  // 結果表示の切替時はアニメ優先を解除し、選択したフィールドを表示する (PicPanel と同じ)
+                  setFluid2dResultField(v);
+                  setFluid2dCycleViewActive(false);
+                  setFluid2dCyclePlaying(false);
+                }}
+                logScale={fluid2dLogScale}
+                onLogScaleChange={setFluid2dLogScale}
+                liveField={fluid2dLiveField}
+                onLiveFieldChange={setFluid2dLiveField}
+                liveLogScale={fluid2dLiveLogScale}
+                onLiveLogScaleChange={setFluid2dLiveLogScale}
+                cycle={fluid2dCycle}
+                cycleField={fluid2dCycleField}
+                onCycleFieldChange={(v) => { setFluid2dCycleField(v); setFluid2dCycleViewActive(true); }}
+                cycleLogScale={fluid2dCycleLogScale}
+                onCycleLogScaleChange={(v) => { setFluid2dCycleLogScale(v); setFluid2dCycleViewActive(true); }}
+                cyclePlaying={fluid2dCyclePlaying}
+                onCyclePlayingChange={(v) => { setFluid2dCyclePlaying(v); if (v) setFluid2dCycleViewActive(true); }}
+                cycleBinIndex={fluid2dCycleBinIndex}
+                onCycleBinIndexChange={(v) => { setFluid2dCycleBinIndex(v); setFluid2dCycleViewActive(true); }}
+                cycleFps={fluid2dCycleFps}
+                onCycleFpsChange={setFluid2dCycleFps}
+                mode="setup"
+              />
+            </div>
+            <div style={{ display: showFluid2dResultsPage ? "block" : "none" }}>
+              <Fluid2dPanel
+                project={project}
+                fluid2d={fluid2d}
+                onChange={setFluid2d}
+                canRun={!!health}
+                running={fluid2dRunning}
+                onStart={runFluid2dStart}
+                onStop={runFluid2dStop}
+                canContinue={fluid2dCanContinue}
+                onContinue={runFluid2dContinue}
+                continueDisabledByProjectChange={fluid2dProjectChangedSinceRun}
+                started={fluid2dStarted}
+                frame={fluid2dFrame}
+                error={fluid2dError}
+                fluid1d={fluid1d}
+                result={fluid2dResult}
+                meshResult={meshResult}
+                resultField={fluid2dResultField}
+                onResultFieldChange={(v) => {
+                  setFluid2dResultField(v);
+                  setFluid2dCycleViewActive(false);
+                  setFluid2dCyclePlaying(false);
+                }}
+                logScale={fluid2dLogScale}
+                onLogScaleChange={setFluid2dLogScale}
+                liveField={fluid2dLiveField}
+                onLiveFieldChange={setFluid2dLiveField}
+                liveLogScale={fluid2dLiveLogScale}
+                onLiveLogScaleChange={setFluid2dLiveLogScale}
+                cycle={fluid2dCycle}
+                cycleField={fluid2dCycleField}
+                onCycleFieldChange={(v) => { setFluid2dCycleField(v); setFluid2dCycleViewActive(true); }}
+                cycleLogScale={fluid2dCycleLogScale}
+                onCycleLogScaleChange={(v) => { setFluid2dCycleLogScale(v); setFluid2dCycleViewActive(true); }}
+                cyclePlaying={fluid2dCyclePlaying}
+                onCyclePlayingChange={(v) => { setFluid2dCyclePlaying(v); if (v) setFluid2dCycleViewActive(true); }}
+                cycleBinIndex={fluid2dCycleBinIndex}
+                onCycleBinIndexChange={(v) => { setFluid2dCycleBinIndex(v); setFluid2dCycleViewActive(true); }}
+                cycleFps={fluid2dCycleFps}
+                onCycleFpsChange={setFluid2dCycleFps}
+                mode="results"
               />
             </div>
 
@@ -3222,7 +3623,7 @@ export default function App() {
             emitter={showEmitter ? particles.emitter : null}
             traceResult={traceResult}
             showTrajectories={showTrajectories}
-            picFrame={onGasNode ? null : picLiveFrame}
+            picFrame={onFluid2dNode ? fluid2dLiveFrame : onGasNode ? null : picLiveFrame}
             picFieldView={finalPicFieldView}
             gasParticles={gasRunning && gasShowParticles ? gasLiveParticles : null}
             gasBoundaries={showGasBoundaries ? gasBoundariesList : []}
@@ -3261,7 +3662,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > PIC-MCC 1D実行中 > 流体1D実行中 > VHF定在波実行中 > DSMC実行中 > 準備完了 の優先順位 */}
+      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > PIC-MCC 1D実行中 > 流体1D実行中 > 流体2D実行中 > VHF定在波実行中 > DSMC実行中 > 準備完了 の優先順位 */}
       <div className="statusbar">
         {/* 実行中は進捗を最優先 (エラーが残っていても別計算の進捗を隠さない)。
             アイドル時のエラーは×で閉じられる (居座り防止。新規実行開始でも自動クリア) */}
@@ -3304,6 +3705,15 @@ export default function App() {
             </span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${fluid1dPct}%` }} />
+            </div>
+          </>
+        ) : fluid2dRunning ? (
+          <>
+            <span>
+              流体2D 実行中... {fluid2dPct}% ({fluid2dSegStep}/{fluid2dStarted?.n_steps ?? 0}) — 経過 {formatElapsed(fluid2dElapsedSec)}
+            </span>
+            <div className="statusbar-progress">
+              <div className="statusbar-progress-bar" style={{ width: `${fluid2dPct}%` }} />
             </div>
           </>
         ) : tlRunning ? (
