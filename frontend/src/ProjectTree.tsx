@@ -6,6 +6,9 @@ import { isAxisymmetric, rfComponents } from "./types";
 import type {
   DsmcResult,
   EdgeBcType,
+  Fluid1dFrameMsg,
+  Fluid1dResult,
+  Fluid1dStartedMsg,
   Pic1dFrameMsg,
   Pic1dResult,
   Pic1dStartedMsg,
@@ -37,6 +40,7 @@ export type TreeNode =
   | "study-trace"
   | "study-pic"
   | "study-pic1d"
+  | "study-fluid1d"
   | "study-tl"
   | "study-gas"
   | "study-sweep"
@@ -44,6 +48,7 @@ export type TreeNode =
   | "result-trace"
   | "result-pic"
   | "result-pic1d"
+  | "result-fluid1d"
   | "result-tl"
   | "result-gas";
 
@@ -77,6 +82,15 @@ interface Props {
   pic1dFrame: Pic1dFrameMsg | null;
   pic1dError: string | null;
   pic1dResult: Pic1dResult | null;
+  // 1D プラズマ流体 (prompts/104-108)。pic1d と完全に独立の実行状態・結果を持つ。
+  // optional にしているのは、App.tsx への統合が Phase D2 (prompts/109) 側の作業であり、
+  // 現時点の (未統合の) App.tsx がこれらの props を渡していなくても型検査が通るようにするため
+  // (App.tsx は触らない、prompts/108 の制約)
+  fluid1dRunning?: boolean;
+  fluid1dStarted?: Fluid1dStartedMsg | null;
+  fluid1dFrame?: Fluid1dFrameMsg | null;
+  fluid1dError?: string | null;
+  fluid1dResult?: Fluid1dResult | null;
   // VHF 定在波 (prompts/101)。continue が無いので進捗は started/progress のステップ数のみ
   tlRunning: boolean;
   tlStarted: TlStartedMsg | null;
@@ -130,6 +144,11 @@ export default function ProjectTree({
   pic1dFrame,
   pic1dError,
   pic1dResult,
+  fluid1dRunning = false,
+  fluid1dStarted = null,
+  fluid1dFrame = null,
+  fluid1dError = null,
+  fluid1dResult = null,
   tlRunning,
   tlStarted,
   tlProgressStep,
@@ -199,6 +218,15 @@ export default function ProjectTree({
     }
     if (pic1dError) return { text: "エラー", kind: "error" };
     if (pic1dResult) return { text: "✓完了", kind: "done" };
+    return { text: "未実行", kind: "idle" };
+  };
+  const fluid1dBadge = (): { text: string; kind: BadgeKind } => {
+    if (fluid1dRunning) {
+      const p = pct(fluid1dFrame?.step ?? 0, fluid1dStarted?.n_steps ?? 0);
+      return { text: `実行中 ${p}%`, kind: "busy" };
+    }
+    if (fluid1dError) return { text: "エラー", kind: "error" };
+    if (fluid1dResult) return { text: "✓完了", kind: "done" };
     return { text: "未実行", kind: "idle" };
   };
   const tlBadge = (): { text: string; kind: BadgeKind } => {
@@ -376,6 +404,15 @@ export default function ProjectTree({
                   <StatusBadge {...pic1dBadge()} />
                 </div>
               )}
+              {match("流体 (1D)") && (
+                <div
+                  className={`tree-row ${activeNode === "study-fluid1d" ? "active" : ""}`}
+                  onClick={() => onSelectNode("study-fluid1d")}
+                >
+                  <span>流体 (1D)</span>
+                  <StatusBadge {...fluid1dBadge()} />
+                </div>
+              )}
               {match("VHF定在波") && (
                 <div
                   className={`tree-row ${activeNode === "study-tl" ? "active" : ""}`}
@@ -448,6 +485,14 @@ export default function ProjectTree({
                   onClick={() => onSelectNode("result-pic1d")}
                 >
                   PIC-MCC 1D
+                </div>
+              )}
+              {match("流体 (1D)") && (
+                <div
+                  className={`tree-row ${activeNode === "result-fluid1d" ? "active" : ""}`}
+                  onClick={() => onSelectNode("result-fluid1d")}
+                >
+                  流体 (1D)
                 </div>
               )}
               {match("VHF定在波") && (

@@ -28,6 +28,7 @@ from .particles import trace
 from .pic import WALK_DIAG_KEYS, PicSimulation
 from .pic1d import Pic1dSimulation, build_pic1d_result
 from .pic1d_presets import get_presets as get_pic1d_presets
+from .fluid1d import Fluid1dSimulation, build_fluid1d_result
 from .postprocess import sample_line
 from .dsmc import DsmcSimulation
 from .tl import TlSimulation
@@ -890,6 +891,153 @@ async def ws_pic1d(ws: WebSocket) -> None:
         pass
 
 
+# ---- 1D 流体 (ドリフト拡散、prompts/104-107) ------------------------------------
+#
+# pic1d と同一の電極・格子規約を共有するが粒子を追わない連続場ソルバー。配線は
+# /ws/pic1d をそのまま複製する (専用ロック・保持スロット、start/continue/stop、
+# anyio オフロード) — 独自の形式は作らない。
+
+_last_simfluid1d: Fluid1dSimulation | None = None
+_fluid1d_lock = asyncio.Lock()
+
+
+async def _run_fluid1d_session(ws: WebSocket, project_dict: dict) -> None:
+    """1回の流体 (1D) 実行 (start)。完了/停止後も状態を保持スロットに残す。"""
+    global _last_simfluid1d
+    try:
+        project = Project.model_validate(project_dict)
+        sim = await asyncio.to_thread(Fluid1dSimulation, project)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+    _last_simfluid1d = sim  # 新しい start で保持状態を置き換える
+    await _stream_run_fluid1d(ws, sim)
+
+
+async def _continue_fluid1d_session(ws: WebSocket, msg: dict) -> None:
+    """保持中の状態から追加実行 (continue)。応答は start と同形。"""
+    sim = _last_simfluid1d
+    if sim is None:
+        await ws.send_json(
+            {"type": "error", "detail": "保持中の実行状態がありません (先に start してください)"}
+        )
+        return
+    try:
+        extra_steps = int(msg.get("extra_steps", sim.s.n_steps))
+        if extra_steps <= 0:
+            raise ValueError("extra_steps は正の整数を指定してください")
+        frame_every = msg.get("frame_every")
+        avg_steps = msg.get("avg_steps")
+        phase_bins = msg.get("phase_bins")
+        sim.prepare_continue(extra_steps, frame_every, avg_steps, phase_bins)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+    await _stream_run_fluid1d(ws, sim)
+
+
+async def _stream_run_fluid1d(ws: WebSocket, sim: Fluid1dSimulation) -> None:
+    """run_batch をワーカースレッドで実行し、started → frame → done を送出する
+    (1D PIC の _stream_run_1d と同じ設計)。
+    """
+    loop = asyncio.get_running_loop()
+    stop = threading.Event()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+
+    await ws.send_json(
+        {
+            "type": "started",
+            "n_steps": sim.s.n_steps,
+            "step_offset": sim.step_count,
+            "dt": sim.dt,
+            "x": sim.xg.tolist(),
+            "warnings": sim.warnings,
+        }
+    )
+
+    def on_frame(frame: dict) -> None:
+        def offer_latest() -> None:
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(frame)
+
+        loop.call_soon_threadsafe(offer_latest)
+
+    t_run0 = time.perf_counter()
+    run_task = asyncio.create_task(
+        asyncio.to_thread(sim.run_batch, on_frame, stop.is_set, False)
+    )
+
+    async def watch_stop() -> None:
+        while True:
+            try:
+                msg = json.loads(await ws.receive_text())
+            except (WebSocketDisconnect, RuntimeError):
+                stop.set()
+                return
+            if msg.get("cmd") == "stop":
+                stop.set()
+                return
+
+    stop_task = asyncio.create_task(watch_stop())
+    try:
+        while True:
+            if run_task.done() and queue.empty():
+                break
+            try:
+                frame = await asyncio.wait_for(queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            await ws.send_json(frame)
+        await run_task
+        elapsed_s = time.perf_counter() - t_run0
+        await ws.send_json({"type": "done", "result": build_fluid1d_result(sim, elapsed_s)})
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "detail": str(exc)})
+        except Exception:
+            pass
+    finally:
+        stop.set()
+        stop_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@app.websocket("/ws/fluid1d")
+async def ws_fluid1d(ws: WebSocket) -> None:
+    """流体 (1D ドリフト拡散) 実行の WebSocket (prompts/107)。
+
+    start で新規実行、stop で中断、continue (extra_steps 指定) で保持中の状態
+    から追加実行する (完了/停止後も状態はサーバー側に保持され、新しい start で置き換わる)。
+    pic/pic1d とは独立したロック・保持スロットを持つため、他ソルバーと同時に実行できる。
+    """
+    await ws.accept()
+    try:
+        while True:
+            msg = json.loads(await ws.receive_text())
+            cmd = msg.get("cmd")
+            if cmd in ("start", "continue"):
+                if _fluid1d_lock.locked():
+                    await ws.send_json(
+                        {"type": "error", "detail": "別の流体 (1D) 実行が進行中です"}
+                    )
+                    continue
+                async with _fluid1d_lock:
+                    if cmd == "start":
+                        await _run_fluid1d_session(ws, msg.get("project", {}))
+                    else:
+                        await _continue_fluid1d_session(ws, msg)
+            elif cmd == "stop":
+                continue  # 実行中でなければ無視
+            else:
+                await ws.send_json({"type": "error", "detail": f"不明なコマンド: {cmd}"})
+    except WebSocketDisconnect:
+        pass
+
+
 # ---- パラメータスイープ (GUIから1パラメータ×値リストを並列実行、prompts/79) --------------
 
 # 直近スイープの結果一時ディレクトリ (サーバープロセス生存中のみ)。ケース数×cycle で
@@ -914,7 +1062,7 @@ async def _run_sweep_session(ws: WebSocket, msg: dict) -> None:
     param_path = msg.get("param_path")
     values = msg.get("values")
     parallel = msg.get("parallel", 1)
-    requested_module = msg.get("module")  # "pic"|"pic1d"|None (未指定は param_path から自動判定)
+    requested_module = msg.get("module")  # "pic"|"pic1d"|"fluid1d"|None (未指定は param_path から自動判定)
 
     if not isinstance(param_path, str) or param_path == "":
         await ws.send_json({"type": "error", "detail": "param_path を指定してください"})
@@ -922,8 +1070,10 @@ async def _run_sweep_session(ws: WebSocket, msg: dict) -> None:
     if not isinstance(values, list) or len(values) == 0:
         await ws.send_json({"type": "error", "detail": "values (値リスト) を指定してください"})
         return
-    if requested_module is not None and requested_module not in ("pic", "pic1d"):
-        await ws.send_json({"type": "error", "detail": "module は 'pic' または 'pic1d' を指定してください"})
+    if requested_module is not None and requested_module not in ("pic", "pic1d", "fluid1d"):
+        await ws.send_json(
+            {"type": "error", "detail": "module は 'pic'・'pic1d'・'fluid1d' のいずれかを指定してください"}
+        )
         return
     try:
         parallel = max(1, int(parallel))
@@ -1042,8 +1192,9 @@ async def ws_sweep(ws: WebSocket) -> None:
     start で新規スイープを開始する (同時実行は1つのみ、別接続からの start は拒否する)。
     stop は実行中セッション内の watch_stop タスクが処理する (PIC/DSMC と同じ設計)。
     continue には対応しない (スイープは毎回フルの N ケースを実行する)。
-    リクエストに optional な module ("pic"/"pic1d") を指定すると 1D/2D どちらの
-    ソルバーで実行するかを明示できる (未指定は param_path の接頭辞で自動判定、prompts/96)。
+    リクエストに optional な module ("pic"/"pic1d"/"fluid1d") を指定すると
+    どのソルバーで実行するかを明示できる (未指定は param_path の接頭辞で自動判定、
+    prompts/96・107)。
     """
     await ws.accept()
     try:

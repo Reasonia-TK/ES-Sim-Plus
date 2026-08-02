@@ -51,16 +51,20 @@ interface Props {
 
 // 一様格子の節点座標 [m] を再構成する (pic1d.py の xg = linspace(0, gap, n_cells+1) と同じ)。
 // done メッセージの profiles.x をそのまま使ってもよいが、cycle 表示用にも共通して使えるよう
-// settings から常に再構成する (profiles が null な退化ケース — 0ステップで停止等 — でも動く)
-function deriveXGrid(gapM: number, nCells: number): number[] {
+// settings から常に再構成する (profiles が null な退化ケース — 0ステップで停止等 — でも動く)。
+// export しているのは Fluid1dPlotView (1D 流体、prompts/109) からも fluid1d.py が同じ一様格子
+// 規約 (xg = linspace(0, gap, n_cells+1)) を共用するため流用する目的のみで、pic1d 側の挙動は不変
+export function deriveXGrid(gapM: number, nCells: number): number[] {
   const n = Math.max(1, Math.round(nCells)) + 1;
   const xs = new Array<number>(n);
   for (let i = 0; i < n; i++) xs[i] = (gapM * i) / (n - 1);
   return xs;
 }
 
-// 単調増加な (xp, fp) の線形補間 (範囲外はクランプ)。中央密度の算出・RF波形評価で使う
-function interpLinear(xp: number[], fp: number[], x: number): number {
+// 単調増加な (xp, fp) の線形補間 (範囲外はクランプ)。中央密度の算出・RF波形評価で使う。
+// export しているのは Fluid1dPlotView (prompts/109) の PIC 比較サマリ (中心密度・T_e の
+// 補間評価) からも流用するため。ロジックは不変
+export function interpLinear(xp: number[], fp: number[], x: number): number {
   const n = xp.length;
   if (n === 0) return NaN;
   if (n === 1) return fp[0];
@@ -357,8 +361,11 @@ function Pic1dScatterChart({ x, y, height = 140 }: { x: number[]; y: number[]; h
 // ヘッダ+キャンバスの2段レイアウト) は揃えるが、データモデルが異なる (Pic1dElectrode は
 // project.geometry を経由しない) ため直接の流用はできず、専用実装にする。
 // voltage_rf 追加 (prompts/93) 後は RF 成分・CSV 波形のどちらの周波数からも
-// プレビュー周期を決められる (evalPic1dVoltage 参照)
-function Pic1dRfMonitor({ electrode, t }: { electrode: Pic1dElectrode; t: number }) {
+// プレビュー周期を決められる (evalPic1dVoltage 参照)。
+// export しているのは Fluid1dPlotView (prompts/109) からも流用するため — fluid1d の
+// 電極 (Fluid1dSettings.left/right) は Pic1dElectrode 型をそのまま共用しているので
+// このコンポーネントを無変更で使い回せる
+export function Pic1dRfMonitor({ electrode, t }: { electrode: Pic1dElectrode; t: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const waveforms = electrode.waveforms ?? [];
   // プレビュー窓の周期は「存在する周波数のうち最低」(VoltagePreviewChart の

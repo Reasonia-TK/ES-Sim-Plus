@@ -597,6 +597,54 @@ class Pic1dSettings(BaseModel):
         return self
 
 
+# ---- 1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、prompts/104-106) -----------------------
+#
+# pic1d (上記 Pic1dSettings) と同一条件・同一プリセットで直接比較できることが設計目標
+# なので、格子規約 (n_cells/n_nodes/xg)・電極 (Pic1dElectrode)・診断の形は意図的に
+# pic1d に揃えている (fluid1d.py 参照)。
+
+
+class Fluid1dSettings(BaseModel):
+    """1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、prompts/104-106)。null なら無効。
+
+    Scharfetter-Gummel フラックス + 半陰的時間積分 (fluid1d.py) で n_e・n_i・電子
+    エネルギー w・φ を解く。pic1d 同様 geometry/mesh とは無関係な専用の一様格子
+    ソルバー。
+    """
+
+    gap_m: float = Field(..., gt=0, description="電極間ギャップ [m]")
+    n_cells: int = Field(200, ge=16, le=100000)
+    left: Pic1dElectrode = Pic1dElectrode()   # 電圧合成・SEE γ を共用 (fn は未対応)
+    right: Pic1dElectrode = Pic1dElectrode()
+    init_density_m3: float = Field(..., gt=0, description="初期プラズマ密度 (一様、準中性) [m^-3]")
+    init_te_ev: float = Field(2.0, gt=0)
+    gas_pressure_pa: float = Field(..., gt=0, description="一様背景ガス圧 [Pa]")
+    gas_temperature_k: float = Field(300.0, gt=0)
+    ion_mass_amu: float = Field(39.948, gt=0, description="イオン質量 [amu]")
+    # イオン低電界移動度 μ_i の基準値・基準ガス密度 (任意のガス密度へは
+    # μ_i = mu_i_ref・(n_ref_m3/n_g) でスケールする、fluid1d.py 参照)。既定は
+    # Ar+ in Ar の 1 Torr (133.3 Pa, 300K) 換算実測値
+    mu_i_ref: float = Field(1.45e-1, gt=0, description="μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)")
+    n_ref_m3: float = Field(3.22e22, gt=0, description="mu_i_ref の基準ガス密度 [m^-3]")
+    t_i_ev: float = Field(0.026, gt=0, description="イオン温度 (D_i = μ_i・T_i)")
+    electron_processes: list[XsProcess] = []  # 空なら eduPIC Ar 解析式を既定使用
+    dt: float | None = Field(None, gt=0, description="秒。None なら RF周期/2000 と 1e-10 の小さい方")
+    n_steps: int = Field(20000, gt=0)
+    frame_every: int = Field(200, gt=0)
+    avg_steps: int | None = Field(None, gt=0)
+    phase_bins: int = Field(40, ge=0)
+    # seed は不要 (流体は決定論的で乱数を使わない)
+
+    @model_validator(mode="after")
+    def _check_no_fn(self) -> "Fluid1dSettings":
+        if self.left.fn is not None or self.right.fn is not None:
+            raise ValueError(
+                "fluid1d は FN 電界放出 (left/right.fn) に未対応です "
+                "(Pic1dElectrode を共用していますが fn は無視されないよう明示的に禁止しています)"
+            )
+        return self
+
+
 # ---- VHF 定在波 (非線形径方向伝送線路モデル、prompts/101) -----------------------------
 
 
@@ -742,6 +790,9 @@ class Project(BaseModel):
     # 1D PIC/MCC (1d3v、prompts/91)。null なら無効。geometry/mesh とは無関係に動く
     # 専用の一様格子ソルバー (pic1d.py)。2D の pic と同時に設定しても互いに独立に扱われる
     pic1d: Pic1dSettings | None = None
+    # 1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、prompts/104-106)。null なら無効。
+    # pic1d と同一条件で比較できるよう設計された専用ソルバー (fluid1d.py)
+    fluid1d: Fluid1dSettings | None = None
     # VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。null なら無効。
     # pic1d 同様 geometry/mesh とは無関係な専用ソルバー (tl.py)
     tl: TlSettings | None = None

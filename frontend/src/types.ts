@@ -453,6 +453,152 @@ export type Pic1dClientCommand =
       phase_bins?: number | null;
     };
 
+// ---- 1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、backend/es_sim/schema.py Fluid1dSettings /
+// fluid1d.py build_fluid1d_result と手動同期、prompts/104-108) --------------------------------
+// pic1d (Pic1dSettings) と同一条件・同一プリセットで直接比較できることが設計目標のため、格子規約
+// (n_cells/n_nodes/xg)・電極 (Pic1dElectrode) を意図的に共用する。geometry/mesh とは無関係な
+// 専用の一様格子ソルバー (backend/es_sim/fluid1d.py)。粒子を追わず n_e/n_i/T_e/φ を格子節点上の
+// 連続場として解くため、pic1d のようなマクロ粒子数・EEDF・FN 電界放出は持たない。
+
+export interface Fluid1dSettings {
+  gap_m: number;              // 電極間ギャップ [m]
+  n_cells: number;            // セル数 (節点数 = n_cells+1)
+  // Pic1dElectrode を流用 (電圧合成・SEE γ 共用)。ただし fn (FN電界放出) は backend の
+  // validator (_check_no_fn) が拒否するため、Fluid1dPanel では常に未設定のまま送る
+  left: Pic1dElectrode;
+  right: Pic1dElectrode;
+  init_density_m3: number;    // 初期プラズマ密度 (一様、準中性) [m^-3]
+  init_te_ev?: number;
+  gas_pressure_pa: number;    // 一様背景ガス圧 [Pa]
+  gas_temperature_k?: number;
+  ion_mass_amu?: number;
+  // イオン低電界移動度 μ_i の基準値・基準ガス密度 (μ_i = mu_i_ref・(n_ref_m3/n_g) で
+  // 任意のガス密度へスケールする、fluid1d.py 参照)
+  mu_i_ref?: number;
+  n_ref_m3?: number;
+  t_i_ev?: number;             // イオン温度 (D_i = μ_i・T_i)
+  electron_processes?: XsProcess[]; // 空/未指定なら eduPIC Ar 解析式を既定使用
+  dt?: number | null;          // 秒。null なら RF周期/2000 と 1e-10 の小さい方
+  n_steps?: number;
+  frame_every?: number;
+  avg_steps?: number | null;   // 完了時に返す時間平均プロファイルの平均ステップ数。null = 最後の25%
+  phase_bins?: number;         // RF 1周期の位相分解ビン数 (0=無効)
+}
+
+// server → client (/ws/fluid1d)
+export interface Fluid1dStartedMsg {
+  type: "started";
+  n_steps: number;
+  step_offset: number; // 続き実行では前回までの累計 (frame.step が通算で進む)
+  dt: number;
+  x: number[]; // 節点座標 [m] (一様格子、n_cells+1 点)
+  warnings: string[];
+}
+
+export interface Fluid1dFrameMsg {
+  type: "frame";
+  step: number;
+  t: number;
+  phi: number[]; // 節点値 [V]
+  n_e: number[]; // 節点値 [m^-3]
+  n_i: number[]; // 節点値 [m^-3]
+  t_e: number[]; // 節点値 [eV] (流体は粒子サンプルが無いため t_e を毎フレーム含める)
+  counts: Record<string, number>; // history の各キーの最新値 (step/t/n_e_total/n_i_total/wall_*/gen_total)
+  elapsed_s: number;
+}
+
+// done メッセージの history (列ごとの辞書。fluid1d.py の _HISTORY_KEYS と同じキー)
+export interface Fluid1dHistoryDict {
+  step: number[];
+  t: number[];
+  n_e_total: number[]; // 全域積算の実密度 (マクロ粒子数ではない、流体は決定論的)
+  n_i_total: number[];
+  wall_left_e: number[];
+  wall_left_i: number[];
+  wall_right_e: number[];
+  wall_right_i: number[];
+  gen_total: number[]; // 電離による累計生成数 [m^-2] (電子・イオン共通)
+}
+
+// 完了時の時間平均プロファイル一式 (done メッセージの result.profiles)
+export interface Fluid1dProfiles {
+  x: number[];
+  phi: number[];
+  e: number[];          // E = -dφ/dx [V/m] (符号付き)
+  n_e: number[];
+  n_i: number[];
+  t_e: number[];
+  ionization: number[]; // 電離レート [m^-3 s^-1]
+  avg_steps: number;    // 実際に平均したステップ数
+}
+
+// 時間平均プロファイルのシースエッジ (result.sheath、Brinkmann 基準、pic1d.Pic1dSheath と同形)
+export interface Fluid1dSheath {
+  left_s: number | null;
+  right_s: number | null;
+}
+
+// RF 1周期の位相分解データ (done メッセージの result.cycle、アニメーション用)
+export interface Fluid1dCycle {
+  bins: number;
+  freq_hz: number;
+  phi: number[][]; // bins × 節点
+  n_e: number[][];
+  n_i: number[][];
+  t_e: number[][];
+}
+
+export interface Fluid1dWallCounts {
+  electron: number;
+  ion: number;
+}
+
+export interface Fluid1dWalls {
+  left: Fluid1dWallCounts;
+  right: Fluid1dWallCounts;
+}
+
+// /ws/fluid1d の done.result (= ResultsBundle.fluid1d に保存する形そのもの)
+export interface Fluid1dResult {
+  history: Fluid1dHistoryDict;
+  profiles: Fluid1dProfiles | null;
+  sheath: Fluid1dSheath | null;
+  cycle: Fluid1dCycle | null;
+  walls: Fluid1dWalls;
+  gen_total: number; // 電離による累計生成数 [m^-2] (history とは別に累計値そのものを持つ)
+  elapsed_s: number;
+  timing: Record<string, number>; // poisson/transport/energy/other (+ total、server 側で加算)
+  settings: Fluid1dSettings; // 実行に使った設定 (グリッド再構成に使える)
+}
+
+export interface Fluid1dDoneMsg {
+  type: "done";
+  result: Fluid1dResult;
+}
+
+export interface Fluid1dErrorMsg {
+  type: "error";
+  detail: string;
+}
+
+export type Fluid1dServerMessage =
+  | Fluid1dStartedMsg
+  | Fluid1dFrameMsg
+  | Fluid1dDoneMsg
+  | Fluid1dErrorMsg;
+
+// client → server コマンド (/ws/fluid1d)。pic1d と同じく continue の extra_steps は必須
+export type Fluid1dClientCommand =
+  | { cmd: "start"; project: Project }
+  | { cmd: "stop" }
+  | {
+      cmd: "continue";
+      extra_steps: number;
+      frame_every?: number;
+      avg_steps?: number | null;
+      phase_bins?: number | null;
+    };
+
 // ---- DSMC (定常ガス流れ、prompts/54、backend/es_sim/schema.py と手動同期) ----------------
 
 // DSMC のガス分子モデル (VHS: Variable Hard Sphere)。既定は Ar
@@ -942,6 +1088,9 @@ export interface Project {
   // 1D PIC/MCC (1d3v、prompts/91)。null/undefined なら無効。geometry/mesh とは無関係に動く
   // 専用の一様格子ソルバー (backend/es_sim/pic1d.py)。2D の pic とは完全に独立
   pic1d?: Pic1dSettings | null;
+  // 1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、prompts/104-108)。null/undefined なら無効。
+  // pic1d と同一条件で比較できるよう設計された専用ソルバー (backend/es_sim/fluid1d.py)
+  fluid1d?: Fluid1dSettings | null;
   // VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。null/undefined なら無効。
   // pic1d 同様 geometry/mesh とは無関係な専用ソルバー (backend/es_sim/tl.py)
   tl?: TlSettings | null;
@@ -1021,9 +1170,10 @@ export interface SweepStartedMsg {
   n_cases: number;
   param_path: string;
   values: number[];
-  // 解決済みの実行対象 ("pic"=2D FEM-PIC / "pic1d"=1D PIC-MCC)。未指定リクエストでも
-  // server 側 (resolve_sweep_module) が必ず解決して返す (表示用、prompts/96)
-  module: "pic" | "pic1d";
+  // 解決済みの実行対象 ("pic"=2D FEM-PIC / "pic1d"=1D PIC-MCC / "fluid1d"=1D プラズマ流体)。
+  // 未指定リクエストでも server 側 (resolve_sweep_module) が必ず解決して返す
+  // (表示用、prompts/96・107)
+  module: "pic" | "pic1d" | "fluid1d";
 }
 
 // 数百ms〜数秒間隔でケースごとに届く進捗 (batch.py の間引きに準じる)
@@ -1073,7 +1223,7 @@ export type SweepClientCommand =
       param_path: string;
       values: number[];
       parallel: number;
-      module: "pic" | "pic1d";
+      module: "pic" | "pic1d" | "fluid1d";
     }
   | { cmd: "stop" };
 
@@ -1110,6 +1260,8 @@ export interface ResultsBundle {
   gas?: DsmcResult | null;
   // 1D PIC/MCC の完了結果一式 (prompts/91)。done.result そのもの (settings を含み自己完結)
   pic1d?: Pic1dResult | null;
+  // 1D プラズマ流体の完了結果一式 (prompts/104-108)。done.result そのもの (settings を含み自己完結)
+  fluid1d?: Fluid1dResult | null;
   // VHF 定在波の完了結果一式 (prompts/101)。done.result そのもの (settings を含み自己完結)
   tl?: TlResult | null;
 }

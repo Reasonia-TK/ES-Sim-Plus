@@ -117,14 +117,40 @@ export function buildSweepCandidates(project: Project): Candidate[] {
     });
   }
 
+  // 1D プラズマ流体 (fluid1d、prompts/104-109) の候補パス (prompts/109)。pic1d の候補生成と
+  // 同じ考え方 (RF振幅/周波数は常に "fluid1d.<side>.voltage_rf.0.<field>" の配列インデックス0
+  // 形式で組み立て、実際の送信直前 (App.tsx の runSweepStart) で単一オブジェクトをリストへ
+  // 正規化する)。fluid1d は fn (FN電界放出) 未対応のためその候補は出さない
+  if (project.fluid1d) {
+    const f1d = project.fluid1d;
+    candidates.push({ label: "流体1D: ギャップ長 [m]", path: "fluid1d.gap_m" });
+    candidates.push({ label: "流体1D: 初期密度 [m^-3]", path: "fluid1d.init_density_m3" });
+    candidates.push({ label: "流体1D: ガス圧 [Pa]", path: "fluid1d.gas_pressure_pa" });
+    (["left", "right"] as const).forEach((side) => {
+      const sideLabel = side === "left" ? "左電極" : "右電極";
+      const elec = f1d[side];
+      candidates.push({ label: `流体1D: ${sideLabel} 直流電圧 [V]`, path: `fluid1d.${side}.v_dc` });
+      if (elec.voltage_rf) {
+        candidates.push({
+          label: `流体1D: ${sideLabel} RF振幅 [V]`, path: `fluid1d.${side}.voltage_rf.0.amplitude`,
+        });
+        candidates.push({
+          label: `流体1D: ${sideLabel} RF周波数 [Hz]`, path: `fluid1d.${side}.voltage_rf.0.freq_hz`,
+        });
+      }
+    });
+  }
+
   return candidates;
 }
 
-// 対象パラメータパスから実行モジュールを判定する (prompts/96)。
-// backend の resolve_sweep_module と同じ規則 (pic1d. で始まれば "pic1d"、それ以外は "pic")。
-// フロントは自動判定に頼らずこの結果を module として明示送信する
-export function sweepModuleForPath(path: string): "pic" | "pic1d" {
-  return path.startsWith("pic1d.") ? "pic1d" : "pic";
+// 対象パラメータパスから実行モジュールを判定する (prompts/96・107)。
+// backend の resolve_sweep_module と同じ規則 (pic1d. で始まれば "pic1d"、fluid1d. で始まれば
+// "fluid1d"、それ以外は "pic")。フロントは自動判定に頼らずこの結果を module として明示送信する
+export function sweepModuleForPath(path: string): "pic" | "pic1d" | "fluid1d" {
+  if (path.startsWith("pic1d.")) return "pic1d";
+  if (path.startsWith("fluid1d.")) return "fluid1d";
+  return "pic";
 }
 
 // ドット区切りパスで project から現在値を読む (プレビュー表示用)。数値でなければ undefined
@@ -187,8 +213,8 @@ interface Props {
   project: Project;
   canRun: boolean;
   running: boolean;
-  // module は自動判定に頼らず、選択パスから決定した値をここで明示送信する (prompts/96)
-  onStart: (paramPath: string, values: number[], parallel: number, module: "pic" | "pic1d") => void;
+  // module は自動判定に頼らず、選択パスから決定した値をここで明示送信する (prompts/96・107)
+  onStart: (paramPath: string, values: number[], parallel: number, module: "pic" | "pic1d" | "fluid1d") => void;
   onStop: () => void;
   started: SweepStartedMsg | null;
   cases: SweepCaseState[];
@@ -279,6 +305,7 @@ export default function SweepPanel({
         <span>{currentValue !== undefined ? currentValue : "- (パスが無効か数値ではありません)"}</span>
       </div>
       {targetModule === "pic1d" && <p className="hint">対象: PIC-MCC 1D</p>}
+      {targetModule === "fluid1d" && <p className="hint">対象: 1D プラズマ流体</p>}
 
       <h3>値リスト</h3>
       <div className="field">

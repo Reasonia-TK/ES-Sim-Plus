@@ -80,6 +80,22 @@ class Pic1dSpecies:
     w: np.ndarray     # (n,) マクロ重み [m^-2] (単位断面積あたりの実粒子数)
 
 
+def electrode_voltage(elec: Pic1dElectrode, t: float) -> float:
+    """電極電圧 V(t) = v_dc + Σ RF sin + Σ waveforms(t) (prompts/93)。
+
+    pic1d.Pic1dSimulation と fluid1d.Fluid1dSimulation の両方が使う共通関数
+    (prompts/106: 電圧評価の共通化。fluid1d 側は境界 Dirichlet 電位そのものに
+    この値を使う)。RF 成分は pic.py の _eval_rf (2D の _dirichlet_values と同じ式・
+    位相規約)、CSV 波形は pic.py の _eval_waveform をそのまま流用する。
+    voltage_rf=None (rf_components が空リスト) なら _eval_rf は 0.0 を返すため、
+    waveforms のみの経路とビット不変になる。
+    """
+    v = elec.v_dc + _eval_rf(rf_components(elec.voltage_rf), t)
+    for wf in elec.waveforms:
+        v += float(_eval_waveform(wf.phase, wf.v, wf.freq_hz, t))
+    return float(v)
+
+
 class Pic1dSimulation:
     """1D PIC/MCC (1d3v) シミュレーション本体。geometry/mesh とは無関係に動く。"""
 
@@ -321,17 +337,12 @@ class Pic1dSimulation:
     # ---- 場 --------------------------------------------------------------
 
     def _electrode_voltage(self, elec: Pic1dElectrode, t: float) -> float:
-        """電極電圧 V(t) = v_dc + Σ RF sin + Σ waveforms(t) (prompts/93)。
+        """モジュール関数 electrode_voltage の薄いラッパー (prompts/106 で共通化)。
 
-        RF 成分は pic.py の _eval_rf (2D の _dirichlet_values と同じ式・位相規約)、
-        CSV 波形は pic.py の _eval_waveform をそのまま流用する。voltage_rf=None
-        (rf_components が空リスト) なら _eval_rf は 0.0 を返すため、waveforms のみの
-        従来経路とビット不変になる。
+        既存の呼び出し元 (self._electrode_voltage(...)) を変えずに済むよう残して
+        いるだけで、実体・挙動は electrode_voltage と完全に同じ (ビット不変)。
         """
-        v = elec.v_dc + _eval_rf(rf_components(elec.voltage_rf), t)
-        for wf in elec.waveforms:
-            v += float(_eval_waveform(wf.phase, wf.v, wf.freq_hz, t))
-        return float(v)
+        return electrode_voltage(elec, t)
 
     def _solve_phi(self, f_dep: np.ndarray, t: float) -> np.ndarray:
         """ポアソン求解。行列は不変 (__init__ で構築済み)、右辺のみ毎回組み立てて解く。"""

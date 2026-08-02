@@ -99,15 +99,21 @@ function nextEedf1dLabel(regions: Eedf1dRegion[]): string {
 
 const MAX_EEDF1D_REGIONS = 4;
 
-// 電極 (左/右) の DC電圧・RF重畳・SEE収率・波形リストの編集UI
-function ElectrodeEditor({
+// 電極 (左/右) の DC電圧・RF重畳・SEE収率・波形リストの編集UI。
+// export しているのは Fluid1dPanel (1D 流体、prompts/109) からも流用するため。
+// showFn (既定 true) で FN電界放出トグルの表示を制御できるようにしたのは、流体側が
+// FN 未対応 (backend の _check_no_fn validator が拒否する) なので入口を出さないためで、
+// pic1d 側の呼び出し (showFn 省略) は従来どおり常に表示され挙動は変わらない
+export function ElectrodeEditor({
   title,
   electrode,
   onChange,
+  showFn = true,
 }: {
   title: string;
   electrode: Pic1dElectrode;
   onChange: (next: Pic1dElectrode) => void;
+  showFn?: boolean;
 }) {
   const waveforms = electrode.waveforms ?? [];
   const rfList = rfComponents(electrode.voltage_rf);
@@ -154,35 +160,40 @@ function ElectrodeEditor({
       )}
       {/* FN電界放出 (Fowler–Nordheim、prompts/95)。2D の FnPanel/ParticlePanel の FN 設定
           (仕事関数・電界増倍係数・初期エネルギー・マクロ重み) と同じ物理・文言を、放出面選択
-          (電極がちょうど1点のため不要) を省いて表示する */}
-      <Toggle
-        label="FN電界放出"
-        checked={!!fn}
-        onChange={(v) => onChange({ ...electrode, fn: v ? fnDefaultsRef.current : null })}
-      />
-      {fn && (
+          (電極がちょうど1点のため不要) を省いて表示する。流体 (fluid1d) は FN 未対応
+          (backend validator が拒否する) なので Fluid1dPanel は showFn={false} で入口自体を隠す */}
+      {showFn && (
         <>
-          <p className="hint">表面電界が電子を引き出す向きのときのみ放出します (Murphy-Good FN 式)</p>
-          <div className="field">
-            <span className="label">仕事関数 φ [eV]</span>
-            <CommitNumberInput value={fn.phi_ev} onCommit={(v) => updateFn({ phi_ev: v })} />
-          </div>
-          <div className="field">
-            <span className="label">電界増倍係数 β</span>
-            <CommitNumberInput value={fn.beta} onCommit={(v) => updateFn({ beta: v })} />
-          </div>
-          <div className="field">
-            <span className="label">初期エネルギー [eV]</span>
-            <CommitNumberInput value={fn.init_energy_ev} onCommit={(v) => updateFn({ init_energy_ev: v })} />
-          </div>
-          <div className="field">
-            <span className="label">マクロ重み [m^-2] (空欄=初期プラズマと同じ)</span>
-            <CommitNullableNumberInput
-              value={fn.macro_weight ?? null}
-              placeholder="初期プラズマと同じ"
-              onCommit={(v) => updateFn({ macro_weight: v })}
-            />
-          </div>
+          <Toggle
+            label="FN電界放出"
+            checked={!!fn}
+            onChange={(v) => onChange({ ...electrode, fn: v ? fnDefaultsRef.current : null })}
+          />
+          {fn && (
+            <>
+              <p className="hint">表面電界が電子を引き出す向きのときのみ放出します (Murphy-Good FN 式)</p>
+              <div className="field">
+                <span className="label">仕事関数 φ [eV]</span>
+                <CommitNumberInput value={fn.phi_ev} onCommit={(v) => updateFn({ phi_ev: v })} />
+              </div>
+              <div className="field">
+                <span className="label">電界増倍係数 β</span>
+                <CommitNumberInput value={fn.beta} onCommit={(v) => updateFn({ beta: v })} />
+              </div>
+              <div className="field">
+                <span className="label">初期エネルギー [eV]</span>
+                <CommitNumberInput value={fn.init_energy_ev} onCommit={(v) => updateFn({ init_energy_ev: v })} />
+              </div>
+              <div className="field">
+                <span className="label">マクロ重み [m^-2] (空欄=初期プラズマと同じ)</span>
+                <CommitNullableNumberInput
+                  value={fn.macro_weight ?? null}
+                  placeholder="初期プラズマと同じ"
+                  onCommit={(v) => updateFn({ macro_weight: v })}
+                />
+              </div>
+            </>
+          )}
         </>
       )}
       {/* Pic1dElectrode.waveforms は複数波形の和 (Σ waveforms(t)) を表す配列のため、

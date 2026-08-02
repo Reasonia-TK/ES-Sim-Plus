@@ -90,18 +90,22 @@ def set_by_path(obj: dict, path: str, value: float) -> None:
 
 
 def resolve_sweep_module(param_path: str, requested: str | None) -> str:
-    """スイープ対象の module ("pic"/"pic1d") を解決する (prompts/96)。
+    """スイープ対象の module ("pic"/"pic1d"/"fluid1d") を解決する (prompts/96、fluid1d は prompts/107)。
 
     requested (GUI で明示指定された値) があればそれを最優先する — 自動判定に頼らず
-    UI 確定値をそのまま使うことで、pic/pic1d 双方の設定を同時に持つプロジェクトでも
+    UI 確定値をそのまま使うことで、pic/pic1d/fluid1d の設定を同時に持つプロジェクトでも
     ユーザーの意図どおりに実行できる。requested が None (未指定) のときのみ
-    param_path の接頭辞で判定する: "pic1d." で始まれば "pic1d"、それ以外は
-    従来互換で "pic" (2D は module という概念が無かったため、既存の GUI/API 利用者に
-    影響が出ないよう既定を "pic" のままにする)。
+    param_path の接頭辞で判定する: "pic1d." で始まれば "pic1d"、"fluid1d." で
+    始まれば "fluid1d"、それ以外は従来互換で "pic" (2D は module という概念が
+    無かったため、既存の GUI/API 利用者に影響が出ないよう既定を "pic" のままにする)。
     """
-    if requested in ("pic", "pic1d"):
+    if requested in ("pic", "pic1d", "fluid1d"):
         return requested
-    return "pic1d" if param_path.startswith("pic1d.") else "pic"
+    if param_path.startswith("pic1d."):
+        return "pic1d"
+    if param_path.startswith("fluid1d."):
+        return "fluid1d"
+    return "pic"
 
 
 def build_sweep_cases(base_project: dict, param_path: str, values: list[float]) -> list[dict]:
@@ -129,8 +133,8 @@ def run_sweep(
 ) -> None:
     """N ケースを (最大 parallel 並列で) 実行し、進捗を on_event へ通知する。
 
-    module ("pic"/"pic1d"、既定 "pic") は全ケース共通で _worker にそのまま渡す
-    (prompts/96)。呼び出し側 (server.py の ws_sweep) が resolve_sweep_module で
+    module ("pic"/"pic1d"/"fluid1d"、既定 "pic") は全ケース共通で _worker にそのまま渡す
+    (prompts/96・107)。呼び出し側 (server.py の ws_sweep) が resolve_sweep_module で
     既に解決済みの値を渡す想定 — ここでは対象パスの意味を解釈しない (set_by_path と
     同じ「backend はパスの意味を解釈しない」方針を module にも適用する)。
     既定値 "pic" により、module を指定しない既存呼び出しは常に従来どおり 2D PIC を

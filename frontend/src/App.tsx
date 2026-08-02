@@ -31,6 +31,8 @@ import ParticlePanel from "./panels/ParticlePanel";
 import PicPanel, { PIC_FIELD_META } from "./panels/PicPanel";
 import type { CyclePicField, PicLiveField, PicResultField } from "./panels/PicPanel";
 import Pic1dPanel from "./panels/Pic1dPanel";
+import Fluid1dPanel, { DEFAULT_FLUID1D } from "./panels/Fluid1dPanel";
+import Fluid1dPlotView from "./canvas/Fluid1dPlotView";
 import TlPanel from "./panels/TlPanel";
 import TlPlotView from "./canvas/TlPlotView";
 import GasPanel, { DEFAULT_BOUNDARY, DEFAULT_DSMC, GAS_FIELD_META, gasFieldValues } from "./panels/GasPanel";
@@ -41,6 +43,8 @@ import { PicClient } from "./picClient";
 import type { PicClientCallbacks } from "./picClient";
 import { Pic1dClient } from "./pic1dClient";
 import type { Pic1dClientCallbacks } from "./pic1dClient";
+import { Fluid1dClient } from "./fluid1dClient";
+import type { Fluid1dClientCallbacks } from "./fluid1dClient";
 import { TlClient } from "./tlClient";
 import type { TlClientCallbacks } from "./tlClient";
 import { DsmcClient } from "./dsmcClient";
@@ -60,6 +64,10 @@ import type {
   DsmcResult,
   EdgeBcType,
   EdgeMeshSize,
+  Fluid1dFrameMsg,
+  Fluid1dResult,
+  Fluid1dSettings,
+  Fluid1dStartedMsg,
   Health,
   MeshResult,
   ParticleSettings,
@@ -275,6 +283,7 @@ const NODE_TITLES: Record<TreeNode, string> = {
   "study-trace": "スタディ — 粒子追跡",
   "study-pic": "スタディ — PIC-MCC",
   "study-pic1d": "スタディ — PIC-MCC 1D",
+  "study-fluid1d": "スタディ — 流体1D",
   "study-tl": "スタディ — VHF定在波",
   "study-gas": "スタディ — DSMC",
   "study-sweep": "スタディ — パラメータスイープ",
@@ -282,6 +291,7 @@ const NODE_TITLES: Record<TreeNode, string> = {
   "result-trace": "結果 — 粒子追跡",
   "result-pic": "結果 — PIC-MCC",
   "result-pic1d": "結果 — PIC-MCC 1D",
+  "result-fluid1d": "結果 — 流体1D",
   "result-tl": "結果 — VHF定在波",
   "result-gas": "結果 — DSMC",
 };
@@ -462,6 +472,7 @@ export default function App() {
   const busyStartTimeRef = useRef<number | null>(null);
   const picStartTimeRef = useRef<number | null>(null);
   const pic1dStartTimeRef = useRef<number | null>(null);
+  const fluid1dStartTimeRef = useRef<number | null>(null);
   const tlStartTimeRef = useRef<number | null>(null);
   const gasStartTimeRef = useRef<number | null>(null);
   const sweepStartTimeRef = useRef<number | null>(null);
@@ -594,6 +605,22 @@ export default function App() {
   // 「食い違いで無効化する」概念は無い (pic1d 設定を変えても常にサーバー保持状態へ継続実行するだけ)
   const [pic1dContinueReady, setPic1dContinueReady] = useState(false);
 
+  // 1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、prompts/104-109)。pic1d (Pic1dSettings) と
+  // 同一条件で比較できるよう設計された独立ソルバーで、実行状態・結果も pic1d とは完全に別
+  // (サーバー側のロック・保持スロットも別、fluid1dClient.ts 参照)。project/particles/pic とは
+  // 独立の state で管理する (Undo/Redo 対象外、pic1d と同じ設計)
+  const [fluid1d, setFluid1d] = useState<Fluid1dSettings>(DEFAULT_FLUID1D);
+  const [fluid1dRunning, setFluid1dRunning] = useState(false);
+  const [fluid1dStarted, setFluid1dStarted] = useState<Fluid1dStartedMsg | null>(null);
+  const [fluid1dFrame, setFluid1dFrame] = useState<Fluid1dFrameMsg | null>(null);
+  // done メッセージで受け取った結果一式 (settings を含み自己完結、結果付き保存にそのまま使える)
+  const [fluid1dResult, setFluid1dResult] = useState<Fluid1dResult | null>(null);
+  const [fluid1dError, setFluid1dError] = useState<string | null>(null);
+  const fluid1dClientRef = useRef<Fluid1dClient | null>(null);
+  // 「続きから」ボタンの有効条件: 直前の実行が done/stop 済みで現在実行中でないこと。
+  // pic1d と同じく geometry/mesh に依存しないため「食い違いで無効化する」概念は無い
+  const [fluid1dContinueReady, setFluid1dContinueReady] = useState(false);
+
   // VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。pic1d と同様 geometry/mesh とは
   // 無関係な独立 state (Undo/Redo 対象外)。continue が無いため pic1d の *ContinueReady に
   // 相当する state は不要 (毎回フルの定常化をやり直すだけ、tl.py の docstring 参照)
@@ -649,7 +676,7 @@ export default function App() {
   // 実行経過時間のリアルタイム表示 (ステータスバー、prompts/86)。何か実行中の間だけ
   // 1秒間隔で再レンダーする (アイドル時に setInterval を張り続けて無駄な再レンダーを
   // 起こさないようにするため、実行中フラグが1つでも立っているときだけ張る)
-  const anyRunning = busy || picRunning || pic1dRunning || tlRunning || gasRunning || sweepRunning;
+  const anyRunning = busy || picRunning || pic1dRunning || fluid1dRunning || tlRunning || gasRunning || sweepRunning;
   useEffect(() => {
     if (!anyRunning) return;
     const id = setInterval(() => setElapsedTick((t) => t + 1), 1000);
@@ -672,6 +699,7 @@ export default function App() {
     return () => {
       picClientRef.current?.close();
       pic1dClientRef.current?.close();
+      fluid1dClientRef.current?.close();
       tlClientRef.current?.close();
       dsmcClientRef.current?.close();
       sweepClientRef.current?.close();
@@ -931,16 +959,17 @@ export default function App() {
     dsmcClientRef.current?.stop();
   };
 
-  // パラメータスイープに渡すプロジェクト (particles/pic/pic1d は独立 state のためここで合成する。
-  // saveProject/runPicStart と同じ合成方法。b_field/dsmc/pic/pic1d の候補パスや現在値のプレビューは
-  // このオブジェクトを基準に組み立てるため、常に最新の pic/pic1d/particles を反映させる。
-  // pic1d は geometry/mesh に依存しない独立設定だが、1D スイープ (prompts/96) の候補生成・
-  // 現在値プレビューのために合成しておく必要がある)
+  // パラメータスイープに渡すプロジェクト (particles/pic/pic1d/fluid1d は独立 state のためここで
+  // 合成する。saveProject/runPicStart と同じ合成方法。b_field/dsmc/pic/pic1d/fluid1d の候補パスや
+  // 現在値のプレビューはこのオブジェクトを基準に組み立てるため、常に最新の
+  // pic/pic1d/fluid1d/particles を反映させる。fluid1d も pic1d と同じく geometry/mesh に依存しない
+  // 独立設定だが、1D スイープ (prompts/96・107) の候補生成・現在値プレビューのために合成しておく)
   const projectForSweep: Project = {
     ...project,
     particles,
     pic: withInjectionEmitter(pic, particles.emitter),
     pic1d,
+    fluid1d,
   };
 
   // スイープ実行中のコールバック生成 (PIC/DSMC の makePicCallbacks/makeDsmcCallbacks と同じ考え方)
@@ -1008,7 +1037,22 @@ export default function App() {
     return { ...pic1d, left: normSide(pic1d.left), right: normSide(pic1d.right) };
   };
 
-  const runSweepStart = (paramPath: string, values: number[], parallel: number, module: "pic" | "pic1d") => {
+  // fluid1d 版 (prompts/109)。fluid1d.left/right も Pic1dElectrode 型を共用しているため、
+  // normalizePic1dVoltageRf と全く同じロジックで正規化できる
+  const normalizeFluid1dVoltageRf = (fluid1d: Fluid1dSettings): Fluid1dSettings => {
+    const normSide = (side: Pic1dElectrode): Pic1dElectrode =>
+      side.voltage_rf != null && !Array.isArray(side.voltage_rf)
+        ? { ...side, voltage_rf: [side.voltage_rf] }
+        : side;
+    return { ...fluid1d, left: normSide(fluid1d.left), right: normSide(fluid1d.right) };
+  };
+
+  const runSweepStart = (
+    paramPath: string,
+    values: number[],
+    parallel: number,
+    module: "pic" | "pic1d" | "fluid1d",
+  ) => {
     sweepStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用 (prompts/86)
     setSweepError(null);
     setSweepStarted(null);
@@ -1020,6 +1064,7 @@ export default function App() {
     // 深いコピーに対して終端キーを実体化してから送る (元の project state は汚さない)
     const proj = JSON.parse(JSON.stringify(projectForSweep)) as typeof projectForSweep;
     if (proj.pic1d) proj.pic1d = normalizePic1dVoltageRf(proj.pic1d);
+    if (proj.fluid1d) proj.fluid1d = normalizeFluid1dVoltageRf(proj.fluid1d);
     ensureSweepPath(proj, paramPath);
     client.start(proj, paramPath, values, parallel, module);
   };
@@ -1195,6 +1240,64 @@ export default function App() {
 
   const runPic1dStop = () => {
     pic1dClientRef.current?.stop();
+  };
+
+  // 1D 流体実行中のコールバック生成。makePic1dCallbacks と全く同じ設計 (pic1d と同様
+  // geometry/mesh に依存しないため続き実行時のジオメトリ食い違いは無く、done.result が
+  // そのまま自己完結した結果一式を返す、prompts/109)
+  const makeFluid1dCallbacks = (): Fluid1dClientCallbacks => ({
+    onStarted: (msg) => {
+      setFluid1dStarted(msg);
+      setFluid1dFrame(null); // ライブ表示を新しい実行区間の内容に自然に切り替える
+    },
+    onFrame: (msg) => {
+      setFluid1dFrame(msg);
+    },
+    onDone: (msg) => {
+      setFluid1dResult(msg.result);
+      setFluid1dRunning(false);
+      setFluid1dContinueReady(true); // done (stop 済みも含む) したので続き実行が可能になる
+    },
+    onError: (detail) => {
+      setFluid1dError(detail);
+      setFluid1dRunning(false);
+      setFluid1dContinueReady(false); // エラー後の状態は不定なので続き実行は無効のままにする
+    },
+    onClose: () => setFluid1dRunning(false),
+  });
+
+  // 流体1D開始: WebSocket接続を張り、project.fluid1d を送信する (runPic1dStart と同じ設計)
+  const runFluid1dStart = () => {
+    fluid1dStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用
+    setFluid1dError(null);
+    setFluid1dStarted(null);
+    setFluid1dFrame(null);
+    setFluid1dRunning(true);
+    setFluid1dContinueReady(false);
+    const client = new Fluid1dClient(makeFluid1dCallbacks());
+    fluid1dClientRef.current = client;
+    client.start({ ...project, fluid1d });
+  };
+
+  // 流体1D続きから実行: 保持中のシミュレーション状態 (場・時刻) を維持したまま
+  // extraSteps 分だけ追加実行する。フレーム間隔・平均ステップ数・位相ビン数は現在の fluid1d 設定を使う
+  const runFluid1dContinue = (extraSteps: number) => {
+    if (!fluid1dClientRef.current || fluid1dRunning || !fluid1dContinueReady) return;
+    fluid1dStartTimeRef.current = Date.now();
+    setFluid1dError(null);
+    setFluid1dRunning(true);
+    setFluid1dContinueReady(false);
+    fluid1dClientRef.current.setCallbacks(makeFluid1dCallbacks());
+    fluid1dClientRef.current.continueRun({
+      extra_steps: extraSteps,
+      frame_every: fluid1d.frame_every,
+      avg_steps: fluid1d.avg_steps ?? null,
+      phase_bins: fluid1d.phase_bins ?? null,
+    });
+  };
+
+  const runFluid1dStop = () => {
+    fluid1dClientRef.current?.stop();
   };
 
   // VHF 定在波 (prompts/101) 実行中のコールバック生成。continue が無いため
@@ -1751,9 +1854,17 @@ export default function App() {
   };
 
   // --- 保存/読込 ---
-  // particles / pic / pic1d / tl は history 管理外の別 state のため、保存時にここで project へ合成する
+  // particles / pic / pic1d / fluid1d / tl は history 管理外の別 state のため、保存時にここで
+  // project へ合成する
   const saveProject = () => {
-    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter), pic1d, tl };
+    const toSave: Project = {
+      ...project,
+      particles,
+      pic: withInjectionEmitter(pic, particles.emitter),
+      pic1d,
+      fluid1d,
+      tl,
+    };
     saveTextFile("project.json", JSON.stringify(toSave, null, 2), "JSON", ["json"]).catch((err) => {
       setError(String(err));
     });
@@ -1762,7 +1873,14 @@ export default function App() {
   // 結果付き保存: プロジェクトに results を同梱して1ファイルで保存する。
   // 結果 (特に PIC の cycle) は大きくなりうるため、整形なし (compact) で書き出す
   const saveProjectWithResults = () => {
-    const toSave: Project = { ...project, particles, pic: withInjectionEmitter(pic, particles.emitter), pic1d, tl };
+    const toSave: Project = {
+      ...project,
+      particles,
+      pic: withInjectionEmitter(pic, particles.emitter),
+      pic1d,
+      fluid1d,
+      tl,
+    };
     // pic 結果は picStarted (mesh を含む) が無いと描画できないため、それが無い場合は同梱しない
     const results: ResultsBundle = {
       version: 1,
@@ -1784,6 +1902,8 @@ export default function App() {
       gas: gasResult,
       // pic1d 結果は settings を含み自己完結 (done.result そのもの) なので、そのまま同梱する
       pic1d: pic1dResult,
+      // fluid1d 結果も同様に settings を含み自己完結 (done.result そのもの、prompts/104-109)
+      fluid1d: fluid1dResult,
       // tl 結果も同様に settings を含み自己完結 (done.result そのもの、prompts/101)
       tl: tlResult,
     };
@@ -1830,6 +1950,9 @@ export default function App() {
     // 1D PIC設定も同様に既定値をベースに合成する (pic1d が無い旧形式ファイルは丸ごと既定値に戻す)
     const loadedPic1d = raw.pic1d;
     setPic1d(loadedPic1d ? { ...DEFAULT_PIC1D, ...loadedPic1d } : DEFAULT_PIC1D);
+    // 1D 流体設定も同様 (fluid1d が無い旧形式ファイルは丸ごと既定値に戻す、prompts/104-109)
+    const loadedFluid1d = raw.fluid1d;
+    setFluid1d(loadedFluid1d ? { ...DEFAULT_FLUID1D, ...loadedFluid1d } : DEFAULT_FLUID1D);
     // VHF 定在波設定も同様 (tl が無い旧形式ファイルは丸ごと既定値に戻す、prompts/101)
     const loadedTl = raw.tl;
     setTl(loadedTl ? { ...DEFAULT_TL, ...loadedTl } : DEFAULT_TL);
@@ -1859,6 +1982,12 @@ export default function App() {
       setPic1dFrame(null);
       setPic1dResult(results.pic1d ?? null);
       setPic1dContinueReady(false); // サーバー側に保持状態が無いため続き実行は無効にする
+      // 1D 流体の結果 (settings を含み自己完結)。started/frame は保存対象に含めていないため
+      // 常に null に戻す (result-fluid1d ページはこの fluid1dResult の有無だけで結果表示に切り替わる)
+      setFluid1dStarted(null);
+      setFluid1dFrame(null);
+      setFluid1dResult(results.fluid1d ?? null);
+      setFluid1dContinueReady(false); // サーバー側に保持状態が無いため続き実行は無効にする
       // VHF 定在波の結果 (settings を含み自己完結)。started/progress は保存対象に含めていないため
       // 常に null に戻す (result-tl ページはこの tlResult の有無だけで結果表示に切り替わる、prompts/101)
       setTlStarted(null);
@@ -1914,7 +2043,14 @@ export default function App() {
   // 「結果付き保存」ボタンの有効条件: FEM/Mesh/トレース/PIC/PIC-MCC 1D/DSMC のいずれかの結果があること
   // (何も無い状態で保存しても project 部分だけの通常保存と同じになってしまうため無効化する)
   const hasAnyResults =
-    !!result || !!meshResult || !!traceResult || !!gasResult || !!picStarted || !!pic1dResult || !!tlResult;
+    !!result ||
+    !!meshResult ||
+    !!traceResult ||
+    !!gasResult ||
+    !!picStarted ||
+    !!pic1dResult ||
+    !!fluid1dResult ||
+    !!tlResult;
 
   // 「続きから実行」ボタンの有効条件: 直前の実行が done/stop 済みで現在実行中でなく、
   // かつ前回実行以降にジオメトリが編集されていないこと (health 未接続時も不可)
@@ -1923,6 +2059,9 @@ export default function App() {
   // PIC-MCC 1D の「続きから」有効条件。pic1d は geometry/mesh に依存しないため、
   // 2D のような「ジオメトリ食い違いで無効化」の判定は不要 (pic1dContinueReady のコメント参照)
   const pic1dCanContinue = !!health && pic1dContinueReady && !pic1dRunning;
+
+  // 1D 流体の「続きから」有効条件。pic1dCanContinue と同じ考え方
+  const fluid1dCanContinue = !!health && fluid1dContinueReady && !fluid1dRunning;
 
   // DSMC「続きから実行」ボタンの有効条件 (PIC の picCanContinue と同じ考え方)
   const gasCanContinue = !!health && gasContinueReady && !gasRunning && !gasProjectChangedSinceRun;
@@ -2166,6 +2305,9 @@ export default function App() {
   // PIC-MCC 1D (prompts/91) 選択中は CadCanvas の代わりに Plot1dView を表示する
   // (1D は geometry/mesh と無関係なので CAD キャンバス自体が意味を持たない)
   const isPic1dNode = activeNode === "study-pic1d" || activeNode === "result-pic1d";
+  // 1D 流体 (prompts/104-109) も同様に geometry/mesh と無関係な専用ソルバーなので
+  // CadCanvas の代わりに Fluid1dPlotView を表示する
+  const isFluid1dNode = activeNode === "study-fluid1d" || activeNode === "result-fluid1d";
   // VHF 定在波 (prompts/101) も同様に geometry/mesh と無関係な専用ソルバーなので
   // CadCanvas の代わりに TlPlotView を表示する
   const isTlNode = activeNode === "study-tl" || activeNode === "result-tl";
@@ -2212,6 +2354,8 @@ export default function App() {
   // 設定パネル (Pic1dPanel) には study/result で内容差が無い。2D の setup/results 2インスタンス方式とは
   // 異なり、単一インスタンスを両ノードで共用する (表示は同じまま、選択ノードでタイトルだけ変わる)
   const showPic1dPage = activeNode === "study-pic1d" || activeNode === "result-pic1d";
+  // 1D 流体 (prompts/104-109) も pic1d と同じ理由で study/result 共通の単一インスタンス
+  const showFluid1dPage = activeNode === "study-fluid1d" || activeNode === "result-fluid1d";
   // VHF 定在波 (prompts/101) も pic1d と同じ理由で study/result 共通の単一インスタンス
   const showTlPage = activeNode === "study-tl" || activeNode === "result-tl";
   const showGasSetupPage = activeNode === "study-gas";
@@ -2232,8 +2376,9 @@ export default function App() {
         : NODE_TITLES[activeNode];
 
   // --- 下部ステータスバー ---
-  // エラーは error → picError → pic1dError → tlError → gasError → sweepError の順で最初の非null を優先表示する
-  const statusError = error ?? picError ?? pic1dError ?? tlError ?? gasError ?? sweepError;
+  // エラーは error → picError → pic1dError → fluid1dError → tlError → gasError → sweepError の
+  // 順で最初の非null を優先表示する
+  const statusError = error ?? picError ?? pic1dError ?? fluid1dError ?? tlError ?? gasError ?? sweepError;
   // ステータスバーのエラーを閉じる (各エラー state を一括クリア)。パネル内の
   // エラー表示は各パネルの error prop 経由で残したいが、実体は同じ state なので
   // ここでは「ステータスバーに居座る」問題の解消を優先して両方消える仕様とする
@@ -2241,6 +2386,7 @@ export default function App() {
     setError(null);
     setPicError(null);
     setPic1dError(null);
+    setFluid1dError(null);
     setTlError(null);
     setGasError(null);
     setSweepError(null);
@@ -2260,6 +2406,12 @@ export default function App() {
   const pic1dPct = pic1dStarted && pic1dStarted.n_steps > 0
     ? Math.min(100, Math.round((pic1dSegStep / pic1dStarted.n_steps) * 100))
     : 0;
+  // 1D 流体も続き実行で step が通算するため pic1d と同じ考え方で区間内ステップを求める
+  const fluid1dStepOffset = fluid1dStarted?.step_offset ?? 0;
+  const fluid1dSegStep = Math.max(0, (fluid1dFrame?.step ?? fluid1dStepOffset) - fluid1dStepOffset);
+  const fluid1dPct = fluid1dStarted && fluid1dStarted.n_steps > 0
+    ? Math.min(100, Math.round((fluid1dSegStep / fluid1dStarted.n_steps) * 100))
+    : 0;
   const gasPct = gasProgress && gasProgress.nSteps > 0 ? Math.round((gasProgress.step / gasProgress.nSteps) * 100) : 0;
   // VHF 定在波 (prompts/101) は continue が無いため step は常に区間内の値そのもの (オフセット不要)
   const tlPct = tlProgress && tlProgress.nSteps > 0 ? Math.round((tlProgress.step / tlProgress.nSteps) * 100) : 0;
@@ -2270,6 +2422,7 @@ export default function App() {
   const busyElapsedSec = busy && busyStartTimeRef.current != null ? (Date.now() - busyStartTimeRef.current) / 1000 : 0;
   const picElapsedSec = picRunning && picStartTimeRef.current != null ? (Date.now() - picStartTimeRef.current) / 1000 : 0;
   const pic1dElapsedSec = pic1dRunning && pic1dStartTimeRef.current != null ? (Date.now() - pic1dStartTimeRef.current) / 1000 : 0;
+  const fluid1dElapsedSec = fluid1dRunning && fluid1dStartTimeRef.current != null ? (Date.now() - fluid1dStartTimeRef.current) / 1000 : 0;
   const tlElapsedSec = tlRunning && tlStartTimeRef.current != null ? (Date.now() - tlStartTimeRef.current) / 1000 : 0;
   const gasElapsedSec = gasRunning && gasStartTimeRef.current != null ? (Date.now() - gasStartTimeRef.current) / 1000 : 0;
   const sweepElapsedSec = sweepRunning && sweepStartTimeRef.current != null ? (Date.now() - sweepStartTimeRef.current) / 1000 : 0;
@@ -2390,6 +2543,11 @@ export default function App() {
             pic1dFrame={pic1dFrame}
             pic1dError={pic1dError}
             pic1dResult={pic1dResult}
+            fluid1dRunning={fluid1dRunning}
+            fluid1dStarted={fluid1dStarted}
+            fluid1dFrame={fluid1dFrame}
+            fluid1dError={fluid1dError}
+            fluid1dResult={fluid1dResult}
             tlRunning={tlRunning}
             tlStarted={tlStarted}
             tlProgressStep={tlProgress?.step ?? null}
@@ -2656,6 +2814,27 @@ export default function App() {
               />
             </div>
 
+            {/* 1D プラズマ流体 (prompts/104-109): 結果の可視化は Fluid1dPlotView (キャンバス領域) 側に
+                持たせているため、設定パネルは study-fluid1d/result-fluid1d で共通の単一インスタンス
+                (pic1d と同じ設計)。pic1d prop は「1D PIC の設定を取込」プリセットボタン用 */}
+            <div style={{ display: showFluid1dPage ? "block" : "none" }}>
+              <Fluid1dPanel
+                lengthUnit={lengthUnit}
+                fluid1d={fluid1d}
+                onChange={setFluid1d}
+                canRun={!!health}
+                running={fluid1dRunning}
+                onStart={runFluid1dStart}
+                onStop={runFluid1dStop}
+                canContinue={fluid1dCanContinue}
+                onContinue={runFluid1dContinue}
+                started={fluid1dStarted}
+                frame={fluid1dFrame}
+                error={fluid1dError}
+                pic1d={pic1d}
+              />
+            </div>
+
             {/* VHF定在波 (prompts/101): 結果の可視化は TlPlotView (キャンバス領域) 側に
                 持たせているため、設定パネルは study-tl/result-tl で共通の単一インスタンス
                 (pic1d と同じ設計) */}
@@ -2813,9 +2992,10 @@ export default function App() {
           title="ドラッグで幅を変更 / ダブルクリックで既定幅"
         />
 
-        {/* 右カラム: キャンバスツールバー + CadCanvas (PIC-MCC 1D 選択時は Plot1dView に差し替え、
-            prompts/91)。1D は geometry/mesh と無関係なので CAD 編集ツールバー自体を出さない
-            (レイアウト構造 <div className="canvas-col"> ... </div> 自体は崩さない) */}
+        {/* 右カラム: キャンバスツールバー + CadCanvas (PIC-MCC 1D 選択時は Plot1dView、1D 流体選択時は
+            Fluid1dPlotView に差し替え、prompts/91・104-109)。1D は geometry/mesh と無関係なので
+            CAD 編集ツールバー自体を出さない (レイアウト構造 <div className="canvas-col"> ... </div>
+            自体は崩さない) */}
         <div className="canvas-col">
           {isPic1dNode ? (
             <Plot1dView
@@ -2826,6 +3006,17 @@ export default function App() {
               frame={pic1dFrame}
               result={pic1dResult}
               error={pic1dError}
+            />
+          ) : isFluid1dNode ? (
+            <Fluid1dPlotView
+              lengthUnit={lengthUnit}
+              fluid1d={fluid1d}
+              running={fluid1dRunning}
+              started={fluid1dStarted}
+              frame={fluid1dFrame}
+              result={fluid1dResult}
+              error={fluid1dError}
+              pic1dResult={pic1dResult}
             />
           ) : isTlNode ? (
             <TlPlotView
@@ -3070,7 +3261,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > PIC-MCC 1D実行中 > VHF定在波実行中 > DSMC実行中 > 準備完了 の優先順位 */}
+      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > PIC-MCC 1D実行中 > 流体1D実行中 > VHF定在波実行中 > DSMC実行中 > 準備完了 の優先順位 */}
       <div className="statusbar">
         {/* 実行中は進捗を最優先 (エラーが残っていても別計算の進捗を隠さない)。
             アイドル時のエラーは×で閉じられる (居座り防止。新規実行開始でも自動クリア) */}
@@ -3104,6 +3295,15 @@ export default function App() {
             </span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${pic1dPct}%` }} />
+            </div>
+          </>
+        ) : fluid1dRunning ? (
+          <>
+            <span>
+              流体1D 実行中... {fluid1dPct}% ({fluid1dSegStep}/{fluid1dStarted?.n_steps ?? 0}) — 経過 {formatElapsed(fluid1dElapsedSec)}
+            </span>
+            <div className="statusbar-progress">
+              <div className="statusbar-progress-bar" style={{ width: `${fluid1dPct}%` }} />
             </div>
           </>
         ) : tlRunning ? (
