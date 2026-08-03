@@ -643,6 +643,18 @@ export default function Pic1dPanel({
         );
       })()}
 
+      <div className="field">
+        <span className="label">壁 IEDF ビン数 (0=無効)</span>
+        <CommitNumberInput
+          value={pic1d.wall_iedf_bins ?? 100}
+          onCommit={(v) => onChange({ ...pic1d, wall_iedf_bins: Math.max(0, Math.min(1000, Math.round(v))) })}
+        />
+      </div>
+      <p className="hint">
+        壁で吸収されたイオンの全運動エネルギーを、平均化ウィンドウ中に電極ごと (左右) の重み付き
+        ヒストグラムとして集計します (粒子ベース、prompts/116)。
+      </p>
+
       <h2>PIC 1D: EEDF/EEPF 区間 (最大{MAX_EEDF1D_REGIONS}個)</h2>
       <p className="hint">
         x1/x2 (電極間の位置 [{unitLabel}]) で区間を指定します。e_max (空欄=自動) は最初の集計ステップで

@@ -17,6 +17,7 @@ import type {
   Pic1dSheathTs,
   Pic1dStartedMsg,
   VoltageWaveform,
+  WallIedfResult,
 } from "../types";
 
 /**
@@ -1021,6 +1022,95 @@ function Pic1dCyclePlayer({
   );
 }
 
+// 壁 IEDF (入射イオンエネルギー分布、prompts/116) を EedfChart で表示するための変換。
+// PicEedfResult 型をここでは import せず、EedfChart の呼び出し位置で構造的型付けに
+// 委ねる (t_eff_ev/overflow_frac は壁 IEDF には無いので 0 埋めのダミー値)
+function wallIedfToEedfResults(w: WallIedfResult) {
+  return (["left", "right"] as const).map((side) => {
+    const d = w[side];
+    return {
+      label: side === "left" ? "左壁" : "右壁",
+      e_centers: d.e_centers,
+      f: d.f,
+      mean_energy_ev: d.mean_energy_ev,
+      t_eff_ev: 0,
+      total_weight: d.total_weight,
+      overflow_frac: 0,
+      n_samples: d.n_samples,
+    };
+  });
+}
+
+/**
+ * 壁 IEDF (入射イオンエネルギー分布) セクション。1D PIC (粒子ベース、result.wall_iedf に
+ * model フィールドなし) と 1D 流体 (無衝突シース近似、model: "collisionless_sheath") の
+ * 両方から共通で使う (prompts/116)。既存 EEDF チャートの流儀 (左右2色・CSV書き出し) を踏襲する。
+ */
+export function WallIedfSection({
+  wallIedf,
+  downloadPrefix,
+  hint,
+}: {
+  wallIedf: WallIedfResult | null | undefined;
+  downloadPrefix: string;
+  hint?: string;
+}) {
+  const [logScale, setLogScale] = useState(true);
+  if (!wallIedf) return null;
+
+  const sides: { key: "left" | "right"; label: string }[] = [
+    { key: "left", label: "左壁" },
+    { key: "right", label: "右壁" },
+  ];
+  const eedfLike = wallIedfToEedfResults(wallIedf);
+
+  const download = (key: "left" | "right", label: string) => {
+    const d = wallIedf[key];
+    const lines = ["E_eV,f_ev-1"];
+    for (let i = 0; i < d.e_centers.length; i++) {
+      lines.push(`${d.e_centers[i]},${d.f[i]}`);
+    }
+    saveTextFile(`${downloadPrefix}_wall_iedf_${key}.csv`, lines.join("\n"), "CSV", ["csv"]).catch(() => {
+      /* 保存失敗は致命的でないため、ここではエラー表示を省略する (EEDF 同様の簡略化) */
+    });
+  };
+
+  return (
+    <>
+      <h3>壁 IEDF (入射イオンエネルギー分布)</h3>
+      <Toggle label="縦軸対数スケール" checked={logScale} onChange={setLogScale} />
+      <EedfChart
+        regions={sides.map((s) => ({ label: s.label }))}
+        results={eedfLike}
+        mode="eedf"
+        logScale={logScale}
+      />
+      {sides.map((s, i) => {
+        const d = wallIedf[s.key];
+        return (
+          <div key={s.key} className="collector-row" style={{ cursor: "default" }}>
+            <span className="tag" style={{ color: EEDF_CHART_COLORS[i % EEDF_CHART_COLORS.length] }}>
+              {s.label}
+            </span>
+            {d.total_weight > 0 ? (
+              <>
+                <span>⟨E⟩ {d.mean_energy_ev.toFixed(2)} eV</span>
+                <span>重み {d.total_weight.toExponential(3)}</span>
+                <button className="secondary" onClick={() => download(s.key, s.label)}>
+                  CSV保存
+                </button>
+              </>
+            ) : (
+              <span className="muted">(イオンが一度も吸収されませんでした)</span>
+            )}
+          </div>
+        );
+      })}
+      {hint && <p className="hint">{hint}</p>}
+    </>
+  );
+}
+
 function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; result: Pic1dResult }) {
   const [field, setField] = useState<Pic1dField>("phi");
   const [logScale, setLogScale] = useState(false);
@@ -1167,6 +1257,8 @@ function Pic1dResultView({ lengthUnit, result }: { lengthUnit: LengthUnit; resul
           ))}
         </>
       )}
+
+      <WallIedfSection wallIedf={result.wall_iedf} downloadPrefix="pic1d" />
 
       <h3>数値サマリ</h3>
       <div className="kv">

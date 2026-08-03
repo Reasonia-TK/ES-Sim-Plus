@@ -248,6 +248,26 @@ class Pic1dSimulation:
             )
         self.eedf_results: list[dict] | None = None
 
+        # ---- 壁 IEDF (入射イオンエネルギー分布、prompts/116) --------------------
+        # 粒子ベース (厳密): 平均区間中に壁 (左/右) で吸収されたイオンの全運動
+        # エネルギー E=½m|v|² [eV] と重みを記録し、重み付きヒストグラム化する。
+        # e_max の自動決定・ビン規約は EEDF (_eedf_st) と全く同じ流儀
+        # (最初にサンプルが得られたステップの最大値×1.2 で固定、以後はみ出した
+        # 分は overflow として重みだけ積算し、ヒストグラム自体は歪めない)。
+        # wall_iedf_bins=0 はこの辞書を空にするだけで、_accumulate_wall_iedf 自体を
+        # 呼ばない (step() 側の分岐、従来経路とビット不変)
+        self._wall_iedf_bins = int(s.wall_iedf_bins)
+        self._wall_iedf_enabled = self._wall_iedf_bins > 0
+        self._wall_iedf_st: dict[str, dict] = (
+            {
+                side: {"hist": None, "e_max": None, "sum_w": 0.0, "sum_we": 0.0, "overflow_w": 0.0}
+                for side in ("left", "right")
+            }
+            if self._wall_iedf_enabled
+            else {}
+        )
+        self.wall_iedf: dict[str, dict] | None = None
+
         # ---- 診断・時刻 --------------------------------------------------------
         self.t = 0.0
         self.step_count = 0
@@ -521,6 +541,66 @@ class Pic1dSimulation:
             )
         return out
 
+    # ---- 壁 IEDF (prompts/116) --------------------------------------------------
+
+    def _accumulate_wall_iedf(self, side: str, e_ev: np.ndarray, w: np.ndarray) -> None:
+        """このステップで壁 (side) に吸収されたイオンのエネルギー・重みを
+        ヒストグラムへ積算する。e_max の自動決定・ビン規約は _accumulate_eedf と
+        同じ流儀 (最初にサンプルが得られたステップの最大値×1.2 で固定)。
+        """
+        if e_ev.size == 0:
+            return
+        st = self._wall_iedf_st[side]
+        if st["hist"] is None:
+            e_max = float(e_ev.max()) * 1.2
+            st["e_max"] = e_max if e_max > 0.0 else 30.0
+            st["hist"] = np.zeros(self._wall_iedf_bins)
+        e_max = st["e_max"]
+        in_range = e_ev <= e_max
+        if np.any(in_range):
+            idx = np.minimum(
+                (e_ev[in_range] / e_max * self._wall_iedf_bins).astype(np.int64),
+                self._wall_iedf_bins - 1,
+            )
+            st["hist"] += np.bincount(idx, weights=w[in_range], minlength=self._wall_iedf_bins)
+            st["sum_w"] += float(w[in_range].sum())
+            st["sum_we"] += float((w[in_range] * e_ev[in_range]).sum())
+        if not np.all(in_range):
+            st["overflow_w"] += float(w[~in_range].sum())
+
+    def wall_iedf_data(self) -> dict | None:
+        """壁 IEDF 結果一式 (result["wall_iedf"]、EEDF の結果形に揃える。prompts/116)。
+
+        wall_iedf_bins=0 (無効) なら None。continue のリセット規約は EEDF と同じ
+        (prepare_continue でヒストグラム・e_max をリセットする)。
+        """
+        if not self._wall_iedf_enabled:
+            return None
+        n_samples = self._accum_count
+        out: dict[str, dict] = {}
+        for side in ("left", "right"):
+            st = self._wall_iedf_st[side]
+            bins = self._wall_iedf_bins
+            e_max = st["e_max"] if st["e_max"] is not None else 30.0
+            hist = st["hist"] if st["hist"] is not None else np.zeros(bins)
+            d_e = e_max / bins
+            e_centers = (np.arange(bins) + 0.5) * d_e
+            sum_w = st["sum_w"]
+            if sum_w > 0.0:
+                f = hist / (sum_w * d_e)
+                mean_e = st["sum_we"] / sum_w
+            else:
+                f = np.zeros(bins)
+                mean_e = 0.0
+            out[side] = {
+                "e_centers": e_centers,
+                "f": f,
+                "mean_energy_ev": mean_e,
+                "total_weight": sum_w,
+                "n_samples": n_samples,
+            }
+        return out
+
     # ---- 時間平均アキュムレータ -------------------------------------------------
 
     def enable_density_accum(self, start_step: int) -> None:
@@ -727,6 +807,22 @@ class Pic1dSimulation:
             if np.any(absorbed):
                 self.wall["left"][sp.name] += float(sp.w[left_mask].sum())
                 self.wall["right"][sp.name] += float(sp.w[right_mask].sum())
+                if sp.name == "ion" and self._wall_iedf_enabled and accumulating:
+                    # 壁 IEDF (prompts/116): 吸収された瞬間の全運動エネルギー
+                    # E=½m|v|² [eV] を壁ごとに積算する (SEE 判定より前の sp.v・sp.w
+                    # をそのまま使う。位置更新後・吸収前の速度なので、この時刻の
+                    # 場による加速まで反映済みの厳密なエネルギー)
+                    for mask, side in ((left_mask, "left"), (right_mask, "right")):
+                        if not np.any(mask):
+                            continue
+                        v_abs = sp.v[mask]
+                        e_ev = (
+                            0.5
+                            * sp.m
+                            * (v_abs[:, 0] ** 2 + v_abs[:, 1] ** 2 + v_abs[:, 2] ** 2)
+                            / QE
+                        )
+                        self._accumulate_wall_iedf(side, e_ev, sp.w[mask])
                 if sp.name == "ion":
                     for mask, sign, gamma, wall_x in (
                         (left_mask, 1.0, self.s.left.see_gamma, 0.0),
@@ -888,6 +984,7 @@ class Pic1dSimulation:
         self.fn = self.fn_summary()
         self.sheath_ts = self.sheath_ts_data()
         self.sheath_fft = self.sheath_fft_data()
+        self.wall_iedf = self.wall_iedf_data()
         return self.history, frames
 
     def prepare_continue(
@@ -951,6 +1048,15 @@ class Pic1dSimulation:
             st["hist"] = None if st["auto"] else np.zeros(st["bins"])
             if st["auto"]:
                 st["e_max"] = None
+        # 壁 IEDF (prompts/116): e_max は常に自動決定なので EEDF の auto 分岐と同じ
+        # 扱い (hist/e_max をリセットして次の平均区間の最初のサンプルで再決定する)
+        self.wall_iedf = None
+        for st in self._wall_iedf_st.values():
+            st["hist"] = None
+            st["e_max"] = None
+            st["sum_w"] = 0.0
+            st["sum_we"] = 0.0
+            st["overflow_w"] = 0.0
 
 
 # ---- Brinkmann 基準のシースエッジ検出 (prompts/97) --------------------------------------
@@ -1248,6 +1354,18 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
                     "n_samples": r["n_samples"],
                 }
             )
+    wall_iedf: dict[str, dict] | None = None
+    if sim.wall_iedf is not None:
+        wall_iedf = {
+            side: {
+                "e_centers": d["e_centers"].tolist(),
+                "f": d["f"].tolist(),
+                "mean_energy_ev": d["mean_energy_ev"],
+                "total_weight": d["total_weight"],
+                "n_samples": d["n_samples"],
+            }
+            for side, d in sim.wall_iedf.items()
+        }
     timing_total = sum(sim.timing.values())
     return {
         "history": sim.history,
@@ -1259,6 +1377,9 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
         "sheath_fft": sim.sheath_fft,
         "sheath_ts": sim.sheath_ts,
         "eedf": eedf,
+        # 壁 IEDF (入射イオンエネルギー分布、粒子ベース。prompts/116)。
+        # wall_iedf_bins=0 なら None
+        "wall_iedf": wall_iedf,
         "walls": sim.wall,
         "fn": sim.fn,  # FN 電界放出サマリ (prompts/95)。両電極とも fn 未設定なら None
         "elapsed_s": elapsed_s,

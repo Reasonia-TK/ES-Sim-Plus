@@ -274,6 +274,9 @@ export interface Pic1dSettings {
   // Pic1dPanel では use_dsmc_gas のトグル自体を出さない
   see_energy_ev?: number;  // SEE 電子の初期エネルギー [eV]
   eedf_regions?: Eedf1dRegion[]; // 最大4個 (backend validator)
+  // 壁 IEDF (入射イオンエネルギー分布、prompts/116) のビン数。0=無効。粒子ベース
+  // (壁で吸収されたイオンの全運動エネルギーを重み付きヒストグラム化)
+  wall_iedf_bins?: number;
   seed?: number;            // 初期装荷の乱数種 (MCC は mcc.seed を使う)
 }
 
@@ -390,6 +393,24 @@ export interface Pic1dEedfResult {
   n_samples: number;
 }
 
+// 壁 (電極) 入射イオンエネルギー分布 (IEDF、prompts/116)。1D PIC (pic1d.py) は
+// 壁で吸収されたイオンを直接ヒストグラム化する粒子ベース (厳密)。1D 流体 (fluid1d.py)
+// は位相分解シース電圧 + イオン走行時間フィルタで再構成する無衝突シース近似の
+// モデルベース (model="collisionless_sheath" が付与され、PIC の結果と区別できる)
+export interface WallIedfSide {
+  e_centers: number[];
+  f: number[];
+  mean_energy_ev: number;
+  total_weight: number;
+  n_samples: number;
+  model?: string; // 流体のみ付与 ("collisionless_sheath")。PIC には無い
+}
+
+export interface WallIedfResult {
+  left: WallIedfSide;
+  right: WallIedfSide;
+}
+
 export interface Pic1dWallCounts {
   electron: number;
   ion: number;
@@ -421,6 +442,8 @@ export interface Pic1dResult {
   sheath_fft?: Pic1dSheathFft | null;
   sheath_ts?: Pic1dSheathTs | null;
   eedf: Pic1dEedfResult[];
+  // 壁 IEDF (prompts/116)。wall_iedf_bins=0 なら null。旧保存ファイルとの互換のため optional
+  wall_iedf?: WallIedfResult | null;
   walls: Pic1dWalls;
   fn: Pic1dFnResult | null; // 両電極とも fn 未設定なら null (prompts/95)
   elapsed_s: number;
@@ -477,12 +500,20 @@ export interface Fluid1dSettings {
   mu_i_ref?: number;
   n_ref_m3?: number;
   t_i_ev?: number;             // イオン温度 (D_i = μ_i・T_i)
+  // 修正 Frost イオン移動度 (prompts/116): μ_i(E/N)=μ_L/√(1+(E/N)/C) でシース強電界での
+  // 移動度低下を表現する (Ellis et al. 1976 の Ar+ in Ar 実測に対する粗いフィット、工学近似)。
+  // "const" は従来の低電界一定値 (frost 導入前とビット不変)。新規機能につき既定は "frost"
+  ion_mobility_model?: "frost" | "const";
+  frost_c_td?: number;         // 修正 Frost 式の C [Td] (const では無視)。既定 150
   electron_processes?: XsProcess[]; // 空/未指定なら eduPIC Ar 解析式を既定使用
   dt?: number | null;          // 秒。null なら RF周期/2000 と 1e-10 の小さい方
   n_steps?: number;
   frame_every?: number;
   avg_steps?: number | null;   // 完了時に返す時間平均プロファイルの平均ステップ数。null = 最後の25%
   phase_bins?: number;         // RF 1周期の位相分解ビン数 (0=無効)
+  // 壁 IEDF (prompts/116) のビン数。0=無効。無衝突シース近似のモデルベース再構成
+  // (位相分解シース電圧 + イオン走行時間フィルタ。fluid1d.py 参照)
+  wall_iedf_bins?: number;
 }
 
 // server → client (/ws/fluid1d)
@@ -564,6 +595,9 @@ export interface Fluid1dResult {
   profiles: Fluid1dProfiles | null;
   sheath: Fluid1dSheath | null;
   cycle: Fluid1dCycle | null;
+  // 壁 IEDF (無衝突シース近似、prompts/116)。wall_iedf_bins=0 なら null。
+  // 旧保存ファイルとの互換のため optional
+  wall_iedf?: WallIedfResult | null;
   walls: Fluid1dWalls;
   gen_total: number; // 電離による累計生成数 [m^-2] (history とは別に累計値そのものを持つ)
   elapsed_s: number;
@@ -619,6 +653,9 @@ export interface Fluid2dSettings {
   mu_i_ref?: number;
   n_ref_m3?: number;
   t_i_ev?: number;             // イオン温度 (D_i = μ_i・T_i)
+  // 修正 Frost イオン移動度 (fluid1d.py と全く同じ規約・既定値、prompts/116)
+  ion_mobility_model?: "frost" | "const";
+  frost_c_td?: number;         // 修正 Frost 式の C [Td] (const では無視)。既定 150
   electron_processes?: XsProcess[]; // 空/未指定なら eduPIC Ar 解析式を既定使用
   dt?: number | null;          // 秒。null なら RF周期/2000 と 1e-10 の小さい方
   n_steps?: number;

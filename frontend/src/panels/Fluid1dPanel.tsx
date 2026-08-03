@@ -235,6 +235,31 @@ export default function Fluid1dPanel({
         />
       </div>
       <div className="field">
+        <span className="label">イオン移動度モデル</span>
+        <select
+          value={fluid1d.ion_mobility_model ?? "frost"}
+          onChange={(e) => onChange({ ...fluid1d, ion_mobility_model: e.target.value as "frost" | "const" })}
+        >
+          <option value="frost">修正 Frost 式 (電界強度依存、推奨)</option>
+          <option value="const">一定値 (μ_i 基準値のみ、旧来互換)</option>
+        </select>
+      </div>
+      <p className="hint">
+        修正 Frost 式 μ_i(E/N) = μ_L/√(1+(E/N)/C) は Ar+/Ar の測定値 (Ellis et al., At. Data
+        Nucl. Data Tables 17, 177 (1976)) への大まかな工学的近似であり、厳密なフィットではありません
+        (ガス種が異なれば C の再調整が必要)。拡散係数 D_i は低電界値 (D_i=μ_L・T_i) のまま据え置きます
+        (強電界域はドリフト支配的で拡散寄与が小さく、Einstein の関係自体も非平衡近似のため)。
+      </p>
+      {(fluid1d.ion_mobility_model ?? "frost") === "frost" && (
+        <div className="field">
+          <span className="label">Frost C [Td]</span>
+          <CommitNumberInput
+            value={fluid1d.frost_c_td ?? 150.0}
+            onCommit={(v) => onChange({ ...fluid1d, frost_c_td: Math.max(1e-9, v) })}
+          />
+        </div>
+      )}
+      <div className="field">
         <span className="label">μ_i 基準ガス密度 [m^-3]</span>
         <CommitNumberInput
           value={fluid1d.n_ref_m3 ?? 3.22e22}
@@ -350,6 +375,17 @@ export default function Fluid1dPanel({
           onCommit={(v) => onChange({ ...fluid1d, phase_bins: Math.max(0, Math.round(v)) })}
         />
       </div>
+      <div className="field">
+        <span className="label">壁 IEDF ビン数 (0=無効)</span>
+        <CommitNumberInput
+          value={fluid1d.wall_iedf_bins ?? 100}
+          onCommit={(v) => onChange({ ...fluid1d, wall_iedf_bins: Math.max(0, Math.min(1000, Math.round(v))) })}
+        />
+      </div>
+      <p className="hint">
+        無衝突シース近似 (位相分解シース電圧 + イオン通過時間フィルタ) により壁入射イオンエネルギー
+        分布を再構成します。CX 衝突による低エネルギー成分は含みません (prompts/116)。
+      </p>
       {/* 位相ビン数の推奨値ヒント (Pic1dPanel と同じ考え方) */}
       {rfFrequencies.length > 0 && effectiveDt !== null && (fluid1d.phase_bins ?? 40) > 0 && (() => {
         const basePeriod = 1 / rfFrequencies[0];
@@ -460,10 +496,13 @@ export const DEFAULT_FLUID1D: Fluid1dSettings = {
   mu_i_ref: 1.45e-1,
   n_ref_m3: 3.22e22,
   t_i_ev: 0.026,
+  ion_mobility_model: "frost",
+  frost_c_td: 150.0,
   electron_processes: [],
   dt: null,
   n_steps: 20000,
   frame_every: 200,
   avg_steps: null,
   phase_bins: 40,
+  wall_iedf_bins: 100,
 };

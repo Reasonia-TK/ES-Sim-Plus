@@ -177,6 +177,7 @@ const DEFAULT_PIC1D: Pic1dSettings = {
   mcc: null,
   see_energy_ev: 2.0,
   eedf_regions: [],
+  wall_iedf_bins: 100,
   seed: 0,
 };
 

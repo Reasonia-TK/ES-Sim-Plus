@@ -579,6 +579,10 @@ class Pic1dSettings(BaseModel):
     mcc: MccSettings | None = None  # 既存 MccSettings をそのまま流用 (null なら MCC 無効)
     see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]")
     eedf_regions: list[Eedf1dRegion] = []  # 最大4個 (validator)
+    # 壁 IEDF (入射イオンエネルギー分布、prompts/116) のビン数。0=無効。平均区間中に
+    # 壁 (左右) で吸収されたイオンの全運動エネルギーを重み付きヒストグラム化する
+    # (粒子ベースの厳密な値。e_max は EEDF (eedf_regions) と同じ流儀で自動決定する)
+    wall_iedf_bins: int = Field(100, ge=0, le=1000)
     seed: int = 0  # 初期装荷の乱数種 (MCC は mcc.seed を使う)
 
     @model_validator(mode="after")
@@ -627,12 +631,26 @@ class Fluid1dSettings(BaseModel):
     mu_i_ref: float = Field(1.45e-1, gt=0, description="μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)")
     n_ref_m3: float = Field(3.22e22, gt=0, description="mu_i_ref の基準ガス密度 [m^-3]")
     t_i_ev: float = Field(0.026, gt=0, description="イオン温度 (D_i = μ_i・T_i)")
+    # 修正 Frost イオン移動度 (prompts/116): μ_i(E/N) = μ_L/√(1+(E/N)/C) で
+    # シース強電界での移動度低下を表現する。μ_L は上の mu_i_ref/n_ref_m3 から決まる
+    # 低電界値、E/N [Td] = |E|/n_g/1e-21。C=frost_c_td は μ_L/√2 に落ちる E/N。
+    # 既定 150 Td は Ar+ in Ar の実測 (Ellis et al., At. Data Nucl. Data Tables 17,
+    # 177 (1976)) に対する粗いフィットであり精密フィットではない工学近似 —
+    # ガス種が変わる場合は調整が必要 (fluid1d.py frost_mobility 参照)。
+    # "const" は従来 (低電界一定値) の経路で、既存プロジェクト/テストとのビット
+    # 不変を保つために残す (新規機能のため既定は "frost")
+    ion_mobility_model: Literal["frost", "const"] = "frost"
+    frost_c_td: float = Field(150.0, gt=0, description="修正 Frost 式の C [Td] (const では無視)")
     electron_processes: list[XsProcess] = []  # 空なら eduPIC Ar 解析式を既定使用
     dt: float | None = Field(None, gt=0, description="秒。None なら RF周期/2000 と 1e-10 の小さい方")
     n_steps: int = Field(20000, gt=0)
     frame_every: int = Field(200, gt=0)
     avg_steps: int | None = Field(None, gt=0)
     phase_bins: int = Field(40, ge=0)
+    # 壁 IEDF (入射イオンエネルギー分布、prompts/116) のビン数。0=無効。
+    # 流体は粒子を持たないため、位相分解シース電圧 + イオン走行時間フィルタで
+    # 再構成する工学近似 (無衝突シース・CX 衝突なしを仮定、fluid1d.py 参照)
+    wall_iedf_bins: int = Field(100, ge=0, le=1000)
     # seed は不要 (流体は決定論的で乱数を使わない)
 
     @model_validator(mode="after")
@@ -672,6 +690,9 @@ class Fluid2dSettings(BaseModel):
     mu_i_ref: float = Field(1.45e-1, gt=0, description="μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)")
     n_ref_m3: float = Field(3.22e22, gt=0, description="mu_i_ref の基準ガス密度 [m^-3]")
     t_i_ev: float = Field(0.026, gt=0, description="イオン温度 (D_i = μ_i・T_i)")
+    # 修正 Frost イオン移動度 (fluid1d.py と全く同じ規約・既定値・出典。prompts/116)
+    ion_mobility_model: Literal["frost", "const"] = "frost"
+    frost_c_td: float = Field(150.0, gt=0, description="修正 Frost 式の C [Td] (const では無視)")
     electron_processes: list[XsProcess] = []  # 空なら eduPIC Ar 解析式を既定使用
     dt: float | None = Field(None, gt=0, description="秒。None なら RF周期/2000 と 1e-10 の小さい方")
     n_steps: int = Field(20000, gt=0)

@@ -125,7 +125,7 @@ import scipy.sparse.linalg as spla
 
 from . import _numba_kernels
 from .fem import EPS0, _radial_index, assemble, assemble_transport_operator
-from .fluid1d import FLOOR_N, FLOOR_W, _bernoulli
+from .fluid1d import FLOOR_N, FLOOR_W, _bernoulli, frost_mobility
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
 from .mcc import KB
 from .meshing import generate_mesh
@@ -300,12 +300,22 @@ class Fluid2dSimulation:
         self.k_fd = k_poisson[self.free][:, self.fixed].tocsr()
         self.lu = spla.splu(k_poisson[self.free][:, self.free].tocsc())
 
-        # ---- ガス・イオン輸送係数 (fluid1d.py と同じ規約) ------------------------
+        # ---- ガス・イオン輸送係数 (fluid1d.py と同じ規約。mu_i は低電界値 μ_L) -------
         self.n_g = s.gas_pressure_pa / (KB * s.gas_temperature_k)
         self.m_ion = s.ion_mass_amu * MP
         self.mu_i = s.mu_i_ref * (s.n_ref_m3 / self.n_g)
         self.t_i_ev = float(s.t_i_ev)
-        self.d_i = self.mu_i * self.t_i_ev
+        self.d_i = self.mu_i * self.t_i_ev  # Frost 補正なし (frost_mobility の docstring 参照)
+        self.ion_mobility_model = s.ion_mobility_model
+        self.frost_c_td = float(s.frost_c_td)
+        # 修正 Frost 用: エッジ (i,j) の Δφ→|E| 換算に使う概算エッジ長 (1D の dx に
+        # 相当する量)。EAFE の z=Δφ/T_i 自体はエッジ長を必要としない (w_ij に
+        # 幾何因子が既に吸収されている) が、Frost の E/N 評価には |E| を dphi から
+        # 復元する必要があるため、この換算専用にノード間ユークリッド距離を使う
+        # (mesh は不変なので初期化時に1回だけ計算する)
+        p_i = mesh.nodes[self.active_idx[self.i_idx]]
+        p_j = mesh.nodes[self.active_idx[self.j_idx]]
+        self._edge_len = np.linalg.norm(p_i - p_j, axis=1)
 
         electron_processes = s.electron_processes if s.electron_processes else edupic_ar_processes()[0]
         self.reactions: FluidReactions = build_fluid_reactions(electron_processes)
@@ -551,6 +561,16 @@ class Fluid2dSimulation:
         loss_elastic = 3.0 * self._mass_ratio * nu_m_per_ng * self.n_g * (te - tg_ev) * n_e
         return s_ion, loss_ion + loss_exc + loss_elastic
 
+    def _mu_i_at(self, e_abs):
+        """エッジ/壁の |E| における μ_i (fluid1d.Fluid1dSimulation._mu_i_at と同じ設計)。
+
+        "const" は e_abs に関わらず self.mu_i (スカラー) をそのまま返すので、
+        呼び出し側で ×1.0 する形にしておけば frost 導入前と完全にビット一致する。
+        """
+        if self.ion_mobility_model == "const":
+            return self.mu_i
+        return frost_mobility(self.mu_i, e_abs, self.n_g, self.frost_c_td)
+
     def _e_field_elements(self, phi: np.ndarray):
         """要素ごとの E = −∇φ (P1 なので要素内一定、pic.py._e_field と同じ規約)。"""
         vt = phi[self.tris]
@@ -730,7 +750,13 @@ class Fluid2dSimulation:
         phi_a = phi[self.active_idx]
         dphi = phi_a[self.i_idx] - phi_a[self.j_idx]
 
-        z_i = dphi / self.t_i_ev
+        # イオン z (修正 Frost、prompts/116): fluid1d._face_coeffs と全く同じ導出
+        # (z_i = (dphi/T_i)・(μ_i(|E_edge|)/μ_L))。E_edge はこのエッジの Δφ を
+        # 概算エッジ長 (_edge_len、初期化時に前計算) で割った近似値。"const" は
+        # 比が恒等的に 1.0 になりビット完全に従来の z_i=dphi/T_i と一致する
+        e_edge = dphi / self._edge_len
+        mu_i_edge = self._mu_i_at(e_edge)
+        z_i = (dphi / self.t_i_ev) * (mu_i_edge / self.mu_i)
         a_i = self.w_ij * self.d_i * _bernoulli(-z_i)
         b_i = self.w_ij * self.d_i * _bernoulli(z_i)
 
@@ -748,7 +774,8 @@ class Fluid2dSimulation:
         # ---- 壁 BC 係数 (現在の場・Te で評価、fluid1d._wall_side_coeffs の2D 一般化) --
         en_wall = ex_e[self.wall_tri] * self.wall_nout[:, 0] + ey_e[self.wall_tri] * self.wall_nout[:, 1]
         v_th_i = math.sqrt(8.0 * self.t_i_ev * QE / (math.pi * self.m_ion))
-        c_i_edge = np.maximum(self.mu_i * en_wall, 0.0) + 0.25 * v_th_i
+        # 壁向きドリフト流束の μ_i も SG 係数と同じ修正 Frost 補正を使う (prompts/116)
+        c_i_edge = np.maximum(self._mu_i_at(en_wall) * en_wall, 0.0) + 0.25 * v_th_i
         v_th_e_node = np.sqrt(8.0 * te * QE / (math.pi * ME))
         c_e_n1 = 0.25 * v_th_e_node[self.wall_n1]
         c_e_n2 = 0.25 * v_th_e_node[self.wall_n2]

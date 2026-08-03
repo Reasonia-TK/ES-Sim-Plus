@@ -4,7 +4,7 @@ import { formatNumber } from "../CommitInput";
 import { arrayMax, arrayMin } from "../mathUtils";
 import { mToUnit } from "../units";
 import type { LengthUnit } from "../units";
-import { Pic1dLineChart, Pic1dRfMonitor, deriveXGrid, interpLinear } from "./Plot1dView";
+import { Pic1dLineChart, Pic1dRfMonitor, WallIedfSection, deriveXGrid, interpLinear } from "./Plot1dView";
 import type { ChartMarker, LineSeries } from "./Plot1dView";
 import type {
   Fluid1dCycle,
@@ -585,6 +585,12 @@ function Fluid1dResultView({
           sheathMarkers={showSheath ? sheathMarkers : []}
         />
       )}
+
+      <WallIedfSection
+        wallIedf={result.wall_iedf}
+        downloadPrefix="fluid1d"
+        hint="無衝突シース近似 (CX 衝突による低エネルギー成分は含みません)"
+      />
 
       <h3>履歴 (全域密度) [m^-2]</h3>
       <Pic1dLineChart

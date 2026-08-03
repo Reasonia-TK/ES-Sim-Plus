@@ -459,6 +459,30 @@ export default function Fluid2dPanel({
           onCommit={(v) => onChange({ ...fluid2d, n_ref_m3: v })}
         />
       </div>
+      <div className="field">
+        <span className="label">イオン移動度モデル</span>
+        <select
+          value={fluid2d.ion_mobility_model ?? "frost"}
+          onChange={(e) => onChange({ ...fluid2d, ion_mobility_model: e.target.value as "frost" | "const" })}
+        >
+          <option value="frost">修正 Frost 式 (電界強度依存、推奨)</option>
+          <option value="const">一定値 (μ_i 基準値のみ、旧来互換)</option>
+        </select>
+      </div>
+      <p className="hint">
+        修正 Frost 式 μ_i(E/N) = μ_L/√(1+(E/N)/C) は Ar+/Ar の測定値 (Ellis et al., At. Data
+        Nucl. Data Tables 17, 177 (1976)) への大まかな工学的近似であり、厳密なフィットではありません
+        (ガス種が異なれば C の再調整が必要)。拡散係数 D_i は低電界値のまま据え置きます (fluid1d と共通)。
+      </p>
+      {(fluid2d.ion_mobility_model ?? "frost") === "frost" && (
+        <div className="field">
+          <span className="label">Frost C [Td]</span>
+          <CommitNumberInput
+            value={fluid2d.frost_c_td ?? 150.0}
+            onCommit={(v) => onChange({ ...fluid2d, frost_c_td: Math.max(1e-9, v) })}
+          />
+        </div>
+      )}
 
       <h2>流体 (2D): 電子断面積</h2>
       <p className="hint">
@@ -800,6 +824,8 @@ export const DEFAULT_FLUID2D: Fluid2dSettings = {
   mu_i_ref: 1.45e-1,
   n_ref_m3: 3.22e22,
   t_i_ev: 0.026,
+  ion_mobility_model: "frost",
+  frost_c_td: 150.0,
   electron_processes: [],
   dt: null,
   n_steps: 20000,

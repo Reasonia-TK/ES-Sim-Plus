@@ -161,6 +161,108 @@ def _bernoulli(z: np.ndarray) -> np.ndarray:
     return out
 
 
+def frost_mobility(mu_l, e_abs, n_g: float, c_td: float):
+    """修正 Frost 式によるイオン移動度 μ_i(E/N) (prompts/116、fluid1d.py/fluid2d.py 共通)。
+
+        μ_i(E/N) = μ_L / √(1 + (E/N)/C),   E/N [Td] = |E| / n_g / 1e-21
+
+    μ_L (mu_l) は低電界一定値 (mu_i_ref から決まる)、C (c_td) は移動度が
+    μ_L/√2 まで落ちる E/N。既定 C=150 Td は Ar+ in Ar の実測
+    (Ellis et al., At. Data Nucl. Data Tables 17, 177 (1976)) に対する粗い
+    フィットであり、精密フィットではなく工学近似 (ガス種が変われば C の
+    調整が必要 — schema.Fluid1dSettings.frost_c_td のコメント参照)。
+
+    D_i (拡散係数) はこの関数の対象外: 呼び出し側は低電界値 D_i=μ_L・T_i の
+    ままにする (Frost 補正を掛けない)。理由: 強電界域はドリフト支配で拡散の
+    寄与自体が小さく、そもそも Einstein 関係 D=μT は熱平衡 (弱電界) を前提と
+    した関係式で強電界では崩れており、D にも同じ補正を掛ける物理的根拠が
+    薄いため (むしろ低電界値のまま残す方が保守的)。
+    """
+    e_n_td = np.abs(e_abs) / n_g / 1.0e-21
+    return mu_l / np.sqrt(1.0 + e_n_td / c_td)
+
+
+# ---- 壁 IEDF (無衝突シース近似、prompts/116) --------------------------------------
+#
+# 流体は粒子を持たないため、壁 (電極) への入射イオンエネルギー分布 (IEDF) を
+# 「位相分解シース電圧 + イオン走行時間フィルタ」という工学近似で再構成する。
+# 仮定・限界: 無衝突シース (電荷交換 (CX) 衝突による低エネルギーテールは表現
+# できない)、シースエッジで静止したイオンがそこから壁まで無衝突で加速される
+# という単純化 (エッジでの熱エネルギー分・シース内の弾性散乱は無視)。
+# フィルタ・ヒストグラムの核となる2つの純関数をここに切り出し、単体テストで
+# 二山 (τ_i≪T_rf)/単峰 (τ_i≫T_rf) の遷移を定量検証できるようにする。
+
+
+def sheath_voltage_filter(
+    v_sh: np.ndarray, dt_bin: float, tau_i: float, n_periods: int = 50
+) -> np.ndarray:
+    """位相分解シース電圧 V_sh (1周期分、bins 点・等時間間隔 dt_bin) を、イオン
+    走行時間 τ_i の1次ローパス dV_eff/dt=(V_sh−V_eff)/τ_i で周期定常状態まで
+    フィルタし、フィルタ後の V_eff (同じ bins 点、1周期分) を返す。
+
+    各位相ビン区間内で V_sh が一定という近似のもとでこの ODE を厳密に積分すると、
+    zero-order-hold の指数フィルタ (無条件安定、dt_bin/τ_i の大小によらず発散しない)
+
+        V_eff[k+1] = V_sh[k] + (V_eff[k] − V_sh[k])・exp(−dt_bin/τ_i)
+
+    という漸化式になる。周期境界条件 (V_eff[0] は前周期の V_eff[bins−1] から続く)
+    を満たす周期定常解を、この漸化式を n_periods 周期分 (初期値は V_sh の平均) 繰り返して
+    最後の1周期を返すことで近似する — 線形時不変フィルタなので、十分な周期数を
+    回せば初期値によらず同じ周期解に収束する。
+
+    τ_i≪T_rf (dt_bin≫τ_i, exp(−dt_bin/τ_i)→0) では V_eff→V_sh
+    (瞬時追従、IEDF は二山型) に、τ_i≫T_rf (dt_bin≪τ_i, exp(−dt_bin/τ_i)→1) では
+    V_eff がほぼ一定値 (時間平均 V̄_sh、IEDF は単峰型) に収束する — Lieberman &
+    Lichtenberg の教科書に載っている transit-time 効果の標準的な振る舞い。
+    """
+    v_sh = np.asarray(v_sh, dtype=np.float64)
+    bins = len(v_sh)
+    if bins == 0:
+        return v_sh.copy()
+    if tau_i <= 0.0 or not np.isfinite(tau_i) or dt_bin <= 0.0:
+        return v_sh.copy()  # τ_i=0 相当 (瞬時追従) は V_eff=V_sh と同じ
+    ratio = dt_bin / tau_i
+    decay = math.exp(-ratio) if ratio < 700.0 else 0.0
+    v_eff = np.empty(bins)
+    prev = float(np.mean(v_sh))
+    for _ in range(n_periods):
+        for k in range(bins):
+            prev = v_sh[k] + (prev - v_sh[k]) * decay
+            v_eff[k] = prev
+    return v_eff
+
+
+def _weighted_energy_histogram(e_ev: np.ndarray, weight: np.ndarray, bins: int) -> dict:
+    """重み付きエネルギー値集合 (e_ev, weight) から IEDF ヒストグラムを組み立てる
+    (EEDF/壁 IEDF (PIC) と同じ規約: e_max は最大値×1.2 で自動決定、f は
+    ∫f dE=1 に正規化する)。
+
+    壁 IEDF (流体) はサンプル数が高々 phase_bins 個 (典型数十) と少ないため、
+    PIC/EEDF のようなオンライン (ストリーミング) 蓄積ではなく run_batch 完了後に
+    まとめて一度だけ計算する (メモリ上の制約が無いのでこの方が単純)。
+
+    重みの総和が 0 (壁イオン流束が全て0等の退化ケース) なら f・mean_energy_ev を
+    すべて0として返す (EEDF の「電子が入らない領域」と同じフォールバック)。
+    """
+    e_ev = np.asarray(e_ev, dtype=np.float64)
+    weight = np.asarray(weight, dtype=np.float64)
+    sum_w = float(np.sum(weight))
+    e_max = float(e_ev.max()) * 1.2 if e_ev.size and sum_w > 0.0 else 0.0
+    if e_max <= 0.0:
+        e_max = 30.0  # 全エネルギー0等の退化ケースのフォールバック (EEDF と同じ既定値)
+    d_e = e_max / bins
+    e_centers = (np.arange(bins) + 0.5) * d_e
+    if sum_w > 0.0:
+        idx = np.clip((e_ev / e_max * bins).astype(np.int64), 0, bins - 1)
+        hist = np.bincount(idx, weights=weight, minlength=bins)
+        f = hist / (sum_w * d_e)
+        mean_e = float(np.sum(weight * e_ev) / sum_w)
+    else:
+        f = np.zeros(bins)
+        mean_e = 0.0
+    return {"e_centers": e_centers, "f": f, "mean_energy_ev": mean_e, "total_weight": sum_w}
+
+
 class Fluid1dSimulation:
     """1D ドリフト拡散流体 (SG フラックス + 半陰的時間積分) シミュレーション本体。
 
@@ -204,13 +306,18 @@ class Fluid1dSimulation:
         ab[2, :-1] = lower
         self._poisson_ab = ab
 
-        # ---- ガス・イオン輸送係数 (mu_i, D_i はスカラー、Te に依存しない
+        # ---- ガス・イオン輸送係数 (mu_i は低電界値、D_i はスカラー、Te に依存しない
         #      低電界移動度モデル。ガス密度への依存だけスケールする) -----------
         self.n_g = s.gas_pressure_pa / (KB * s.gas_temperature_k)
         self.m_ion = s.ion_mass_amu * MP
+        # mu_i: 低電界値 μ_L (frost モデルでもこの値自体は変えない。d_i の算出・
+        # SG z の比の基準としてスカラーのまま保持する。frost 補正後の値は
+        # _mu_i_at (界面・境界ごと、ベクトル) で都度求める)
         self.mu_i = s.mu_i_ref * (s.n_ref_m3 / self.n_g)
         self.t_i_ev = float(s.t_i_ev)
-        self.d_i = self.mu_i * self.t_i_ev
+        self.d_i = self.mu_i * self.t_i_ev  # Frost 補正なし (frost_mobility の docstring 参照)
+        self.ion_mobility_model = s.ion_mobility_model
+        self.frost_c_td = float(s.frost_c_td)
 
         # ---- 電子の反応・輸送係数テーブル (fluid_coeffs.py、Phase A) ----------
         electron_processes = s.electron_processes if s.electron_processes else edupic_ar_processes()[0]
@@ -300,6 +407,9 @@ class Fluid1dSimulation:
         self.fields: dict | None = None
         self.cycle: dict | None = None
         self.sheath: dict | None = None
+        # 壁 IEDF (無衝突シース近似、prompts/116)。wall_iedf_bins=0 で無効
+        self._wall_iedf_bins = int(s.wall_iedf_bins)
+        self.wall_iedf: dict[str, dict] | None = None
         self._run_t0 = 0.0
 
     # ---- 係数評価 --------------------------------------------------------------
@@ -330,6 +440,17 @@ class Fluid1dSimulation:
         nu_m_per_ng = interp_loglog(grid, self.reactions.transport.nu_m_per_ng, te)
         return te, np.asarray(mu_e), np.asarray(k_ion), np.asarray(k_exc), np.asarray(nu_m_per_ng)
 
+    def _mu_i_at(self, e_abs):
+        """界面/境界の |E| における μ_i (frost: 修正 Frost 式、const: 低電界値のまま)。
+
+        "const" は e_abs に関わらず self.mu_i (スカラー) をそのまま返すので、
+        呼び出し側で ×1.0 する形にしておけば frost 導入前と完全にビット一致する
+        (frost_mobility 自体を経由しないため、E/N 計算の丸め誤差すら混入しない)。
+        """
+        if self.ion_mobility_model == "const":
+            return self.mu_i
+        return frost_mobility(self.mu_i, e_abs, self.n_g, self.frost_c_td)
+
     def _face_coeffs(self, phi: np.ndarray, te: np.ndarray, mu_e: np.ndarray):
         """種ごとの SG 面係数 (a, b: Γ_face = a・n_left − b・n_right) と、電子の
         z (エネルギーフラックスと共有) を計算する。全て長さ n_cells (界面の数)。
@@ -341,10 +462,23 @@ class Fluid1dSimulation:
         (ノードごとの D_e を単純平均するのではない) — こうすることで Te が
         空間一様なら mu_e_face/D_e_face が厳密に 1/Te_face になり、SG の熱平衡
         保存性がイオンと同様に電子側にも厳密に成り立つ。
+
+        イオンの z (修正 Frost、prompts/116): SG の一般形 z=v_face・dx/D_i で
+        v_face=μ_i(|E_face|)・E_face、E_face・dx=dphi (この面の電位差そのもの)。
+        D_i は低電界値のまま (frost_mobility の docstring 参照) なので
+        z_i = μ_i(|E_face|)・dphi/D_i = (dphi/T_i)・(μ_i(|E_face|)/μ_L) —
+        従来の z_i=dphi/T_i に「frost 補正/低電界値」の比を掛けるだけでよい
+        (μ_L=self.mu_i が厳密に約分されるのは const 相当の μ_i(E)=μ_L の場合のみで、
+        frost では E 依存性が残る分だけ従来の熱平衡保存性からずれる —
+        工学近似としての Frost モデル導入に伴う意図的なトレードオフ)。
+        "const" は比が恒等的に 1.0 (self.mu_i/self.mu_i) になるため、
+        z_i はビット完全に dphi/self.t_i_ev と一致する。
         """
         dphi = phi[:-1] - phi[1:]
 
-        z_i = dphi / self.t_i_ev
+        e_face = dphi / self.dx
+        mu_i_face = self._mu_i_at(e_face)
+        z_i = (dphi / self.t_i_ev) * (mu_i_face / self.mu_i)
         a_i = (self.d_i / self.dx) * _bernoulli(-z_i)
         b_i = (self.d_i / self.dx) * _bernoulli(z_i)
 
@@ -381,7 +515,9 @@ class Fluid1dSimulation:
         v_th_i = math.sqrt(8.0 * self.t_i_ev * QE / (math.pi * self.m_ion))
         v_th_e = math.sqrt(8.0 * te_boundary * QE / (math.pi * ME))
         n_out = -1.0 if side == "left" else 1.0  # 壁の外向き法線 (左=-x, 右=+x)
-        v_drift_i = self.mu_i * ex_boundary
+        # 壁向きドリフト流束の μ_i も SG 係数と同じ修正 Frost 補正を使う (prompts/116)。
+        # "const" では self._mu_i_at が self.mu_i をそのまま返すので従来と完全に一致する
+        v_drift_i = self._mu_i_at(ex_boundary) * ex_boundary
         c_i = max(n_out * v_drift_i, 0.0) + 0.25 * v_th_i
         c_e = 0.25 * v_th_e
         if self.debug_reflective_walls:
@@ -671,6 +807,90 @@ class Fluid1dSimulation:
             "t_e": self._cycle_te / cnt,
         }
 
+    # ---- 壁 IEDF (無衝突シース近似、prompts/116) --------------------------------
+
+    def wall_iedf_data(self) -> dict | None:
+        """壁 IEDF (無衝突シース近似のモデルベース再構成)。run_batch 完了後
+        (fields/cycle/sheath が確定した後) に呼ぶ想定。wall_iedf_bins=0、または
+        fields が無ければ None。RF 位相分解が無効 (phase_bins=0 または RF 無し)
+        でも DC 縮退 (単峰、1サンプル) として例外を出さずに返す。
+
+        仮定・限界 (モジュールの「壁 IEDF」節も参照): 無衝突シース (CX 衝突による
+        低エネルギーテールは表現できない)、シースエッジで静止したイオンがそこ
+        から壁まで無衝突で加速されるという単純化。
+
+        手順:
+          1. 壁ごとに時間平均シースエッジ位置 s̄ (self.sheath、Brinkmann) を得る
+             (根が求まらない退化ケースは gap/2 を代わりに使うフォールバック)。
+          2. 位相分解 φ・n_i (self.cycle) から、壁ごとの瞬時シース電圧
+             V_sh(φ_rf)=φ(シースエッジ)−φ(壁) (イオンを壁へ加速する符号で正) と
+             瞬時イオン壁流束 Γ_i(φ_rf)=c_i(φ_rf)・n_i(壁,φ_rf) を組み立てる
+             (c_i は _wall_side_coeffs と全く同じ壁 BC 式)。cycle が無効なら
+             fields (時間平均) から1点だけの V_sh・Γ_i を作る (DC 縮退)。
+          3. τ_i=3s̄√(m_i/(2e・V̄_sh)) (Lieberman & Lichtenberg の無衝突 Child
+             シース走行時間、V̄_sh は V_sh(φ_rf) の周期平均) を求め、
+             sheath_voltage_filter で V_sh(φ_rf) を周期定常までフィルタする。
+          4. E(φ_rf)=V_eff(φ_rf) [eV] (数値としては V_eff [V] と同じ — 1eV=e×1V
+             の定義そのもの) を Γ_i(φ_rf) で重み付けしてヒストグラム化する。
+        """
+        bins = self._wall_iedf_bins
+        if bins <= 0 or self.fields is None:
+            return None
+        out: dict[str, dict] = {}
+        for side, node_idx in (("left", 0), ("right", -1)):
+            s_bar = self.sheath.get(f"{side}_s") if self.sheath is not None else None
+            if s_bar is None or s_bar <= 0.0:
+                s_bar = self.gap / 2.0  # 根が求まらない退化ケースのフォールバック (バルク参照点)
+            x_edge = s_bar if side == "left" else max(self.gap - s_bar, 0.0)
+
+            if self.cycle is not None:
+                phi_c = self.cycle["phi"]
+                n_i_c = self.cycle["n_i"]
+                nb = int(self.cycle["bins"])
+                v_sh = np.empty(nb)
+                gamma_i = np.empty(nb)
+                for b in range(nb):
+                    phi_b = phi_c[b]
+                    if side == "left":
+                        ex_boundary = -(phi_b[1] - phi_b[0]) / self.dx
+                    else:
+                        ex_boundary = -(phi_b[-1] - phi_b[-2]) / self.dx
+                    phi_edge = float(np.interp(x_edge, self.xg, phi_b))
+                    v_sh[b] = phi_edge - float(phi_b[node_idx])
+                    c_i, _c_e, _v_th_e = self._wall_side_coeffs(side, ex_boundary, 1.0)
+                    gamma_i[b] = c_i * float(n_i_c[b, node_idx])
+                dt_bin = self._cycle_period / nb
+            else:
+                phi_avg = self.fields["phi"]
+                if side == "left":
+                    ex_boundary = -(phi_avg[1] - phi_avg[0]) / self.dx
+                else:
+                    ex_boundary = -(phi_avg[-1] - phi_avg[-2]) / self.dx
+                phi_edge = float(np.interp(x_edge, self.xg, phi_avg))
+                v_sh = np.array([phi_edge - float(phi_avg[node_idx])])
+                c_i, _c_e, _v_th_e = self._wall_side_coeffs(side, ex_boundary, 1.0)
+                gamma_i = np.array([c_i * float(self.fields["n_i"][node_idx])])
+                dt_bin = 0.0  # DC: 1点のみなのでフィルタ (周期性) は無意味
+
+            v_sh_bar = float(np.mean(v_sh))
+            v_sh_bar_safe = max(v_sh_bar, 1.0e-6)  # 負/ゼロは工学近似の対象外 (下限でガード)
+            tau_i = 3.0 * s_bar * math.sqrt(self.m_ion / (2.0 * QE * v_sh_bar_safe))
+            v_eff = sheath_voltage_filter(v_sh, dt_bin, tau_i)
+
+            e_ev = v_eff  # E[eV] = V_eff[V] (数値そのもの、1eV=e×1V の定義)
+            weight = gamma_i * (dt_bin if dt_bin > 0.0 else 1.0)
+            hist = _weighted_energy_histogram(e_ev, weight, bins)
+            out[side] = {
+                "e_centers": hist["e_centers"],
+                "f": hist["f"],
+                "mean_energy_ev": hist["mean_energy_ev"],
+                "total_weight": hist["total_weight"],
+                "n_samples": len(v_sh),
+                # PIC (粒子ベース) の壁 IEDF と区別するためのモデル種別 (prompts/116)
+                "model": "collisionless_sheath",
+            }
+        return out
+
     # ---- フレーム・実行 ---------------------------------------------------------
 
     def _make_frame(self) -> dict:
@@ -728,6 +948,7 @@ class Fluid1dSimulation:
             self.sheath = _fluid_sheath_pair(self.xg, self.fields["n_e"], self.fields["n_i"], self.gap)
         else:
             self.sheath = None
+        self.wall_iedf = self.wall_iedf_data()
         return self.history, frames
 
     def prepare_continue(
@@ -773,6 +994,7 @@ class Fluid1dSimulation:
         self.fields = None
         self.cycle = None
         self.sheath = None
+        self.wall_iedf = None
 
 
 def _fluid_sheath_pair(x: np.ndarray, n_e: np.ndarray, n_i: np.ndarray, gap: float) -> dict:
@@ -819,12 +1041,27 @@ def build_fluid1d_result(sim: Fluid1dSimulation, elapsed_s: float) -> dict:
             "n_i": c["n_i"].tolist(),
             "t_e": c["t_e"].tolist(),
         }
+    wall_iedf = None
+    if sim.wall_iedf is not None:
+        wall_iedf = {
+            side: {
+                "e_centers": d["e_centers"].tolist(),
+                "f": d["f"].tolist(),
+                "mean_energy_ev": d["mean_energy_ev"],
+                "total_weight": d["total_weight"],
+                "n_samples": d["n_samples"],
+                "model": d["model"],
+            }
+            for side, d in sim.wall_iedf.items()
+        }
     timing_total = sum(sim.timing.values())
     return {
         "history": sim.history,
         "profiles": profiles,
         "sheath": sheath,
         "cycle": cycle,
+        # 壁 IEDF (無衝突シース近似、モデルベース。prompts/116)。wall_iedf_bins=0 なら None
+        "wall_iedf": wall_iedf,
         "walls": sim.wall,
         "gen_total": sim.gen_total,
         "elapsed_s": elapsed_s,
