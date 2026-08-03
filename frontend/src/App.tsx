@@ -53,6 +53,8 @@ import { Fluid1dClient } from "./fluid1dClient";
 import type { Fluid1dClientCallbacks } from "./fluid1dClient";
 import { Fluid2dClient } from "./fluid2dClient";
 import type { Fluid2dClientCallbacks } from "./fluid2dClient";
+import { BoltzClient } from "./boltzClient";
+import type { BoltzClientCallbacks } from "./boltzClient";
 import { TlClient } from "./tlClient";
 import type { TlClientCallbacks } from "./tlClient";
 import { DsmcClient } from "./dsmcClient";
@@ -66,6 +68,9 @@ import { LENGTH_UNIT_LABEL } from "./units";
 import type { LengthUnit } from "./units";
 import type {
   BField,
+  BoltzOpts,
+  BoltzProgressMsg,
+  BoltzStartedMsg,
   BoundaryCondition,
   CircleShape,
   DsmcBoundary,
@@ -675,6 +680,19 @@ export default function App() {
   // 間だけにする (2D PIC の cycleViewActive と同じ不具合修正の考え方)
   const [fluid2dCycleViewActive, setFluid2dCycleViewActive] = useState(false);
 
+  // boltzpm (Boltzmann ソルバー) による LMEA 係数生成 (prompts/117-118)。backend の /ws/boltz は
+  // fluid1d/fluid2d 横断でロックが単一 (server.py _boltz_lock) なため、フロントも単一の実行状態
+  // で足りる。どちらのモジュール向けの生成かは boltzModule で区別し、done 受信時にそのモジュールの
+  // settings (fluid1d/fluid2d の boltz_table) へ commit する (BoltzSection.tsx へは module ごとに
+  // フィルタした started/progress/error を渡し、無関係なパネルに他方の進捗が表示されないようにする)
+  const [boltzModule, setBoltzModule] = useState<"fluid1d" | "fluid2d" | null>(null);
+  const [boltzRunning, setBoltzRunning] = useState(false);
+  const [boltzStarted, setBoltzStarted] = useState<BoltzStartedMsg | null>(null);
+  const [boltzProgress, setBoltzProgress] = useState<BoltzProgressMsg | null>(null);
+  const [boltzError, setBoltzError] = useState<string | null>(null);
+  const boltzClientRef = useRef<BoltzClient | null>(null);
+  const boltzStartTimeRef = useRef<number | null>(null);
+
   // VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。pic1d と同様 geometry/mesh とは
   // 無関係な独立 state (Undo/Redo 対象外)。continue が無いため pic1d の *ContinueReady に
   // 相当する state は不要 (毎回フルの定常化をやり直すだけ、tl.py の docstring 参照)
@@ -731,7 +749,15 @@ export default function App() {
   // 1秒間隔で再レンダーする (アイドル時に setInterval を張り続けて無駄な再レンダーを
   // 起こさないようにするため、実行中フラグが1つでも立っているときだけ張る)
   const anyRunning =
-    busy || picRunning || pic1dRunning || fluid1dRunning || fluid2dRunning || tlRunning || gasRunning || sweepRunning;
+    busy ||
+    picRunning ||
+    pic1dRunning ||
+    fluid1dRunning ||
+    fluid2dRunning ||
+    boltzRunning ||
+    tlRunning ||
+    gasRunning ||
+    sweepRunning;
   useEffect(() => {
     if (!anyRunning) return;
     const id = setInterval(() => setElapsedTick((t) => t + 1), 1000);
@@ -768,6 +794,7 @@ export default function App() {
       pic1dClientRef.current?.close();
       fluid1dClientRef.current?.close();
       fluid2dClientRef.current?.close();
+      boltzClientRef.current?.close();
       tlClientRef.current?.close();
       dsmcClientRef.current?.close();
       sweepClientRef.current?.close();
@@ -1462,6 +1489,58 @@ export default function App() {
 
   const runFluid2dStop = () => {
     fluid2dClientRef.current?.stop();
+  };
+
+  // boltzpm 係数生成 (prompts/117-118) 実行中のコールバック生成。tl と同じく continue が無い
+  // (1回性の生成) ため ContinueReady 系の更新は無い。done では table を該当モジュールの
+  // settings.boltz_table へ commit する (electron_model は変更しない — 生成しただけでは
+  // ソルバーの挙動を勝手に切り替えないほうが安全なため、ユーザーが select で明示的に
+  // "Boltzmann" を選ぶまでは "maxwell" のまま、BoltzSection の select 操作は onElectronModelChange
+  // 経由でこの module の onChange({ ..., electron_model: v }) を呼ぶだけ)
+  const makeBoltzCallbacks = (module: "fluid1d" | "fluid2d"): BoltzClientCallbacks => ({
+    onStarted: (msg) => {
+      setBoltzStarted(msg);
+      setBoltzProgress(null);
+    },
+    onProgress: (msg) => {
+      setBoltzProgress(msg);
+    },
+    onDone: (msg) => {
+      setBoltzRunning(false);
+      if (module === "fluid1d") {
+        setFluid1d((prev) => ({ ...prev, boltz_table: msg.table }));
+      } else {
+        setFluid2d((prev) => ({ ...prev, boltz_table: msg.table }));
+      }
+    },
+    onError: (detail) => {
+      setBoltzError(detail);
+      setBoltzRunning(false);
+    },
+    onClose: () => setBoltzRunning(false),
+  });
+
+  // boltzpm 係数生成開始: module ("fluid1d"/"fluid2d") に応じて、その時点の fluid1d/fluid2d
+  // 設定込みの project を送る (server.py の project+module 経路が electron_processes/
+  // ion_mass_amu/gas_pressure_pa/gas_temperature_k を取り出す、boltzClient.ts 参照)
+  const runBoltzStart = (module: "fluid1d" | "fluid2d", opts: BoltzOpts) => {
+    boltzStartTimeRef.current = Date.now(); // ステータスバーの経過時間表示用
+    setBoltzError(null);
+    setBoltzStarted(null);
+    setBoltzProgress(null);
+    setBoltzModule(module);
+    setBoltzRunning(true);
+    const client = new BoltzClient(makeBoltzCallbacks(module));
+    boltzClientRef.current = client;
+    if (module === "fluid1d") {
+      client.start({ ...project, fluid1d }, module, opts);
+    } else {
+      client.start({ ...project, fluid2d }, module, opts);
+    }
+  };
+
+  const runBoltzStop = () => {
+    boltzClientRef.current?.stop();
   };
 
   // VHF 定在波 (prompts/101) 実行中のコールバック生成。continue が無いため
@@ -2671,10 +2750,10 @@ export default function App() {
         : NODE_TITLES[activeNode];
 
   // --- 下部ステータスバー ---
-  // エラーは error → picError → pic1dError → fluid1dError → fluid2dError → tlError → gasError →
-  // sweepError の順で最初の非null を優先表示する
+  // エラーは error → picError → pic1dError → fluid1dError → fluid2dError → boltzError → tlError →
+  // gasError → sweepError の順で最初の非null を優先表示する
   const statusError =
-    error ?? picError ?? pic1dError ?? fluid1dError ?? fluid2dError ?? tlError ?? gasError ?? sweepError;
+    error ?? picError ?? pic1dError ?? fluid1dError ?? fluid2dError ?? boltzError ?? tlError ?? gasError ?? sweepError;
   // ステータスバーのエラーを閉じる (各エラー state を一括クリア)。パネル内の
   // エラー表示は各パネルの error prop 経由で残したいが、実体は同じ state なので
   // ここでは「ステータスバーに居座る」問題の解消を優先して両方消える仕様とする
@@ -2684,10 +2763,27 @@ export default function App() {
     setPic1dError(null);
     setFluid1dError(null);
     setFluid2dError(null);
+    setBoltzError(null);
     setTlError(null);
     setGasError(null);
     setSweepError(null);
   };
+  // boltzpm 生成の開始可否 (BoltzSection.canStart、prompts/118): health OK かつ「他の何か
+  // (他ソルバー・他モジュールの boltz 生成含む) が実行中でない、またはそれが自分自身の
+  // 実行中の生成であること」。anyRunning は boltzRunning も含むため、自分自身の実行中は
+  // 単純な !anyRunning では false になってしまう分を明示的に許可し直す
+  const fluid1dBoltzCanStart = !!health && (!anyRunning || (boltzRunning && boltzModule === "fluid1d"));
+  const fluid2dBoltzCanStart = !!health && (!anyRunning || (boltzRunning && boltzModule === "fluid2d"));
+  const fluid1dBoltzRunning = boltzRunning && boltzModule === "fluid1d";
+  const fluid2dBoltzRunning = boltzRunning && boltzModule === "fluid2d";
+  // 無関係なモジュールに他方の進捗・エラーが表示されないよう、started/progress/error は
+  // 対象モジュールのものだけを通す (BoltzSection には常にこの絞り込み済みの値を渡す)
+  const fluid1dBoltzStarted = boltzModule === "fluid1d" ? boltzStarted : null;
+  const fluid1dBoltzProgress = boltzModule === "fluid1d" ? boltzProgress : null;
+  const fluid1dBoltzError = boltzModule === "fluid1d" ? boltzError : null;
+  const fluid2dBoltzStarted = boltzModule === "fluid2d" ? boltzStarted : null;
+  const fluid2dBoltzProgress = boltzModule === "fluid2d" ? boltzProgress : null;
+  const fluid2dBoltzError = boltzModule === "fluid2d" ? boltzError : null;
   // スイープの完了ケース数 (進捗表示用。PIC/DSMC 単発実行と同列の優先度で表示する)
   const sweepCompletedCount = sweepCases.filter((c) => c.status === "done" || c.status === "error").length;
   // 続きから実行では frame.step が通算で進むため、区間開始オフセットを引いて計算する
@@ -2718,6 +2814,11 @@ export default function App() {
   const gasPct = gasProgress && gasProgress.nSteps > 0 ? Math.round((gasProgress.step / gasProgress.nSteps) * 100) : 0;
   // VHF 定在波 (prompts/101) は continue が無いため step は常に区間内の値そのもの (オフセット不要)
   const tlPct = tlProgress && tlProgress.nSteps > 0 ? Math.round((tlProgress.step / tlProgress.nSteps) * 100) : 0;
+  // boltzpm 係数生成 (prompts/117-118) も continue が無いため点数は区間内の値そのもの
+  const boltzPct =
+    boltzStarted && boltzStarted.n_points > 0
+      ? Math.round(((boltzProgress?.i ?? 0) / boltzStarted.n_points) * 100)
+      : 0;
 
   // 実行経過時間 (ステータスバー、prompts/86)。Date.now() を毎レンダーで直接読むことで
   // elapsedTick (1秒ごとに更新される tick state) が変わるたびに再計算される。実行中でない
@@ -2728,6 +2829,8 @@ export default function App() {
   const fluid1dElapsedSec = fluid1dRunning && fluid1dStartTimeRef.current != null ? (Date.now() - fluid1dStartTimeRef.current) / 1000 : 0;
   const fluid2dElapsedSec = fluid2dRunning && fluid2dStartTimeRef.current != null ? (Date.now() - fluid2dStartTimeRef.current) / 1000 : 0;
   const tlElapsedSec = tlRunning && tlStartTimeRef.current != null ? (Date.now() - tlStartTimeRef.current) / 1000 : 0;
+  const boltzElapsedSec =
+    boltzRunning && boltzStartTimeRef.current != null ? (Date.now() - boltzStartTimeRef.current) / 1000 : 0;
   const gasElapsedSec = gasRunning && gasStartTimeRef.current != null ? (Date.now() - gasStartTimeRef.current) / 1000 : 0;
   const sweepElapsedSec = sweepRunning && sweepStartTimeRef.current != null ? (Date.now() - sweepStartTimeRef.current) / 1000 : 0;
 
@@ -3141,6 +3244,14 @@ export default function App() {
                 frame={fluid1dFrame}
                 error={fluid1dError}
                 pic1d={pic1d}
+                boltzCanStart={fluid1dBoltzCanStart}
+                boltzRunning={fluid1dBoltzRunning}
+                boltzAnyRunning={boltzRunning}
+                onBoltzStart={(opts) => runBoltzStart("fluid1d", opts)}
+                onBoltzStop={runBoltzStop}
+                boltzStarted={fluid1dBoltzStarted}
+                boltzProgress={fluid1dBoltzProgress}
+                boltzError={fluid1dBoltzError}
               />
             </div>
 
@@ -3190,6 +3301,14 @@ export default function App() {
                 cycleFps={fluid2dCycleFps}
                 onCycleFpsChange={setFluid2dCycleFps}
                 mode="setup"
+                boltzCanStart={fluid2dBoltzCanStart}
+                boltzRunning={fluid2dBoltzRunning}
+                boltzAnyRunning={boltzRunning}
+                onBoltzStart={(opts) => runBoltzStart("fluid2d", opts)}
+                onBoltzStop={runBoltzStop}
+                boltzStarted={fluid2dBoltzStarted}
+                boltzProgress={fluid2dBoltzProgress}
+                boltzError={fluid2dBoltzError}
               />
             </div>
             <div style={{ display: showFluid2dResultsPage ? "block" : "none" }}>
@@ -3234,6 +3353,14 @@ export default function App() {
                 cycleFps={fluid2dCycleFps}
                 onCycleFpsChange={setFluid2dCycleFps}
                 mode="results"
+                boltzCanStart={fluid2dBoltzCanStart}
+                boltzRunning={fluid2dBoltzRunning}
+                boltzAnyRunning={boltzRunning}
+                onBoltzStart={(opts) => runBoltzStart("fluid2d", opts)}
+                onBoltzStop={runBoltzStop}
+                boltzStarted={fluid2dBoltzStarted}
+                boltzProgress={fluid2dBoltzProgress}
+                boltzError={fluid2dBoltzError}
               />
             </div>
 
@@ -3663,7 +3790,8 @@ export default function App() {
         </div>
       </div>
 
-      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > PIC-MCC 1D実行中 > 流体1D実行中 > 流体2D実行中 > VHF定在波実行中 > DSMC実行中 > 準備完了 の優先順位 */}
+      {/* 下部ステータスバー: エラー > 静電場/トレース計算中 > PIC実行中 > PIC-MCC 1D実行中 > 流体1D実行中 >
+          流体2D実行中 > boltzpm係数生成中 > VHF定在波実行中 > DSMC実行中 > 準備完了 の優先順位 */}
       <div className="statusbar">
         {/* 実行中は進捗を最優先 (エラーが残っていても別計算の進捗を隠さない)。
             アイドル時のエラーは×で閉じられる (居座り防止。新規実行開始でも自動クリア) */}
@@ -3715,6 +3843,15 @@ export default function App() {
             </span>
             <div className="statusbar-progress">
               <div className="statusbar-progress-bar" style={{ width: `${fluid2dPct}%` }} />
+            </div>
+          </>
+        ) : boltzRunning ? (
+          <>
+            <span>
+              boltzpm係数生成中... {boltzPct}% ({boltzProgress?.i ?? 0}/{boltzStarted?.n_points ?? 0}) — 経過 {formatElapsed(boltzElapsedSec)}
+            </span>
+            <div className="statusbar-progress">
+              <div className="statusbar-progress-bar" style={{ width: `${boltzPct}%` }} />
             </div>
           </>
         ) : tlRunning ? (

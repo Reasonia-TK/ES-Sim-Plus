@@ -124,6 +124,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 from . import _numba_kernels
+from .boltz import BoltzCoeffs, boltz_coeffs_at, boltz_coeffs_from_table
 from .fem import EPS0, _radial_index, assemble, assemble_transport_operator
 from .fluid1d import FLOOR_N, FLOOR_W, _bernoulli, frost_mobility
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
@@ -323,6 +324,12 @@ class Fluid2dSimulation:
         self._mass_ratio = float(np.mean([p.mass_ratio for p in elastic_procs])) if elastic_procs else 0.0
         self._te_warned = False
 
+        # ---- 電子係数のソース切り替え (fluid1d.py と同じ規約、prompts/117) -----------
+        self.electron_model = s.electron_model
+        self._boltz: BoltzCoeffs | None = (
+            boltz_coeffs_from_table(s.boltz_table) if s.electron_model == "boltzmann" else None
+        )
+
         # ---- 状態変数 (全節点長。非輸送節点は常に 0 のまま — モジュール docstring) ----
         self.n_e = np.zeros(self.n_nodes)
         self.n_i = np.zeros(self.n_nodes)
@@ -348,7 +355,7 @@ class Fluid2dSimulation:
 
         # ---- 安定性の目安警告 (陽的経路のみ) --------------------------------------
         if self.explicit:
-            te0, mu_e0, _k_ion0, _k_exc0, _nu0 = self._te_and_coeffs(
+            te0, mu_e0, *_ = self._te_and_coeffs(
                 self.n_e[self.active_idx], self.w[self.active_idx]
             )
             d_e0 = float(np.max(mu_e0 * te0))
@@ -530,9 +537,28 @@ class Fluid2dSimulation:
     # ---- 係数評価 --------------------------------------------------------------
 
     def _te_and_coeffs(self, n_e: np.ndarray, w: np.ndarray):
-        """アクティブ節点の Te・電子移動度・反応レート係数 (fluid1d._te_and_coeffs と同じ)。"""
+        """アクティブ節点の Te・電子移動度・反応レート係数 (fluid1d._te_and_coeffs と同じ)。
+
+        electron_model の "maxwell"/"boltzmann" 切り替えも fluid1d.py と全く同じ
+        (戻り値は7要素: te, mu_e, k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev)。
+        """
         n_e_safe = np.maximum(n_e, FLOOR_N)
         te = np.maximum((2.0 / 3.0) * w / n_e_safe, 1.0e-6)
+
+        if self.electron_model == "boltzmann":
+            mobility_n, k_ion, k_exc, e_ion_ev, e_exc_ev, nu_m_per_ng, _eps_bar, out_of_range = (
+                boltz_coeffs_at(self._boltz, te)
+            )
+            if not self._te_warned and out_of_range:
+                lo, hi = self._boltz.eps_grid_ev[0], self._boltz.eps_grid_ev[-1]
+                warnings.warn(
+                    f"fluid2d: ε̄=(3/2)Te が boltzpm テーブル範囲 [{lo:.3g}, {hi:.3g}] eV の"
+                    "外に出ました (テーブル引きはクランプして継続します)"
+                )
+                self._te_warned = True
+            mu_e = mobility_n / self.n_g
+            return te, np.asarray(mu_e), k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev
+
         grid = self.reactions.te_grid_ev
         lo, hi = grid[0], grid[-1]
         if not self._te_warned and (float(te.min()) < lo or float(te.max()) > hi):
@@ -545,15 +571,18 @@ class Fluid2dSimulation:
         k_ion = interp_loglog(grid, self.reactions.k_ion, te)
         k_exc = interp_loglog(grid, self.reactions.k_exc, te)
         nu_m_per_ng = interp_loglog(grid, self.reactions.transport.nu_m_per_ng, te)
-        return te, np.asarray(mu_e), np.asarray(k_ion), np.asarray(k_exc), np.asarray(nu_m_per_ng)
+        return (
+            te, np.asarray(mu_e), np.asarray(k_ion), np.asarray(k_exc), np.asarray(nu_m_per_ng),
+            self.reactions.e_ion_ev, self.reactions.e_exc_ev,
+        )
 
-    def _reaction_terms(self, n_e, te, k_ion, k_exc, nu_m_per_ng):
+    def _reaction_terms(self, n_e, te, k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev):
         """反応源項 (fluid1d._reaction_terms と同じ)。"""
         tg_ev = self.s.gas_temperature_k * KB / QE
         if self.debug_source_enabled:
             s_ion = k_ion * self.n_g * n_e
-            loss_ion = self.reactions.e_ion_ev * s_ion
-            loss_exc = self.reactions.e_exc_ev * k_exc * self.n_g * n_e
+            loss_ion = e_ion_ev * s_ion
+            loss_exc = e_exc_ev * k_exc * self.n_g * n_e
         else:
             s_ion = np.zeros_like(n_e)
             loss_ion = np.zeros_like(n_e)
@@ -745,7 +774,7 @@ class Fluid2dSimulation:
         n_e_a = self.n_e[self.active_idx]
         n_i_a = self.n_i[self.active_idx]
         w_a = self.w[self.active_idx]
-        te, mu_e, k_ion, k_exc, nu_m_per_ng = self._te_and_coeffs(n_e_a, w_a)
+        te, mu_e, k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev = self._te_and_coeffs(n_e_a, w_a)
 
         phi_a = phi[self.active_idx]
         dphi = phi_a[self.i_idx] - phi_a[self.j_idx]
@@ -760,6 +789,9 @@ class Fluid2dSimulation:
         a_i = self.w_ij * self.d_i * _bernoulli(-z_i)
         b_i = self.w_ij * self.d_i * _bernoulli(z_i)
 
+        # d_e_face = mu_e_face・te_face は electron_model="boltzmann" でも変更不要
+        # (fluid1d._face_coeffs の同じ行のコメント参照: w=(3/2)n_e・Te という定義から
+        # (2/3)ε̄=Te が厳密に成り立つため、一般化 Einstein D_e=μ・(2/3)ε̄ と自動的に一致する)
         mu_e_face = 0.5 * (mu_e[self.i_idx] + mu_e[self.j_idx])
         te_face = 0.5 * (te[self.i_idx] + te[self.j_idx])
         d_e_face = mu_e_face * te_face
@@ -767,7 +799,7 @@ class Fluid2dSimulation:
         a_e = self.w_ij * d_e_face * _bernoulli(-z_e)
         b_e = self.w_ij * d_e_face * _bernoulli(z_e)
 
-        s_ion, loss_total = self._reaction_terms(n_e_a, te, k_ion, k_exc, nu_m_per_ng)
+        s_ion, loss_total = self._reaction_terms(n_e_a, te, k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev)
         t1 = time.perf_counter()
         self.timing["poisson"] += t1 - t0
 
@@ -980,7 +1012,7 @@ class Fluid2dSimulation:
         n_e_a = self.n_e[self.active_idx]
         n_i_a = self.n_i[self.active_idx]
         w_a = self.w[self.active_idx]
-        te, _mu_e, k_ion, _k_exc, _nu = self._te_and_coeffs(n_e_a, w_a)
+        te, _mu_e, k_ion, *_ = self._te_and_coeffs(n_e_a, w_a)
         s_ion = (k_ion * self.n_g * n_e_a) if self.debug_source_enabled else np.zeros(self.n_active)
         self._accum_phi += self.phi
         self._accum_e[:, 0] += ex

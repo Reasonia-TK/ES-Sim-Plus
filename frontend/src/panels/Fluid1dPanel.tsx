@@ -5,8 +5,12 @@ import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
 import { ElectrodeEditor } from "./Pic1dPanel";
 import { ProcessList } from "./PicPanel";
+import BoltzSection from "./BoltzSection";
 import { rfComponents } from "../types";
 import type {
+  BoltzOpts,
+  BoltzProgressMsg,
+  BoltzStartedMsg,
   Fluid1dFrameMsg,
   Fluid1dSettings,
   Fluid1dStartedMsg,
@@ -42,6 +46,17 @@ interface Props {
   // (pic1d は project 非依存の独立 state のため常に非 null だが、将来の呼び出し元での
   // 未設定ケースにも安全に対応できるよう null 許容にしてボタンを disabled にする)
   pic1d: Pic1dSettings | null;
+
+  // boltzpm 係数生成 (prompts/117-118): 実行状態は App.tsx が一元管理する (backend の
+  // /ws/boltz ロックがモジュール横断で単一のため)。BoltzSection へそのまま中継する
+  boltzCanStart: boolean;
+  boltzRunning: boolean; // このモジュール (fluid1d) 向けの生成が進行中か
+  boltzAnyRunning: boolean; // 他モジュール分も含め、何らかの boltzpm 生成が進行中か
+  onBoltzStart: (opts: BoltzOpts) => void;
+  onBoltzStop: () => void;
+  boltzStarted: BoltzStartedMsg | null;
+  boltzProgress: BoltzProgressMsg | null;
+  boltzError: string | null;
 }
 
 // 電極の既定値 (Pic1dPanel.DEFAULT_ELECTRODE と同じ形。fluid1d は fn を持たせない
@@ -109,6 +124,14 @@ export default function Fluid1dPanel({
   frame,
   error,
   pic1d,
+  boltzCanStart,
+  boltzRunning,
+  boltzAnyRunning,
+  onBoltzStart,
+  onBoltzStop,
+  boltzStarted,
+  boltzProgress,
+  boltzError,
 }: Props) {
   const unitLabel = LENGTH_UNIT_LABEL[lengthUnit];
 
@@ -320,6 +343,23 @@ export default function Fluid1dPanel({
         </button>
       </div>
 
+      {/* boltzpm による LMEA 係数生成 (prompts/117-118)。1D/2D で共通の部品 (BoltzSection) を使う */}
+      <BoltzSection
+        title="流体 (1D)"
+        electronProcesses={fluid1d.electron_processes ?? []}
+        electronModel={fluid1d.electron_model ?? "maxwell"}
+        boltzTable={fluid1d.boltz_table ?? null}
+        onElectronModelChange={(v) => onChange({ ...fluid1d, electron_model: v })}
+        onDeleteTable={() => onChange({ ...fluid1d, boltz_table: null, electron_model: "maxwell" })}
+        canStart={boltzCanStart}
+        running={boltzRunning}
+        onStart={onBoltzStart}
+        onStop={onBoltzStop}
+        started={boltzStarted}
+        progress={boltzProgress}
+        error={boltzError}
+      />
+
       <h2>流体 (1D): 実行設定</h2>
       <div className="field">
         <span className="label">dt [s] (空欄=自動)</span>
@@ -403,8 +443,24 @@ export default function Fluid1dPanel({
       })()}
 
       <h2>流体 (1D): 実行</h2>
+      {/* electron_model="boltzmann" なのに boltz_table が未生成だと backend の validator が
+          拒否するため、事前にフロント側で検知して開始ボタンを無効化する (prompts/118) */}
+      {(fluid1d.electron_model ?? "maxwell") === "boltzmann" && !fluid1d.boltz_table && (
+        <p className="hint" style={{ color: "#e0b050" }}>
+          電子係数モデルが Boltzmann (boltzpm) ですが、係数テーブルが未生成のため実行できません
+          (上の「電子係数 (boltzpm)」セクションで生成してください)。
+        </p>
+      )}
       <div className="actions">
-        <button onClick={onStart} disabled={!canRun || running}>
+        <button
+          onClick={onStart}
+          disabled={
+            !canRun ||
+            running ||
+            boltzAnyRunning ||
+            ((fluid1d.electron_model ?? "maxwell") === "boltzmann" && !fluid1d.boltz_table)
+          }
+        >
           {running ? "実行中..." : "流体 1D 開始"}
         </button>
         <button className="secondary" onClick={onStop} disabled={!running}>

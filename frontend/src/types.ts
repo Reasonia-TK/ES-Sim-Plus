@@ -476,6 +476,73 @@ export type Pic1dClientCommand =
       phase_bins?: number | null;
     };
 
+// ---- boltzpm (Boltzmann ソルバー) 連携 — LMEA 流体係数テーブル (backend/es_sim/schema.py
+// BoltzTable・boltz.py・server.py /ws/boltz と手動同期、prompts/117-118) ---------------------
+// E/N を掃引した各点の定常 EEDF から ε̄=⟨ε⟩・μ_e・N・レート係数を求め、ε̄ をキーにテーブル化
+// したもの (BOLSIG+ 流の局所平均エネルギー近似、LMEA)。Fluid1dSettings/Fluid2dSettings の
+// electron_model="boltzmann" のときに使う。各リストは ε̄ (mean_energy_ev) 昇順に整列済み。
+
+export interface BoltzTable {
+  en_td: number[];
+  mean_energy_ev: number[];
+  mobility_n: number[];   // μ_e・N [1/(m・V・s)]
+  k_ion: number[];
+  k_exc: number[];
+  e_ion_ev: number[];
+  e_exc_ev: number[];
+  eedf_eps_ev: number[];
+  eedf: number[][];       // eedf[i] が eedf_eps_ev グリッド上の EEDF (∫eedf[i]dε≈1、boltz.py 参照)
+  source_hash: string;    // sha256(JSON(processes)) — 断面積変更後の再生成判定用 (boltzHash.ts 参照)
+  opts: Record<string, unknown>; // 生成に使った opts 一式 (boltzpm_version 込み、backend meta_opts)
+  warnings: string[];
+}
+
+// run_boltz_sweep の掃引パラメータ (backend/es_sim/boltz.py DEFAULT_BOLTZ_OPTS と同じキー・既定値。
+// 既定値自体は panels/BoltzSection.tsx の DEFAULT_BOLTZ_OPTS に持たせる)。project には含めず、
+// 生成 UI のローカル状態としてのみ扱う (掃引の都度指定する使い捨てパラメータのため)
+export interface BoltzOpts {
+  en_min_td: number;
+  en_max_td: number;
+  n_points: number;
+  eps_max_ev: number | null; // null = 自動 (電離/励起の最大閾値×8 と 40eV の大きい方)
+  d_eps_ev: number;
+  n_theta: number;
+}
+
+// server → client (/ws/boltz)
+export interface BoltzStartedMsg {
+  type: "started";
+  n_points: number;
+}
+
+export interface BoltzProgressMsg {
+  type: "progress";
+  i: number;
+  n_points: number;
+  en_td: number;
+  elapsed_s: number;
+}
+
+export interface BoltzDoneMsg {
+  type: "done";
+  table: BoltzTable;
+}
+
+export interface BoltzErrorMsg {
+  type: "error";
+  detail: string;
+}
+
+export type BoltzServerMessage = BoltzStartedMsg | BoltzProgressMsg | BoltzDoneMsg | BoltzErrorMsg;
+
+// client → server コマンド (/ws/boltz)。project+module で既存設定 (electron_processes/
+// ion_mass_amu/gas_pressure_pa/gas_temperature_k) から掃引条件を取り出させる (server.py
+// _run_boltz_session 参照。processes を直接渡す経路もバックエンドにはあるが、フロントは常に
+// project 一式を持っているためこちらだけを使う)。continue は無い (1回性の生成のため)
+export type BoltzClientCommand =
+  | { cmd: "start"; project: Project; module: "fluid1d" | "fluid2d"; opts?: BoltzOpts }
+  | { cmd: "stop" };
+
 // ---- 1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、backend/es_sim/schema.py Fluid1dSettings /
 // fluid1d.py build_fluid1d_result と手動同期、prompts/104-108) --------------------------------
 // pic1d (Pic1dSettings) と同一条件・同一プリセットで直接比較できることが設計目標のため、格子規約
@@ -514,6 +581,13 @@ export interface Fluid1dSettings {
   // 壁 IEDF (prompts/116) のビン数。0=無効。無衝突シース近似のモデルベース再構成
   // (位相分解シース電圧 + イオン走行時間フィルタ。fluid1d.py 参照)
   wall_iedf_bins?: number;
+  // 電子輸送・反応係数のソース (prompts/117-118): "maxwell" (既定) は従来の Maxwell 平均経路
+  // (fluid_coeffs.py、ビット不変)。"boltzmann" は boltz_table (boltzpm による LMEA テーブル、
+  // 事前に /ws/boltz で生成してフロントが埋め込む) を ε̄=(3/2)Te で参照する。boltz_table が
+  // null のまま "boltzmann" を送ると backend の validator が拒否するため、パネル側で
+  // 実行前にチェックする (BoltzSection.tsx 参照)
+  electron_model?: "maxwell" | "boltzmann";
+  boltz_table?: BoltzTable | null;
 }
 
 // server → client (/ws/fluid1d)
@@ -670,6 +744,9 @@ export interface Fluid2dSettings {
   // 陰的反復ソルバー (matvec) の並列スレッド数。0=自動選択 (PicSettings.threads と同じ
   // 規約: pic.py の _auto_thread_cap 式)。linear_solver="direct" のときは無効
   threads?: number;
+  // 電子輸送・反応係数のソース (fluid1d.py と同じ規約・既定値、prompts/117-118)
+  electron_model?: "maxwell" | "boltzmann";
+  boltz_table?: BoltzTable | null;
 }
 
 // server → client (/ws/fluid2d)。2D PIC (/ws/pic) の started と異なりメッシュを含まない —

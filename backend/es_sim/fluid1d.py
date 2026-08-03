@@ -113,6 +113,7 @@ import warnings
 import numpy as np
 from scipy.linalg import solve_banded
 
+from .boltz import BoltzCoeffs, boltz_coeffs_at, boltz_coeffs_from_table
 from .fem import EPS0
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
 from .mcc import KB
@@ -329,6 +330,16 @@ class Fluid1dSimulation:
         self._mass_ratio = float(np.mean([p.mass_ratio for p in elastic_procs])) if elastic_procs else 0.0
         self._te_warned = False  # テーブル範囲外の Te 警告は実行を通して1回だけ
 
+        # ---- 電子係数のソース切り替え (prompts/117、LMEA) ---------------------------
+        # "maxwell" (既定) は上の self.reactions (fluid_coeffs.py) をそのまま使う経路で、
+        # 以下は一切参照されない → 既存の挙動とビット不変。"boltzmann" は boltz_table
+        # (boltzpm の E/N 掃引テーブル、schema の validator で None でないことが保証済み)
+        # を ε̄=(3/2)Te で引く (_te_and_coeffs 参照)
+        self.electron_model = s.electron_model
+        self._boltz: BoltzCoeffs | None = (
+            boltz_coeffs_from_table(s.boltz_table) if s.electron_model == "boltzmann" else None
+        )
+
         # ---- 状態変数 (節点、一様初期化) --------------------------------------
         self.n_e = np.full(self.n_nodes, float(s.init_density_m3))
         self.n_i = np.full(self.n_nodes, float(s.init_density_m3))
@@ -358,7 +369,7 @@ class Fluid1dSimulation:
         #      無条件安定なので警告不要) -------------------------------------------
         self.warnings: list[str] = []
         if self.explicit:
-            te0, mu_e0, _k_ion0, _k_exc0, _nu0 = self._te_and_coeffs(self.n_e, self.w)
+            te0, mu_e0, *_ = self._te_and_coeffs(self.n_e, self.w)
             d_e0 = float(np.max(mu_e0 * te0))
             dt_diff = 0.5 * self.dx**2 / max(d_e0, self.d_i, 1.0e-300)
             tau_d0 = EPS0 / (QE * max(float(np.max(self.n_e * mu_e0)), 1.0e-300))
@@ -417,15 +428,33 @@ class Fluid1dSimulation:
     def _te_and_coeffs(self, n_e: np.ndarray, w: np.ndarray):
         """節点ごとの Te・電子移動度・反応レート係数をまとめて求める。
 
-        Te = (2/3) w/n_e (n_e はフロア FLOOR_N でゼロ除算回避)。テーブル引き
-        (interp_loglog) は Te をテーブル範囲へ内部でクランプするが、Te 自体
-        (v_th 等の物理式に使う生値) はクランプしない。テーブル範囲を外れた
-        場合は実行を通して1回だけ警告する (prompts/104 の既定方針)。
-        戻り値: (te, mu_e, k_ion, k_exc, nu_m_per_ng) — nu_m_per_ng は弾性の
-        ⟨σ_m v⟩ (n_g を掛けていない生のレート係数、呼び出し側で n_g を掛ける)。
+        Te = (2/3) w/n_e (n_e はフロア FLOOR_N でゼロ除算回避)。electron_model
+        で "maxwell"（既定、fluid_coeffs.py の Te テーブル）と "boltzmann"
+        (boltz.py の ε̄=(3/2)Te テーブル、prompts/117) を切り替える。"maxwell" 側は
+        prompts/117 追加前と全く同じコード経路 (ビット不変)。
+        戻り値: (te, mu_e, k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev) —
+        nu_m_per_ng は弾性の ⟨σ_m v⟩ 相当 (n_g を掛けていない値、呼び出し側で
+        n_g を掛ける)。e_ion_ev/e_exc_ev は "maxwell" ではスカラー
+        (self.reactions と同じ値)、"boltzmann" では点ごとに変わる配列 (ε̄ ごとに
+        レート係数加重平均が変わるため、boltz.run_boltz_sweep 参照)。
         """
         n_e_safe = np.maximum(n_e, FLOOR_N)
         te = np.maximum((2.0 / 3.0) * w / n_e_safe, 1.0e-6)
+
+        if self.electron_model == "boltzmann":
+            mobility_n, k_ion, k_exc, e_ion_ev, e_exc_ev, nu_m_per_ng, _eps_bar, out_of_range = (
+                boltz_coeffs_at(self._boltz, te)
+            )
+            if not self._te_warned and out_of_range:
+                lo, hi = self._boltz.eps_grid_ev[0], self._boltz.eps_grid_ev[-1]
+                warnings.warn(
+                    f"fluid1d: ε̄=(3/2)Te が boltzpm テーブル範囲 [{lo:.3g}, {hi:.3g}] eV の"
+                    "外に出ました (テーブル引きはクランプして継続します)"
+                )
+                self._te_warned = True
+            mu_e = mobility_n / self.n_g
+            return te, np.asarray(mu_e), k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev
+
         grid = self.reactions.te_grid_ev
         lo, hi = grid[0], grid[-1]
         if not self._te_warned and (float(te.min()) < lo or float(te.max()) > hi):
@@ -438,7 +467,10 @@ class Fluid1dSimulation:
         k_ion = interp_loglog(grid, self.reactions.k_ion, te)
         k_exc = interp_loglog(grid, self.reactions.k_exc, te)
         nu_m_per_ng = interp_loglog(grid, self.reactions.transport.nu_m_per_ng, te)
-        return te, np.asarray(mu_e), np.asarray(k_ion), np.asarray(k_exc), np.asarray(nu_m_per_ng)
+        return (
+            te, np.asarray(mu_e), np.asarray(k_ion), np.asarray(k_exc), np.asarray(nu_m_per_ng),
+            self.reactions.e_ion_ev, self.reactions.e_exc_ev,
+        )
 
     def _mu_i_at(self, e_abs):
         """界面/境界の |E| における μ_i (frost: 修正 Frost 式、const: 低電界値のまま)。
@@ -482,6 +514,12 @@ class Fluid1dSimulation:
         a_i = (self.d_i / self.dx) * _bernoulli(-z_i)
         b_i = (self.d_i / self.dx) * _bernoulli(z_i)
 
+        # d_e_face = mu_e_face・te_face は "maxwell"・"boltzmann" どちらの electron_model
+        # でも共通のこの1行だけで済む。理由 (prompts/117): 状態変数の定義そのものが
+        # w=(3/2)n_e・Te (te_face もこの Te から作る) なので、boltzpm 側が要求する
+        # 「一般化 Einstein 近似 D_e=μ・(2/3)ε̄」は (2/3)ε̄=(2/3)・(3/2)Te=Te と厳密に
+        # 一致し、この mu_e_face*te_face が自動的にそれになる (別途 D_e 用の
+        # ε̄→D_e テーブルを boltz.py に持たせる必要がない)
         mu_e_face = 0.5 * (mu_e[:-1] + mu_e[1:])
         te_face = 0.5 * (te[:-1] + te[1:])
         d_e_face = mu_e_face * te_face
@@ -573,15 +611,19 @@ class Fluid1dSimulation:
 
     # ---- 1ステップ (半陰・陽的 共通の下請け) -------------------------------------
 
-    def _reaction_terms(self, n_e, te, k_ion, k_exc, nu_m_per_ng):
+    def _reaction_terms(self, n_e, te, k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev):
         """反応源項 (S_ion, 損失内訳) をまとめて計算する。debug_source_enabled=False
         なら電離・励起の生成/損失を丸ごと無効化する (両極性拡散テスト用)。
+
+        e_ion_ev/e_exc_ev は "maxwell" ではスカラー (self.reactions.e_ion_ev/e_exc_ev
+        と全く同じ値がそのまま渡ってくる、_te_and_coeffs 参照) なので式・結果は
+        prompts/117 追加前とビット不変。"boltzmann" では ε̄ ごとに変わる配列になる。
         """
         tg_ev = self.s.gas_temperature_k * KB / QE
         if self.debug_source_enabled:
             s_ion = k_ion * self.n_g * n_e
-            loss_ion = self.reactions.e_ion_ev * s_ion
-            loss_exc = self.reactions.e_exc_ev * k_exc * self.n_g * n_e
+            loss_ion = e_ion_ev * s_ion
+            loss_exc = e_exc_ev * k_exc * self.n_g * n_e
         else:
             s_ion = np.zeros(self.n_nodes)
             loss_ion = np.zeros(self.n_nodes)
@@ -610,9 +652,9 @@ class Fluid1dSimulation:
         n_e, n_i, w = self.n_e, self.n_i, self.w
         phi = self._solve_phi(n_e, n_i, t)
         ex = self._e_field(phi)
-        te, mu_e, k_ion, k_exc, nu_m_per_ng = self._te_and_coeffs(n_e, w)
+        te, mu_e, k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev = self._te_and_coeffs(n_e, w)
         a_i, b_i, a_e, b_e, z_e, d_e_face = self._face_coeffs(phi, te, mu_e)
-        s_ion, loss_total = self._reaction_terms(n_e, te, k_ion, k_exc, nu_m_per_ng)
+        s_ion, loss_total = self._reaction_terms(n_e, te, k_ion, k_exc, nu_m_per_ng, e_ion_ev, e_exc_ev)
         t1 = time.perf_counter()
         self.timing["poisson"] += t1 - t0
 
@@ -761,7 +803,7 @@ class Fluid1dSimulation:
 
     def _accumulate_fields(self, t_step: float) -> None:
         ex = self._e_field(self.phi)
-        te, _mu_e, k_ion, _k_exc, _nu = self._te_and_coeffs(self.n_e, self.w)
+        te, _mu_e, k_ion, *_ = self._te_and_coeffs(self.n_e, self.w)
         s_ion = (k_ion * self.n_g * self.n_e) if self.debug_source_enabled else np.zeros(self.n_nodes)
         self._accum_phi += self.phi
         self._accum_e += ex

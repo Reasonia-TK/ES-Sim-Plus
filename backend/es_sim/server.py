@@ -21,12 +21,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from . import _numba_kernels  # noqa: F401 (eager import。理由は下のコメント参照)
 from .backend import gpu_available
+from .boltz import DEFAULT_BOLTZ_OPTS, boltzpm_available, run_boltz_sweep
 from .fem import solve
 from .lxcat import parse_lxcat
 from .meshing import generate_mesh
 from .particles import trace
 from .pic import WALK_DIAG_KEYS, PicSimulation
 from .pic1d import Pic1dSimulation, build_pic1d_result
+from .pic1d_presets import edupic_ar_processes
 from .pic1d_presets import get_presets as get_pic1d_presets
 from .fluid1d import Fluid1dSimulation, build_fluid1d_result
 from .fluid2d import Fluid2dSimulation, build_fluid2d_result
@@ -46,6 +48,7 @@ from .schema import (
     ProfileResult,
     SolveResult,
     TraceResult,
+    XsProcess,
 )
 
 # _numba_kernels は particles.py などから optional 依存として import されるが、
@@ -1194,6 +1197,150 @@ async def ws_fluid2d(ws: WebSocket) -> None:
             else:
                 await ws.send_json({"type": "error", "detail": f"不明なコマンド: {cmd}"})
     except WebSocketDisconnect:
+        pass
+
+
+# ---- boltzpm (Boltzmann ソルバー) 連携 — LMEA 流体係数テーブル生成 (prompts/117) ----------
+#
+# テーブルはフロントが受け取って fluid1d/fluid2d の settings.boltz_table に格納する
+# (サーバー側では保持しない、プロンプト指示通り) ため、tl.py の _run_tl_session と同じ
+# 最も単純な配線 (専用ロック、start/stop のみ、continue 無し、保持スロット無し) で足りる
+_boltz_lock = asyncio.Lock()
+
+
+async def _run_boltz_session(ws: WebSocket, msg: dict) -> None:
+    """1回の boltzpm E/N 掃引 (start)。started → progress×N → done(table) を送出する。
+
+    processes を直接渡すか (mass_amu/p_pa が必須、t_k は既定 300K)、project+module
+    ("fluid1d"/"fluid2d") を渡して既存設定 (electron_processes/ion_mass_amu/
+    gas_pressure_pa/gas_temperature_k) から取り出すかのどちらかを選べる。
+    electron_processes が空の場合は fluid1d.py/fluid2d.py と同じ既定
+    (eduPIC Ar 解析式) にフォールバックする。
+    """
+    if not boltzpm_available():
+        await ws.send_json(
+            {"type": "error", "detail": "boltzpm がインストールされていません"}
+        )
+        return
+
+    processes_raw = msg.get("processes")
+    opts = msg.get("opts")
+    try:
+        if processes_raw is not None:
+            processes = [XsProcess.model_validate(p) for p in processes_raw]
+            mass_amu = float(msg["mass_amu"])
+            p_pa = float(msg["p_pa"])
+            t_k = float(msg.get("t_k", 300.0))
+        else:
+            project_dict = msg.get("project")
+            module = msg.get("module")
+            if not isinstance(project_dict, dict) or module not in ("fluid1d", "fluid2d"):
+                await ws.send_json(
+                    {
+                        "type": "error",
+                        "detail": "processes (+mass_amu/p_pa)、または "
+                        "project+module ('fluid1d'/'fluid2d') を指定してください",
+                    }
+                )
+                return
+            project = Project.model_validate(project_dict)
+            settings = project.fluid1d if module == "fluid1d" else project.fluid2d
+            if settings is None:
+                await ws.send_json({"type": "error", "detail": f"project.{module} が指定されていません"})
+                return
+            processes = settings.electron_processes if settings.electron_processes else edupic_ar_processes()[0]
+            mass_amu = float(settings.ion_mass_amu)
+            p_pa = float(settings.gas_pressure_pa)
+            t_k = float(settings.gas_temperature_k)
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        return
+
+    n_points = int((opts or {}).get("n_points") or DEFAULT_BOLTZ_OPTS["n_points"])
+    await ws.send_json({"type": "started", "n_points": n_points})
+
+    loop = asyncio.get_running_loop()
+    stop = threading.Event()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+
+    def on_progress(i: int, n: int, en_td: float, elapsed_s: float) -> None:
+        def offer_latest() -> None:
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(
+                {"type": "progress", "i": i, "n_points": n, "en_td": en_td, "elapsed_s": elapsed_s}
+            )
+
+        loop.call_soon_threadsafe(offer_latest)
+
+    run_task = asyncio.create_task(
+        asyncio.to_thread(
+            run_boltz_sweep, processes, mass_amu, p_pa, t_k, opts, on_progress, stop.is_set
+        )
+    )
+
+    async def watch_stop() -> None:
+        while True:
+            try:
+                m = json.loads(await ws.receive_text())
+            except (WebSocketDisconnect, RuntimeError):
+                stop.set()
+                return
+            if m.get("cmd") == "stop":
+                stop.set()
+                return
+
+    stop_task = asyncio.create_task(watch_stop())
+    try:
+        while True:
+            if run_task.done() and queue.empty():
+                break
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            await ws.send_json(item)
+        table = await run_task
+        await ws.send_json({"type": "done", "table": table})
+    except Exception as exc:
+        try:
+            await ws.send_json({"type": "error", "detail": str(exc)})
+        except Exception:
+            pass
+    finally:
+        stop.set()
+        stop_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@app.websocket("/ws/boltz")
+async def ws_boltz(ws: WebSocket) -> None:
+    """boltzpm による E/N 掃引 → LMEA 係数テーブル (BoltzTable) 生成の WebSocket (prompts/117)。
+
+    start で新規実行、stop で中断 (中断時点までの収束済み点でテーブルを返す)。
+    continue や保持スロットは無い (テーブルはフロントの settings.boltz_table に
+    そのまま埋め込むだけの1回性の生成なので、pic1d/fluid1d のような「続きから」
+    という概念が無い)。
+    """
+    await ws.accept()
+    try:
+        while True:
+            msg = json.loads(await ws.receive_text())
+            cmd = msg.get("cmd")
+            if cmd == "start":
+                if _boltz_lock.locked():
+                    await ws.send_json({"type": "error", "detail": "別の boltzpm 実行が進行中です"})
+                    continue
+                async with _boltz_lock:
+                    await _run_boltz_session(ws, msg)
+            elif cmd == "stop":
+                continue  # 実行中でなければ無視 (実行中は watch_stop が処理する)
+            else:
+                await ws.send_json({"type": "error", "detail": f"不明なコマンド: {cmd}"})
+    except (WebSocketDisconnect, RuntimeError):
         pass
 
 

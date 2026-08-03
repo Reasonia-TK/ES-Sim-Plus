@@ -31,7 +31,7 @@ import os
 import re
 import sys
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # ---- gmsh 共有ライブラリの検出 (gmsh.py と同じ探索規則の簡略版) ----------------
 import gmsh as _gmsh_mod
@@ -73,15 +73,21 @@ hiddenimports = [
     "es_sim.server",   # uvicorn.run("es_sim.server:app") の文字列参照
     "gmsh",
     "numba",           # _numba_kernels.py の try/except 内 import の保険 (prompts/76)
+    "boltzpm",         # boltz.py の try/except 内 import の保険 (numba と同じ理由、prompts/117)
 ]
 # uvicorn のワーカ/ループ/プロトコル実装は動的インポートされる
 hiddenimports += collect_submodules("uvicorn")
+
+# boltzpm 同梱の LXCat 断面積データ (boltzpm/data/Ar.txt 等、load_argon() が参照する。
+# 本体の LMEA テーブル生成 (xsprocess_to_mixture) 自体はこれらを使わないが、
+# boltzpm パッケージの一部として同梱しておく (prompts/117)
+datas = collect_data_files("boltzpm")
 
 a = Analysis(
     ["run_server.py"],
     pathex=["."],
     binaries=binaries,
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

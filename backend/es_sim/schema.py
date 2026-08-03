@@ -601,6 +601,35 @@ class Pic1dSettings(BaseModel):
         return self
 
 
+# ---- boltzpm (Boltzmann ソルバー) 連携 — LMEA 流体係数テーブル (prompts/117) -----------
+#
+# boltz.py 参照。E/N を掃引して各点の定常 EEDF から ε̄=⟨ε⟩・μ_e・N・レート係数を
+# 求め、ε̄ をキーにテーブル化したもの (BOLSIG+ 流の局所平均エネルギー近似、LMEA)。
+# Fluid1dSettings/Fluid2dSettings の electron_model="boltzmann" のときに使う。
+
+
+class BoltzTable(BaseModel):
+    """boltzpm による LMEA 係数テーブル (prompts/117)。ε̄=(3/2)Te をキーに参照する。
+
+    各リストは ε̄ (mean_energy_ev) 昇順に整列済み (boltz.run_boltz_sweep が保証する)。
+    eedf は表示用に全点分を保存する (eedf[i] が eedf_eps_ev グリッド上の EEDF、
+    ∫eedf[i] dε ≈ 1 — boltzpm の規格化そのまま、boltz.py モジュール docstring 参照)。
+    """
+
+    en_td: list[float]
+    mean_energy_ev: list[float]
+    mobility_n: list[float]   # μ_e・N [1/(m・V・s)]
+    k_ion: list[float]
+    k_exc: list[float]
+    e_ion_ev: list[float]
+    e_exc_ev: list[float]
+    eedf_eps_ev: list[float]
+    eedf: list[list[float]]
+    source_hash: str         # sha256(JSON(processes)) — 断面積変更後の再生成判定用
+    opts: dict = {}
+    warnings: list[str] = []
+
+
 # ---- 1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、prompts/104-106) -----------------------
 #
 # pic1d (上記 Pic1dSettings) と同一条件・同一プリセットで直接比較できることが設計目標
@@ -652,6 +681,12 @@ class Fluid1dSettings(BaseModel):
     # 再構成する工学近似 (無衝突シース・CX 衝突なしを仮定、fluid1d.py 参照)
     wall_iedf_bins: int = Field(100, ge=0, le=1000)
     # seed は不要 (流体は決定論的で乱数を使わない)
+    # 電子輸送・反応係数のソース (prompts/117): "maxwell" (既定) は fluid_coeffs.py の
+    # Maxwell 平均 (従来経路、ビット不変)。"boltzmann" は boltz_table (boltzpm による
+    # LMEA テーブル、事前に /ws/boltz で生成してフロントが埋め込む) を ε̄=(3/2)Te で
+    # 参照する (fluid1d.py の _te_and_coeffs 参照)
+    electron_model: Literal["maxwell", "boltzmann"] = "maxwell"
+    boltz_table: BoltzTable | None = None
 
     @model_validator(mode="after")
     def _check_no_fn(self) -> "Fluid1dSettings":
@@ -659,6 +694,15 @@ class Fluid1dSettings(BaseModel):
             raise ValueError(
                 "fluid1d は FN 電界放出 (left/right.fn) に未対応です "
                 "(Pic1dElectrode を共用していますが fn は無視されないよう明示的に禁止しています)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_boltz_table(self) -> "Fluid1dSettings":
+        if self.electron_model == "boltzmann" and self.boltz_table is None:
+            raise ValueError(
+                "electron_model='boltzmann' には boltz_table (boltzpm による LMEA テーブル、"
+                "/ws/boltz で事前生成) の指定が必要です"
             )
         return self
 
@@ -700,6 +744,18 @@ class Fluid2dSettings(BaseModel):
     avg_steps: int | None = Field(None, gt=0)
     phase_bins: int = Field(0, ge=0)
     # seed は不要 (流体は決定論的で乱数を使わない)
+    # 電子輸送・反応係数のソース (fluid1d.py と同じ規約・既定値、prompts/117)
+    electron_model: Literal["maxwell", "boltzmann"] = "maxwell"
+    boltz_table: BoltzTable | None = None
+
+    @model_validator(mode="after")
+    def _check_boltz_table(self) -> "Fluid2dSettings":
+        if self.electron_model == "boltzmann" and self.boltz_table is None:
+            raise ValueError(
+                "electron_model='boltzmann' には boltz_table (boltzpm による LMEA テーブル、"
+                "/ws/boltz で事前生成) の指定が必要です"
+            )
+        return self
 
     # ---- 陰的線形ソルバー (prompts/115、毎ステップの spsolve 3本が実測93%を占めていた
     #      プロファイルへの対応) ----------------------------------------------------
