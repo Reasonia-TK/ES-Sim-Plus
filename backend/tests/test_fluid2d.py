@@ -208,7 +208,16 @@ def test_boltzmann_equilibrium_2d_nonuniform_ion_background():
 
 
 def test_particle_balance_matches_generation_minus_wall_loss():
-    """(電離生成 gen_total − 壁損失累積) が全量変化と機械精度で一致する (フル物理)。"""
+    """(電離生成 gen_total − 壁損失累積) が全量変化と機械精度で一致する (フル物理)。
+
+    この保存則はテレスコーピング (F_ji=-F_ij + 集中質量) という「離散化そのものの
+    構成的な性質」であり、線形方程式を厳密に (機械精度まで) 解いたときにしか
+    machine precision では成立しない (prompts/115: 既定になった iterative
+    (BiCGSTAB, rtol=1e-10) は方程式を近似的にしか解かないため、200ステップの
+    累積で rel=1e-8 の許容誤差を超えてしまう — これは離散化の破綻ではなく
+    ソルバーの近似誤差なので、このテストは「離散化が保存的であること」を厳密に
+    検証する目的どおり linear_solver="direct" (spsolve、機械精度解) を明示する)。
+    """
     length = 0.02
     size = 0.002
     geo = Geometry(
@@ -221,6 +230,7 @@ def test_particle_balance_matches_generation_minus_wall_loss():
         init_density_m3=1.0e15, init_te_ev=3.0,
         gas_pressure_pa=50.0, gas_temperature_k=300.0,
         n_steps=1, frame_every=100000, dt=5.0e-11,
+        linear_solver="direct",
     )
     sim = Fluid2dSimulation(_project2d(geo, MeshSettings(size=size, mode="unstructured"), s))
     n_e0 = float(np.sum(sim.n_e[sim.active_idx] * sim.node_vol))
@@ -338,3 +348,96 @@ def test_validator_requires_fluid2d_settings():
 def test_validator_gas_pressure_must_be_positive():
     with pytest.raises(pydantic.ValidationError):
         Fluid2dSettings(init_density_m3=1e15, gas_pressure_pa=0.0)
+
+
+# ---- 7. 陰的反復ソルバー (numba 並列 Jacobi-BiCGSTAB、prompts/115) -------------------
+
+
+def _small_solver_project(n_steps: int = 20, dt: float = 5.0e-11, **fluid_kwargs) -> Project:
+    """反復ソルバーのテスト共通: 小規模メッシュ・少数ステップのフル物理プロジェクト
+    (test_particle_balance_matches_generation_minus_wall_loss と同じ形状・条件)。
+    """
+    length = 0.01
+    size = 0.002
+    geo = Geometry(
+        domain=Domain(polygon=[(0, 0), (length, 0), (length, length), (0, length)]),
+        boundaries=[
+            BoundaryCondition(edges=[i], type="dirichlet", voltage=0.0, see_gamma=0.05) for i in range(4)
+        ],
+    )
+    kwargs: dict = dict(
+        init_density_m3=1.0e15, init_te_ev=3.0,
+        gas_pressure_pa=50.0, gas_temperature_k=300.0,
+        n_steps=n_steps, frame_every=n_steps, avg_steps=max(1, n_steps // 4), dt=dt,
+    )
+    kwargs.update(fluid_kwargs)
+    s = Fluid2dSettings(**kwargs)
+    return _project2d(geo, MeshSettings(size=size, mode="unstructured"), s)
+
+
+def test_iterative_matches_direct():
+    """既定 (iterative) と "direct" (従来の spsolve) の結果が一致する。
+
+    BiCGSTAB は既定 rtol=1e-10 まで収束させるため、direct (SuperLU の直接解) との
+    差は反復法の丸め誤差程度に収まるはずで、ビット一致は要求せず rtol 1e-6 とする
+    (BiCGSTAB と SuperLU は演算順序が全く異なるアルゴリズムなのでビット一致は
+    そもそも成立しない — これは「行並列 matvec のスレッド数依存性」の話とは別物)。
+    """
+    n_steps = 30
+    sim_it = Fluid2dSimulation(_small_solver_project(n_steps=n_steps, linear_solver="iterative"))
+    sim_dr = Fluid2dSimulation(_small_solver_project(n_steps=n_steps, linear_solver="direct"))
+    sim_it.run_batch(store_frames=False)
+    sim_dr.run_batch(store_frames=False)
+
+    np.testing.assert_allclose(sim_it.n_e, sim_dr.n_e, rtol=1e-6, atol=1.0)
+    np.testing.assert_allclose(sim_it.n_i, sim_dr.n_i, rtol=1e-6, atol=1.0)
+    np.testing.assert_allclose(sim_it.w, sim_dr.w, rtol=1e-6, atol=1.0)
+    np.testing.assert_allclose(sim_it.phi, sim_dr.phi, rtol=1e-6, atol=1e-6)
+    assert sim_it.solver_fallback_count == 0
+    assert not any("フォールバック" in w for w in sim_it.warnings)
+
+
+def test_iterative_threads_bit_identical():
+    """threads=1 と threads=2 で run_batch 結果が完全にビット同一 (np.array_equal)。
+
+    行並列 matvec (_numba_kernels.csr_matvec_parallel) は行ごとに独立な逐次積和
+    (どのスレッドがどの行を処理しても、その行自身の浮動小数点演算順序は不変)
+    であり、BiCGSTAB の内積・ノルムは常に numpy 単一スレッドで計算するため、
+    反復列全体・最終的な密度/エネルギー/電位はスレッド数に一切依存しないはず
+    ── これを allclose ではなく array_equal で厳密に検証する (規約どおり)。
+    """
+    n_steps = 30
+    sim1 = Fluid2dSimulation(_small_solver_project(n_steps=n_steps, linear_solver="iterative", threads=1))
+    sim2 = Fluid2dSimulation(_small_solver_project(n_steps=n_steps, linear_solver="iterative", threads=2))
+    sim1.run_batch(store_frames=False)
+    sim2.run_batch(store_frames=False)
+
+    assert np.array_equal(sim1.n_e, sim2.n_e)
+    assert np.array_equal(sim1.n_i, sim2.n_i)
+    assert np.array_equal(sim1.w, sim2.w)
+    assert np.array_equal(sim1.phi, sim2.phi)
+
+
+def test_iterative_convergence_counter_and_no_warnings():
+    """通常ケースで solver_iters (総反復数) > 0、フォールバック関連 warnings は出ない。"""
+    sim = Fluid2dSimulation(_small_solver_project(n_steps=20, linear_solver="iterative"))
+    sim.run_batch(store_frames=False)
+    assert sim.timing["solver_iters"] > 0
+    assert sim.solver_fallback_count == 0
+    assert not any("フォールバック" in w for w in sim.warnings)
+
+
+def test_iterative_falls_back_to_direct_when_not_converged():
+    """反復上限をテスト用フックで0に強制すると BiCGSTAB が必ず未収束になり、
+    spsolve (direct) へフォールバックする。結果は依然として有限のまま
+    (堅牢性: フォールバックが機能していれば発散しない)。
+    """
+    sim = Fluid2dSimulation(_small_solver_project(n_steps=5, linear_solver="iterative"))
+    sim._solver_max_iter = 0  # テスト専用フック (モジュール docstring 参照)
+    sim.run_batch(store_frames=False)
+
+    assert sim.solver_fallback_count > 0
+    assert any("フォールバック" in w for w in sim.warnings)
+    assert np.all(np.isfinite(sim.n_e))
+    assert np.all(np.isfinite(sim.n_i))
+    assert np.all(np.isfinite(sim.w))

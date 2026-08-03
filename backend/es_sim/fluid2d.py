@@ -89,20 +89,33 @@ fluid1d.py と全く同じ2段構え (陽的検証経路・半陰的既定経路
 使う) の小さい方を超えたら内部でサブステップ分割する (fluid1d.py のコメント
 参照。ロジックは同一、格子間隔だけ 1D の dx → 2D の h_min に置き換えている)。
 
-## 陰的線形ソルバー (性能判断)
+## 陰的線形ソルバー (prompts/111 → 115 で並列反復法へ置換)
 
-種ごとの疎行列 (ion/electron/energy) を毎ステップ (毎サブステップ) 組み直し、
-scipy.sparse.linalg.spsolve (内部で SuperLU の都度分解) で解く。まず正しさを
-優先した実装で、実測 ms/step は最終レポートに記載する。行列のスパースパターン
-(エッジ構造) はステップをまたいで不変なので、将来的に「パターン固定の再利用」や
-bicgstab+ILU 前処理への切り替えで高速化する余地があるが、prompts/111 の
-「まず正しさ優先で spsolve」の指示どおり、本 Phase A では spsolve に留めている
-(数千節点規模の CI テストは spsolve で十分な時間内に収まることを確認済み)。
+種ごとの疎行列 (ion/electron/energy) を毎ステップ (毎サブステップ) 組み直す。
+prompts/111 の Phase A では正しさ優先で scipy.sparse.linalg.spsolve (SuperLU の
+都度分解) のみを使っていたが、実測プロファイル (2455 節点・200 ステップ) で
+transport 65% + energy 28% = 93% がこの spsolve 3本に費やされていることが
+判明した。SuperLU の直接分解自体は並列化できないが、行列 M = V_i/dt + K
+(時間項 + EAFE 剛性行列) は対角優位 (dt が誘電緩和スケールで小さいほど対角の
+時間項が支配的になる) なので、Jacobi (対角) 前処理付き BiCGSTAB が数〜十数
+反復で収束する — その主要コスト (matvec 2回/反復) は行並列で完全にスケール
+でき、_numba_kernels.csr_matvec_parallel の「行ごとに1スレッドが昇順に積和」
+という構成によりスレッド数に依らずビット決定論も保てる (内積・ノルムは
+numpy 単一スレッドに残す。理由は _numba_kernels.bicgstab のコメント参照)。
+
+Fluid2dSettings.linear_solver で切り替える: 既定 "iterative" (上記 BiCGSTAB、
+x0=前ステップ値で反復数を削減)。収束しなかった場合は自動的に "direct"
+(従来の spsolve) へフォールバックする (堅牢性優先、初回のみ warnings に記録)。
+"direct" を明示すれば常に spsolve を使う従来経路のまま (比較・検証用に残す)。
+Poisson (splu) はプロファイルで 7% に留まり、初期化時の1回の分解を使い回して
+いる (陰的輸送のような「毎ステップ組み直し」ではない) ため現状維持とする。
+1D (fluid1d.py) は solve_banded (三重対角、O(n)) が既に十分高速なため対象外。
 """
 
 from __future__ import annotations
 
 import math
+import os
 import time
 import warnings
 
@@ -110,6 +123,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
+from . import _numba_kernels
 from .fem import EPS0, _radial_index, assemble, assemble_transport_operator
 from .fluid1d import FLOOR_N, FLOOR_W, _bernoulli
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
@@ -124,9 +138,32 @@ from .particles import (
     _build_boundary_tables,
     _solid_elements,
 )
-from .pic import _eval_waveform
+from .pic import _auto_thread_cap, _eval_waveform
 from .pic1d_presets import edupic_ar_processes
 from .schema import Fluid2dSettings, Project, VoltageWaveform, rf_components
+
+# timing dict のうち秒数ではない診断キー (prompts/115、pic.py の WALK_DIAG_KEYS と同じ
+# 位置づけ)。build_fluid2d_result の timing.total 集計・フロントの内訳表示 (%計算・合計)
+# からはこのキー集合を除外する
+FLUID2D_DIAG_KEYS = frozenset({"solver_iters"})
+
+
+def _effective_fluid2d_threads(requested: int, cpu_count: int | None = None) -> int:
+    """Fluid2dSettings.threads の実効値を返す (0=自動)。
+
+    pic.py._auto_thread_cap と同じ式 (max(2, min(16, 論理コア数//2))) をそのまま
+    流用する。PIC の _effective_thread_count と異なり「粒子数が閾値未満なら
+    強制的に逐次」というゲートは持ち込まない — あれは小規模な粒子配列で
+    prange 起動コストが償却できないケースへの対処であり、流体の疎行列反復法
+    (matvec を1ステップに数十回呼ぶ) では起動コストの相対的な重みが粒子カーネル
+    より小さく、行列サイズに応じた別ゲートを追加する根拠が実測的に無いため
+    (prompts/115 のベンチマーク条件でも auto_thread_cap をそのまま使えば十分)。
+    """
+    if requested > 0:
+        return int(requested)
+    cores = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
+    return min(_auto_thread_cap(cores), cores)
+
 
 # history の列名 (毎ステップこの全キーを持つ、fluid1d._HISTORY_KEYS と同じ設計。
 # 2D は「壁」がドメイン外周・固体表面など多数になり得るため左右の区別をやめ、
@@ -208,6 +245,21 @@ class Fluid2dSimulation:
 
         self._build_sparse_pattern()
         self._build_wall_geometry(project, mesh)
+
+        # ---- 陰的反復ソルバー (prompts/115) --------------------------------------
+        self.linear_solver = s.linear_solver
+        self.effective_threads = _effective_fluid2d_threads(int(s.threads))
+        # numba の matvec カーネル (prange) が使うスレッド数を設定に合わせる
+        # (numba 無し環境では no-op。pic.py/dsmc.py と同じプロセス共有の set_num_threads
+        # 流儀に従う — 実行のたびに設定し直す設計であり、他ソルバーと衝突しない)
+        _numba_kernels.set_num_threads(self.effective_threads)
+        # BiCGSTAB の収束判定・反復上限。テストでフォールバック経路を強制する際は
+        # これらの属性を直接書き換えればよい (モンキーパッチ用の公開インターフェース)
+        self._solver_rtol = 1.0e-10
+        self._solver_atol = 1.0e-300
+        self._solver_max_iter = 200
+        self.solver_fallback_count = 0
+        self._solver_fallback_warned = False
 
         # ---- Poisson (fem.assemble を再利用。free/fixed/splu は pic.py と同型の
         #      再実装 — モジュール docstring の設計判断参照) --------------------------
@@ -313,6 +365,9 @@ class Fluid2dSimulation:
         self.history: dict[str, list] = {k: [] for k in _HISTORY_KEYS}
         self.timing: dict[str, float] = {
             "poisson": 0.0, "transport": 0.0, "energy": 0.0, "other": 0.0,
+            # 反復ソルバーの総反復数 (診断用、秒数ではないので FLUID2D_DIAG_KEYS で
+            # timing.total 集計から除外する。WALK_DIAG_KEYS と同じ位置づけ)
+            "solver_iters": 0.0,
         }
 
         # ---- 時間平均・位相分解アキュムレータ -------------------------------------
@@ -585,12 +640,61 @@ class Fluid2dSimulation:
         return sp.csc_matrix((data, self._patt_indices, self._patt_indptr), shape=(n, n))
 
     def _implicit_transport_solve(self, n_old, a_ij, b_ij, wall_diag, source, extra_rhs, dt):
-        """後退オイラー (陰的、spsolve)。source は体積あたり (×V_i される)、
+        """後退オイラー (陰的)。source は体積あたり (×V_i される)、
         extra_rhs は体積化されない既知の追加フラックス (SEE 源・Joule 加熱・
         エネルギー壁損失など、fluid1d._implicit_transport_solve と同じ規約)。
+
+        既定 (linear_solver="iterative") は Jacobi-BiCGSTAB (prompts/115、
+        モジュール docstring 参照)、明示指定なら従来の spsolve (direct) を使う。
         """
         m = self._assemble_active_matrix(a_ij, b_ij, wall_diag, dt)
         rhs = self.node_vol / dt * n_old + source * self.node_vol + extra_rhs
+        if self.linear_solver == "direct":
+            return spla.spsolve(m, rhs)
+        return self._iterative_solve(m, rhs, n_old)
+
+    def _iterative_solve(self, m: sp.csc_matrix, rhs: np.ndarray, x0: np.ndarray) -> np.ndarray:
+        """Jacobi 前処理付き BiCGSTAB (numba 並列 matvec) で m@x=rhs を解く。
+
+        x0 = n_old (呼び出し元の前ステップ値) をそのまま初期推定に使う: dt が
+        誘電緩和スケールで小さく選ばれているため、前ステップからの変化量は
+        小さく、ゼロ初期化に比べて反復数を大きく減らせる (モジュール docstring)。
+        収束しなければ堅牢性を優先して spsolve (direct) へフォールバックし、
+        初回発生時のみ warnings に記録する (以降は solver_fallback_count に
+        集計するだけで warnings を汚さない — 反復ごとに毎回出ると実用上ノイズに
+        なるため)。
+        """
+        # spsolve (splu 系) は CSC を前提に組んでいるが、行並列 matvec は行方向の
+        # 連続アクセスが要る CSR が必要 (_build_sparse_pattern は spsolve 用に
+        # CSC で組んでいるため、反復法用にここで変換する。変換コストは O(nnz) で
+        # SuperLU の都度分解よりずっと軽い)
+        m_csr = m.tocsr()
+        diag = m_csr.diagonal()
+        # 対角は必ず非零 (時間項 V_i/dt > 0 が全節点の対角に乗るため)。念のため
+        # 0 除算だけガードする (前処理なし=1.0 に落とす、結果の正しさには影響しない)
+        diag_inv = np.where(diag != 0.0, 1.0 / diag, 1.0)
+        x, n_iter, converged = _numba_kernels.bicgstab(
+            m_csr.indptr,
+            m_csr.indices,
+            m_csr.data,
+            rhs,
+            x0,
+            rtol=self._solver_rtol,
+            atol=self._solver_atol,
+            max_iter=self._solver_max_iter,
+            diag_inv=diag_inv,
+        )
+        self.timing["solver_iters"] += n_iter
+        if converged:
+            return x
+        if not self._solver_fallback_warned:
+            self.warnings.append(
+                "反復ソルバー (Jacobi-BiCGSTAB) が収束しませんでした。spsolve (直接法) へ"
+                "フォールバックしました (このメッセージは初回のみ表示。以降の発生回数は "
+                "solver_fallback_count に集計されます)"
+            )
+            self._solver_fallback_warned = True
+        self.solver_fallback_count += 1
         return spla.spsolve(m, rhs)
 
     def _explicit_transport_update(self, n_old, a_ij, b_ij, wall_diag, source, extra_rhs, dt):
@@ -1046,7 +1150,9 @@ def build_fluid2d_result(sim: Fluid2dSimulation, elapsed_s: float) -> dict:
             "n_i": c["n_i"].tolist(),
             "t_e": c["t_e"].tolist(),
         }
-    timing_total = sum(sim.timing.values())
+    # solver_iters は秒数ではない診断値 (FLUID2D_DIAG_KEYS) なので合計から除外する
+    # (pic.py の WALK_DIAG_KEYS と同じ扱い)
+    timing_total = sum(v for k, v in sim.timing.items() if k not in FLUID2D_DIAG_KEYS)
     return {
         "history": sim.history,
         "fields": fields,

@@ -1108,6 +1108,9 @@ async def _stream_run_fluid2d(ws: WebSocket, sim: Fluid2dSimulation) -> None:
             "step_offset": sim.step_count,
             "dt": sim.dt,
             "warnings": sim.warnings,
+            # 陰的反復ソルバーの実効スレッド数 (PIC の effective_threads と同じ趣旨、
+            # prompts/115)。フロントで設定が実際に反映されているかを確認できるようにする
+            "effective_threads": sim.effective_threads,
         }
     )
 

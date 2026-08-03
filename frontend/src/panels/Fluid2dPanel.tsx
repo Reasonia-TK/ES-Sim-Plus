@@ -80,6 +80,11 @@ const TIMING_PHASE_LABELS: Record<string, string> = {
   other: "その他",
 };
 
+// timing dict のうち秒数ではない診断キー (backend/es_sim/fluid2d.py の FLUID2D_DIAG_KEYS
+// と対応させること)。秒・%の内訳・合計からは除外し、別枠で表示する
+// (PicPanel の PIC_WALK_DIAG_KEYS と同じ考え方、prompts/115)
+const FLUID2D_DIAG_KEYS = new Set(["solver_iters"]);
+
 interface Props {
   project: Project;
   fluid2d: Fluid2dSettings;
@@ -526,6 +531,37 @@ export default function Fluid2dPanel({
           })
         ))}
       <div className="field">
+        <span className="label">陰的ソルバー</span>
+        <select
+          value={fluid2d.linear_solver ?? "iterative"}
+          onChange={(e) => onChange({ ...fluid2d, linear_solver: e.target.value as "iterative" | "direct" })}
+        >
+          <option value="iterative">反復法 (推奨、並列化・高速)</option>
+          <option value="direct">直接法 (spsolve、比較・検証用)</option>
+        </select>
+      </div>
+      <p className="hint">
+        反復法 (numba 並列 Jacobi-BiCGSTAB) は毎ステップの陰的行列を並列 matvec で解き、
+        収束しなければ自動的に直接法 (spsolve) へフォールバックします。結果は direct とほぼ一致
+      </p>
+      {(fluid2d.linear_solver ?? "iterative") === "iterative" && (
+        <>
+          <div className="field">
+            <span className="label">スレッド数 (0=自動)</span>
+            <CommitNumberInput
+              value={fluid2d.threads ?? 0}
+              onCommit={(v) => onChange({ ...fluid2d, threads: Math.max(0, Math.round(v)) })}
+            />
+          </div>
+          <p className="hint">
+            反復ソルバー (matvec) の並列数。0は論理コア数から自動選択
+            {started?.effective_threads !== undefined
+              ? ` (前回実行: ${started.effective_threads}スレッド)`
+              : ""}。結果はスレッド数によらず完全一致
+          </p>
+        </>
+      )}
+      <div className="field">
         <span className="label">フレーム間隔</span>
         <CommitNumberInput
           value={fluid2d.frame_every ?? 200}
@@ -696,7 +732,7 @@ export default function Fluid2dPanel({
             <span>{result.elapsed_s.toFixed(3)} s</span>
           </div>
           {Object.entries(result.timing)
-            .filter(([k]) => k !== "total")
+            .filter(([k]) => k !== "total" && !FLUID2D_DIAG_KEYS.has(k))
             .sort((a, b) => b[1] - a[1])
             .map(([key, sec]) => (
               <div className="kv" key={key}>
@@ -711,6 +747,12 @@ export default function Fluid2dPanel({
             <span>実行時間合計</span>
             <span>{(result.timing.total ?? 0).toFixed(3)} s</span>
           </div>
+          {(result.settings.linear_solver ?? "iterative") === "iterative" && result.timing.solver_iters != null && (
+            <div className="kv">
+              <span>反復ソルバー 総反復数 (診断)</span>
+              <span>{result.timing.solver_iters.toLocaleString()}</span>
+            </div>
+          )}
           <div className="kv">
             <span>壁吸収 (電子/イオン、累計)</span>
             <span>{result.walls.electron.toExponential(3)} / {result.walls.ion.toExponential(3)}</span>
@@ -764,4 +806,6 @@ export const DEFAULT_FLUID2D: Fluid2dSettings = {
   frame_every: 200,
   avg_steps: null,
   phase_bins: 0,
+  linear_solver: "iterative",
+  threads: 0,
 };

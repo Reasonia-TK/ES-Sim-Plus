@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 
 import numpy as np
+import scipy.sparse as sp
 
 HAVE_NUMBA = False
 try:
@@ -1074,6 +1075,28 @@ if HAVE_NUMBA:
                     # 複数対に選ばれて落ちた分はこのセルの次ステップ候補数へ持ち越す
                     coll_frac[c] += 1.0
 
+    @njit(cache=True, nogil=True, parallel=True)
+    def _csr_matvec_kernel(indptr, indices, data, x, out):
+        """CSR y = A@x の行並列 matvec (陰的流体ソルバーの反復法、prompts/115)。
+
+        行 i の内積 Σ_k data[k]・x[indices[k]] (k は indptr[i]..indptr[i+1) の
+        範囲) は、その行を担当する1スレッドが常に昇順 k で逐次積和する。
+        行 i の計算は他の行の値を一切読まず、書き込み先 out[i] も行ごとに
+        排他 (他スレッドと衝突しない) なので、「どの行をどのスレッドが
+        いつ処理するか」というスケジューリングの違いは結果に影響しない —
+        各行の浮動小数点加算の順序そのものがスレッド数に依らず不変なので、
+        threads=1 と threads=2 で out 全体がビット単位で一致する
+        (_walk_kernel と同じ「行/粒子ごとに独立」という決定論の根拠)。
+        """
+        n = indptr.shape[0] - 1
+        for i in prange(n):
+            s = indptr[i]
+            e = indptr[i + 1]
+            acc = 0.0
+            for k in range(s, e):
+                acc += data[k] * x[indices[k]]
+            out[i] = acc
+
 
 def cell_sort_order(elem: np.ndarray, n_cells: int) -> np.ndarray:
     """粒子のセル順ソート (prompts/84) 用の安定な置換インデックスを返す。
@@ -1693,3 +1716,125 @@ def dsmc_collide(
         first,
     )
     return i1_out, i2_out, keep_out, gmag_out
+
+
+# ---- 陰的流体ソルバー用の並列反復法 (Jacobi-BiCGSTAB、prompts/115) ------------------
+#
+# fluid2d.py の毎ステップ spsolve (SuperLU の都度分解、逐次) をここに置き換える。
+# SuperLU の直接分解自体は並列化できないが、反復法の主要コストである matvec は
+# 行並列で完全にスケールし、かつ上記 _csr_matvec_kernel の設計によりビット決定論も
+# 保てる (SuperLU 分解のような複雑な依存関係が無いため)。
+
+
+def csr_matvec_parallel(indptr, indices, data, x: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+    """CSR 疎行列ベクトル積 y = A@x (bicgstab から呼ばれる主要コスト)。
+
+    HAVE_NUMBA=True: 上の _csr_matvec_kernel (行並列 prange、スレッド数に依らず
+    ビット同一)。HAVE_NUMBA=False: scipy の csr_matrix.dot は単一スレッドの
+    逐次実装 (BLAS 的な内部並列化はしない) なので、そのまま使えば決定論を
+    保ったまま numpy 実装として使える (モジュール docstring の設計方針どおり)。
+    """
+    n = indptr.shape[0] - 1
+    if out is None:
+        out = np.empty(n, dtype=np.float64)
+    if HAVE_NUMBA:
+        _csr_matvec_kernel(indptr, indices, data, x, out)
+    else:
+        m = sp.csr_matrix((data, indices, indptr), shape=(n, len(x)))
+        out[:] = m.dot(x)
+    return out
+
+
+def bicgstab(
+    indptr,
+    indices,
+    data,
+    b: np.ndarray,
+    x0: np.ndarray,
+    rtol: float = 1e-10,
+    atol: float = 1e-300,
+    max_iter: int = 200,
+    diag_inv: np.ndarray | None = None,
+) -> tuple[np.ndarray, int, bool]:
+    """Jacobi (対角) 前処理付き BiCGSTAB で A x = b を解く (prompts/115)。
+
+    なぜ Jacobi 前処理で足りるか: fluid2d.py の陰的行列 M = V_i/dt + K
+    (時間項 + EAFE 剛性行列) は対角優位 — 時間項 V_i/dt が対角にしか乗らず、
+    かつ dt が誘電緩和スケール (τ_d) で小さく選ばれるほど対角の相対的な
+    優位性が強まる。対角優位な系では対角逆数によるスケーリングだけで
+    有効条件数が大きく改善し、フル ILU 分解のような追加コストなしで
+    数〜十数反復まで収束数を落とせる。
+
+    なぜ内積・ノルムを numpy (単一スレッド) に残すか: BiCGSTAB のスカラー
+    係数 (rho・alpha・omega 等) は「ベクトル全体を1つの数へ畳み込む」
+    真のリダクションであり、これを並列化すると加算順序がスレッド数・
+    スケジューリングに依存してしまう (浮動小数点の加算は結合則を満たさない
+    ため、順序が変われば最終ビットも変わり得る)。一方 csr_matvec_parallel は
+    「行ごとに独立」という構造上ビット決定論を保てるので、支配的コストである
+    matvec だけを並列化し、内積は逐次 (numpy の pairwise 和、常に同じ
+    アルゴリズム) のまま残すことで、性能と threads=1/2 のビット一致を両立する。
+
+    x0 は呼び出し側 (fluid2d.py) が前ステップの密度/エネルギー値を渡す設計。
+    対角優位な系は前ステップからの変化が小さく、ゼロ初期化よりずっと
+    反復数を減らせる (前ステップ値を初期推定に使う定石)。
+
+    収束判定: ||r|| ≤ max(rtol・||b||, atol)。diag_inv=None は前処理なし
+    (単位行列、テスト用) として扱う。
+
+    戻り値: (x, n_iter, converged)。収束しなかった場合、呼び出し側
+    (fluid2d.py) が spsolve へフォールバックする設計 (堅牢性優先)。
+    """
+    n = len(b)
+    x = np.array(x0, dtype=np.float64, copy=True)
+    if diag_inv is None:
+        diag_inv = np.ones(n, dtype=np.float64)
+    bnorm = float(np.linalg.norm(b))
+    tol = max(rtol * bnorm, atol)
+
+    r = b - csr_matvec_parallel(indptr, indices, data, x)
+    if float(np.linalg.norm(r)) <= tol:
+        return x, 0, True
+
+    r0 = r.copy()  # 固定シャドウ残差 (BiCGSTAB の規約通り、以後変更しない)
+    rho_old = 1.0
+    alpha = 1.0
+    omega = 1.0
+    v = np.zeros(n, dtype=np.float64)
+    p = np.zeros(n, dtype=np.float64)
+
+    for it in range(1, max_iter + 1):
+        rho_new = float(np.dot(r0, r))
+        if rho_new == 0.0:
+            # シャドウ残差と直交してしまった breakdown。再起動 (r0 の取り直し) は
+            # 実装せず、呼び出し側の spsolve フォールバックに委ねる (堅牢性優先、
+            # モジュールの設計方針どおり複雑な再起動ロジックは持ち込まない)
+            return x, it - 1, False
+        if it == 1:
+            p = r.copy()
+        else:
+            beta = (rho_new / rho_old) * (alpha / omega)
+            p = r + beta * (p - omega * v)
+        p_hat = diag_inv * p
+        v = csr_matvec_parallel(indptr, indices, data, p_hat)
+        denom = float(np.dot(r0, v))
+        if denom == 0.0:
+            return x, it, False
+        alpha = rho_new / denom
+        s = r - alpha * v
+        if float(np.linalg.norm(s)) <= tol:
+            x = x + alpha * p_hat
+            return x, it, True
+        s_hat = diag_inv * s
+        t = csr_matvec_parallel(indptr, indices, data, s_hat)
+        tt = float(np.dot(t, t))
+        if tt == 0.0:
+            x = x + alpha * p_hat
+            return x, it, False
+        omega = float(np.dot(t, s) / tt)
+        x = x + alpha * p_hat + omega * s_hat
+        r = s - omega * t
+        if float(np.linalg.norm(r)) <= tol:
+            return x, it, True
+        rho_old = rho_new
+
+    return x, max_iter, False

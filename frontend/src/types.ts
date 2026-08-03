@@ -625,6 +625,14 @@ export interface Fluid2dSettings {
   frame_every?: number;
   avg_steps?: number | null;   // 完了時に返す時間平均フィールドの平均ステップ数。null = 最後の25%
   phase_bins?: number;         // RF 1周期の位相分解ビン数 (0=無効、既定0)
+
+  // 陰的線形ソルバー (backend/es_sim/fluid2d.py 参照、prompts/115)。
+  // "iterative" (既定): numba 並列 Jacobi-BiCGSTAB。収束しなければ自動的に spsolve へ
+  // フォールバックする。"direct": 従来の spsolve (SuperLU 都度分解、比較・検証用)
+  linear_solver?: "iterative" | "direct";
+  // 陰的反復ソルバー (matvec) の並列スレッド数。0=自動選択 (PicSettings.threads と同じ
+  // 規約: pic.py の _auto_thread_cap 式)。linear_solver="direct" のときは無効
+  threads?: number;
 }
 
 // server → client (/ws/fluid2d)。2D PIC (/ws/pic) の started と異なりメッシュを含まない —
@@ -636,6 +644,10 @@ export interface Fluid2dStartedMsg {
   step_offset: number; // 続き実行では前回までの累計 (frame.step が通算で進む)
   dt: number;
   warnings: string[];
+  // 反復ソルバーの実効スレッド数 (PicStartedMsg.effective_threads と同じ趣旨、prompts/115)。
+  // linear_solver="direct" のときも値は入るが、spsolve が並列化されないため意味を持たない。
+  // optional なのは PicStartedMsg.effective_threads と同じ理由 (古いバックエンド互換)
+  effective_threads?: number;
 }
 
 // フレームは phi/n_e/n_i/t_e すべて全節点長の配列 (fluid2d.py _make_frame と同じ規約。

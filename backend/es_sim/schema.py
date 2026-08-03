@@ -680,6 +680,18 @@ class Fluid2dSettings(BaseModel):
     phase_bins: int = Field(0, ge=0)
     # seed は不要 (流体は決定論的で乱数を使わない)
 
+    # ---- 陰的線形ソルバー (prompts/115、毎ステップの spsolve 3本が実測93%を占めていた
+    #      プロファイルへの対応) ----------------------------------------------------
+    # "iterative" (既定): numba 並列 (行並列 matvec) の Jacobi-BiCGSTAB。反復法の matvec は
+    #   SuperLU の直接分解と違って完全に並列化でき、しかも行並列がビット決定論を保てる。
+    #   収束しなかった場合は自動的に spsolve (direct) へフォールバックする (堅牢性優先)。
+    # "direct": 従来の scipy.sparse.linalg.spsolve (SuperLU の都度分解)。比較・検証用に残す。
+    linear_solver: Literal["iterative", "direct"] = "iterative"
+    # 陰的反復ソルバーの並列スレッド数 (numba の matvec に使う)。0=自動選択
+    # (pic.py の _auto_thread_cap と同じ式: max(2, min(16, 論理コア数//2))。
+    # linear_solver="direct" のときは無効 (spsolve は並列化しない、docstring 参照)
+    threads: int = Field(0, ge=0, le=128)
+
 
 # ---- VHF 定在波 (非線形径方向伝送線路モデル、prompts/101) -----------------------------
 

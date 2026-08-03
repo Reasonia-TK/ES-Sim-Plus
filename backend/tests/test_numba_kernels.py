@@ -684,3 +684,110 @@ def test_numba_fallback_smoke(monkeypatch):
     )
     assert np.array_equal(elem, elem_ref)
     assert np.array_equal(absorbed, abs_ref)
+
+
+# ---- 陰的流体ソルバー用の並列反復法 (csr_matvec_parallel / bicgstab、prompts/115) ------
+
+
+def _random_diag_dominant_csr(n: int, seed: int):
+    """対角優位なランダム CSR 行列 (fluid2d.py の M=V/dt+K を模した性質) を作る。"""
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(seed)
+    dense = rng.uniform(-1.0, 1.0, size=(n, n))
+    dense[np.abs(dense) < 0.6] = 0.0  # 疎にする
+    # 対角優位にする (BiCGSTAB がJacobi前処理だけで収束する条件、fluid2d.py と同じ性質)
+    np.fill_diagonal(dense, np.abs(dense).sum(axis=1) + rng.uniform(1.0, 2.0, size=n))
+    m = sp.csr_matrix(dense)
+    return m
+
+
+@requires_numba
+def test_csr_matvec_parallel_matches_scipy():
+    """csr_matvec_parallel (numba 行並列) が scipy の csr@x と一致する (数値的に)。"""
+    m = _random_diag_dominant_csr(200, seed=1)
+    rng = np.random.default_rng(2)
+    x = rng.uniform(-1.0, 1.0, size=m.shape[0])
+    out = nk.csr_matvec_parallel(m.indptr, m.indices, m.data, x)
+    expected = m @ x
+    np.testing.assert_allclose(out, expected, rtol=1e-10, atol=1e-12)
+
+
+@requires_numba
+def test_csr_matvec_parallel_threads_bit_identical():
+    """threads=1 と threads=2 で csr_matvec_parallel の出力がビット同一 (np.array_equal)。
+
+    行 i の内積は担当スレッドが常に昇順 k で逐次積和し、他の行の値を読まないため、
+    スレッドへの行の割り当て方 (スケジューリング) が変わっても各行の演算列は
+    不変 — allclose ではなく array_equal で厳密に検証する (規約どおり)。
+    """
+    m = _random_diag_dominant_csr(500, seed=3)
+    rng = np.random.default_rng(4)
+    x = rng.uniform(-1.0, 1.0, size=m.shape[0])
+
+    previous_threads = nk.numba.get_num_threads()
+    try:
+        nk.set_num_threads(1)
+        out1 = nk.csr_matvec_parallel(m.indptr, m.indices, m.data, x)
+        nk.set_num_threads(min(2, nk.numba.config.NUMBA_NUM_THREADS))
+        out2 = nk.csr_matvec_parallel(m.indptr, m.indices, m.data, x)
+    finally:
+        nk.set_num_threads(previous_threads)
+
+    assert np.array_equal(out1, out2)
+
+
+def test_bicgstab_solves_small_diagonally_dominant_system():
+    """既知解を持つ対角優位な系を Jacobi-BiCGSTAB が rtol=1e-10 まで収束させる。"""
+    m = _random_diag_dominant_csr(150, seed=5).tocsr()
+    rng = np.random.default_rng(6)
+    x_true = rng.uniform(-1.0, 1.0, size=m.shape[0])
+    b = m @ x_true
+    diag_inv = 1.0 / m.diagonal()
+    x0 = np.zeros_like(b)
+
+    x, n_iter, converged = nk.bicgstab(
+        m.indptr, m.indices, m.data, b, x0, rtol=1e-10, atol=1e-300, max_iter=500, diag_inv=diag_inv,
+    )
+    assert converged
+    assert n_iter > 0
+    np.testing.assert_allclose(x, x_true, rtol=1e-6, atol=1e-8)
+
+
+def test_bicgstab_reports_nonconvergence_when_max_iter_is_zero():
+    """max_iter=0 なら (初期残差が許容誤差を超える限り) 必ず未収束を報告する。"""
+    m = _random_diag_dominant_csr(50, seed=7).tocsr()
+    rng = np.random.default_rng(8)
+    x_true = rng.uniform(-1.0, 1.0, size=m.shape[0])
+    b = m @ x_true
+    x0 = np.zeros_like(b)  # 真の解と異なる初期値なので残差は非零
+
+    x, n_iter, converged = nk.bicgstab(
+        m.indptr, m.indices, m.data, b, x0, rtol=1e-10, atol=1e-300, max_iter=0,
+    )
+    assert not converged
+    assert n_iter == 0
+    assert np.all(np.isfinite(x))
+
+
+def test_csr_matvec_and_bicgstab_numpy_fallback_smoke(monkeypatch):
+    """HAVE_NUMBA=False でも csr_matvec_parallel/bicgstab が正しく解を返す
+    (scipy の csr@x へフォールバックする経路のスモークテスト、prompts/115)。
+    """
+    monkeypatch.setattr(nk, "HAVE_NUMBA", False)
+    m = _random_diag_dominant_csr(80, seed=9).tocsr()
+    rng = np.random.default_rng(10)
+    x_true = rng.uniform(-1.0, 1.0, size=m.shape[0])
+    b = m @ x_true
+    diag_inv = 1.0 / m.diagonal()
+    x0 = np.zeros_like(b)
+
+    out = nk.csr_matvec_parallel(m.indptr, m.indices, m.data, x_true)
+    np.testing.assert_allclose(out, m @ x_true, rtol=1e-10, atol=1e-12)
+
+    x, n_iter, converged = nk.bicgstab(
+        m.indptr, m.indices, m.data, b, x0, rtol=1e-10, atol=1e-300, max_iter=500, diag_inv=diag_inv,
+    )
+    assert converged
+    assert n_iter > 0
+    np.testing.assert_allclose(x, x_true, rtol=1e-6, atol=1e-8)
