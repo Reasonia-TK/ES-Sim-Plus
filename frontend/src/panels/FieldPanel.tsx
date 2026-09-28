@@ -300,10 +300,40 @@ function AmrEditor({
           ))}
         </select>
       </div>
+      <div className="field">
+        <Toggle
+          label="解に基づく適応細分化 (静電場)"
+          checked={cur.adaptive ?? false}
+          onChange={(v) => update({ adaptive: v })}
+        />
+      </div>
+      {(cur.adaptive ?? false) && (
+        <>
+          <div className="field">
+            <span className="label">許容誤差 (電位範囲比)</span>
+            <CommitNumberInput
+              value={cur.adapt_tol ?? 1e-3}
+              onCommit={(v) => {
+                if (v > 0 && v <= 0.5) update({ adapt_tol: v });
+              }}
+            />
+          </div>
+          <div className="field">
+            <span className="label">最大反復</span>
+            <CommitNumberInput
+              value={cur.adapt_iters ?? 3}
+              onCommit={(v) => {
+                if (Number.isInteger(v) && v >= 1 && v <= 8) update({ adapt_iters: v });
+              }}
+            />
+          </div>
+        </>
+      )}
       <div className="hint">
         境界近傍は最大レベルまで、下の矩形は指定レベルまで格子幅を 1/2 ずつ細かくします
-        (隣り合うセルのレベル差は 1 以下)。静電場 (Solve・プロファイル) で有効で、CPU の
-        代数マルチグリッドで解きます。PIC は基本格子 (一様) で計算します。
+        (隣り合うセルのレベル差は 1 以下)。静電場は代数マルチグリッド (GPU があれば GPU) で、
+        PIC も同じ細分化格子の上で解きます。適応細分化は Solve 時に誤差の大きい所を最大レベルまで
+        自動で細かくします (静電場のみ。Mesh ボタンの表示は適応前の格子です)。
       </div>
       <div className="collector-list">
         {regions.length === 0 && <div className="muted">(細分化矩形なし)</div>}

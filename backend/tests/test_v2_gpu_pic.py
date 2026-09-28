@@ -99,13 +99,15 @@ def test_energy_conservation():
     assert np.max(np.abs(total - total[0])) / total[0] < 0.05
 
 
-def test_amr_settings_are_reported_as_unsupported_for_pic():
-    """mesh.amr (prompts/121) は静電場のみ: PIC は基本格子で計算し、その旨を警告する。"""
-    p = _oscillation_project(10, n_macro=2000)
-    assert not any("AMR" in w for w in _sim(p).warnings)
-    d = p.model_dump()
-    d["mesh"]["amr"] = {"max_level": 2}
-    assert any("AMR" in w for w in _sim(Project.model_validate(d)).warnings)
+def test_amr_settings_select_amr_engine_only_when_refinement_happens():
+    """mesh.amr (prompts/122): 細分化が起きる設定なら AMR 階層の PIC、起きなければ一様格子のまま。"""
+    d = _oscillation_project(10, n_macro=2000).model_dump()
+    d["mesh"]["amr"] = {"max_level": 2}            # 導体・誘電体が無いので境界細分化のタグが無い
+    assert _sim(Project.model_validate(d)).amr is None
+    d["mesh"]["amr"] = {"max_level": 1, "regions": [{"p1": [0.002, 0.01], "p2": [0.008, 0.02], "level": 1}]}
+    sim = _sim(Project.model_validate(d))
+    assert sim.amr is not None and sim.amr.hier.n_levels == 2
+    assert not any("AMR" in w for w in sim.warnings)
 
 
 # ---- 3, 4. MCC ------------------------------------------------------------------------

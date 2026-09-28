@@ -87,6 +87,11 @@ class AmrSpec:
     buffer_cells: int = 2
     blocking_factor: int = 8
     regions: tuple = ()      # ((x0, y0, x1, y1, level), ...)
+    # 解に基づく適応細分化 (静電場、prompts/122): 求解 → 二階差分の誤差指標 → 細分化 を最大
+    # adapt_iters 回。指標が adapt_tol × (電位の範囲) を超える葉セルを max_level まで細かくする
+    adaptive: bool = False
+    adapt_tol: float = 1e-3
+    adapt_iters: int = 3
 
     @classmethod
     def from_settings(cls, amr) -> "AmrSpec":
@@ -103,13 +108,20 @@ class AmrSpec:
             buffer_cells=int(amr.buffer_cells),
             blocking_factor=int(amr.blocking_factor),
             regions=tuple(regs),
+            adaptive=bool(getattr(amr, "adaptive", False)),
+            adapt_tol=float(getattr(amr, "adapt_tol", 1e-3)),
+            adapt_iters=int(getattr(amr, "adapt_iters", 3)),
         )
 
 
 class AmrHierarchy:
-    """ブロック構造の細分化階層。レベル 0 は base (domain 全体の一様格子)。"""
+    """ブロック構造の細分化階層。レベル 0 は base (domain 全体の一様格子)。
 
-    def __init__(self, model: GeometryModel, base: CartesianGrid, spec: AmrSpec):
+    extra_tags: レベル l (< max_level) のセル解像度の追加タグ (適応細分化の誤差指標など)。
+    """
+
+    def __init__(self, model: GeometryModel, base: CartesianGrid, spec: AmrSpec,
+                 extra_tags: list[np.ndarray] | None = None):
         self.model = model
         self.base = base
         self.spec = spec
@@ -139,6 +151,8 @@ class AmrHierarchy:
                     j1 = min(g.ny, int(math.ceil((y1 - g.y0) / g.dy)))
                     if i1 > i0 and j1 > j0:
                         tags[j0:j1, i0:i1] = True
+            if extra_tags is not None and lvl < len(extra_tags) and extra_tags[lvl] is not None:
+                tags |= extra_tags[lvl]
             tags &= region_cells
             b = _block_any(tags, bf) & region_blocks
             refined.append(b)

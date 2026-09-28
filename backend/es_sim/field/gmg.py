@@ -133,6 +133,26 @@ class _CudaBackend:
                               i(fx), i(fy), i(lf.px), i(lf.py)))
 
 
+def dense_inverse(a: np.ndarray, singular: bool) -> np.ndarray:
+    """対称な密行列の逆行列。特異 (零空間 = 定数、全周期/Neumann) なら擬似逆行列。
+
+    擬似逆行列は SVD (4096 元で ~20 s) の代わりに、零空間 u = 1/√n を持ち上げた正則行列の逆から
+    A⁺ = (A + α u uᵀ)⁻¹ − u uᵀ/α で求める (A u = 0 の対称半正定値行列で厳密)。零空間が定数で
+    ない場合 (想定外) は SVD にフォールバックする。
+    """
+    if not singular:
+        return np.linalg.inv(a)
+    n = a.shape[0]
+    if n == 0:
+        return np.zeros((0, 0))
+    u = np.full(n, 1.0 / np.sqrt(n))
+    scale = float(np.max(np.abs(np.diag(a)))) or 1.0
+    if np.max(np.abs(a @ u)) > 1e-9 * scale:
+        return np.linalg.pinv(a)
+    uu = np.outer(u, u)
+    return np.linalg.inv(a + scale * uu) - uu / scale
+
+
 def _dense_operator(op: LevelOperator) -> tuple[np.ndarray, np.ndarray]:
     """小さなレベルの演算子を未知節点だけの密行列にする。戻り値: (未知節点の平坦番号, A)。"""
     g = op.grid
@@ -217,7 +237,7 @@ class GMGSolver:
         idx, a = _dense_operator(ops[-1])
         self._bottom_idx = dev.asarray(idx, dtype=np.int64)
         if idx.size:
-            inv = np.linalg.pinv(a) if self.singular else np.linalg.inv(a)
+            inv = dense_inverse(a, self.singular)
         else:
             inv = np.zeros((0, 0))
         self._bottom_inv = dev.asarray(inv, dtype=np.float64)
@@ -283,7 +303,7 @@ class GMGSolver:
         self.direct = self.finest.n_unknowns <= DENSE_DIRECT_MAX
         if self.direct:
             idx, a = _dense_operator(self.finest)
-            inv = np.linalg.pinv(a) if self.singular else np.linalg.inv(a)
+            inv = dense_inverse(a, self.singular)
             self._direct_idx = cp.asarray(idx.astype(np.int64))
             self._direct_inv = cp.asarray(inv)
 

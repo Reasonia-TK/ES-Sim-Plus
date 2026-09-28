@@ -286,6 +286,44 @@ def test_dielectric_cylinder_with_interface_refinement():
     assert s.n_unknowns < 257 * 257 / 10
 
 
+# ---- 解に基づく適応細分化 (prompts/122) ----------------------------------------------------
+
+
+def test_adaptive_refinement_concentrates_on_space_charge():
+    """接地平板間の電荷円板: 適応細分化は電荷の周りだけを最大レベルまで細かくし、誤差指標が減る。"""
+    blob = [{"id": "q", "type": "charge", "rho": 1e-6, "shape": {"kind": "circle", "center": [0.05, 0.025], "radius": 0.006}}]
+    bnd = [{"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": 0.0}]
+    p = _project(PLATES, blob, bnd, h=0.1 / 32, amr={"max_level": 3, "refine_boundaries": False,
+                                                    "adaptive": True, "adapt_tol": 1e-3, "adapt_iters": 4})
+    s = solve_electrostatic_amr(p, device="cpu")
+    hist = s.adapt_history
+    assert s.hier.n_levels == 4 and len(hist) >= 3
+    assert all(a["eta_rel"] > b["eta_rel"] for a, b in zip(hist, hist[1:]))
+    # 最細レベルは電荷の近傍だけ
+    for x0, y0, x1, y1 in s.hier.level_boxes(3):
+        assert x0 >= 0.05 - 0.0125 and x1 <= 0.05 + 0.0125
+    # 細かい一様格子 (最細と同じ幅) の解との差は、適応なし (基本格子) より小さい
+    ref = solve_electrostatic(_project(PLATES, blob, bnd, h=0.1 / 256), device="cpu")
+    X, Y = np.meshgrid(ref.grid.xs, ref.grid.ys)
+    coarse = solve_electrostatic_amr(_project(PLATES, blob, bnd, h=0.1 / 32), spec=AmrSpec(max_level=0), device="cpu")
+    scale = float(np.max(np.abs(ref.phi)))
+    err = lambda sol: float(np.nanmax(np.abs(sol.sample(X.ravel(), Y.ravel())[0] - ref.phi.ravel()))) / scale  # noqa: E731
+    assert err(s) < err(coarse) / 5
+    assert s.n_unknowns < ref.grid.n_nodes / 3
+
+
+def test_adaptive_refinement_on_coax_beats_boundary_only_refinement():
+    c_exact = 2 * math.pi * EPS0 / math.log(4.0)
+    bnd = solve_electrostatic_amr(_coax(0.1 / 64), spec=AmrSpec(max_level=3), device="cpu")
+    ada = solve_electrostatic_amr(_coax(0.1 / 64), spec=AmrSpec(max_level=3, refine_boundaries=False, adaptive=True,
+                                                               adapt_tol=1e-3, adapt_iters=4), device="cpu")
+    err_b = abs(bnd.capacitance - c_exact) / c_exact
+    err_a = abs(ada.capacitance - c_exact) / c_exact
+    assert ada.n_unknowns < 0.6 * bnd.n_unknowns
+    assert err_a < err_b and err_a < 1e-4
+    assert _coax_err(ada.nodes, ada.phi_display) < 3e-4
+
+
 # ---- 周期・特異 ----------------------------------------------------------------------------
 
 

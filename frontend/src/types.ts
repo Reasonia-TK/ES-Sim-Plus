@@ -30,6 +30,10 @@ export interface AmrSettings {
   buffer_cells?: number; // 境界からのセル数 (各レベルのセル単位、既定 2)
   blocking_factor?: number; // ブロックの一辺のセル数 (既定 8)
   regions?: AmrRegion[];
+  // 解に基づく適応細分化 (静電場のみ、prompts/122): 求解 → 誤差指標 (≈ h²φ'') → 細分化を繰り返す
+  adaptive?: boolean;
+  adapt_tol?: number; // 電位の範囲に対する許容誤差 (既定 1e-3)
+  adapt_iters?: number; // 最大反復回数 (既定 3)
 }
 
 // 円領域のパラメトリック形状 (中心+半径)。メッシュ生成時にバックエンド側で多角形化する
@@ -1355,8 +1359,8 @@ export interface Project {
     local_edge_sizes?: EdgeMeshSize[];
     // "cartesian" (prompts/119): v2 エンジン (直交格子 + 埋め込み境界)。静電場は GMG-PCG、PIC は GPU
     mode?: "unstructured" | "structured" | "cartesian";
-    // cartesian モードの局所細分化 (prompts/121)。null/undefined = 細分化なし。静電場 (Solve・
-    // プロファイル) のみ対応し、PIC は基本格子 (一様) で計算する
+    // cartesian モードの局所細分化 (prompts/121, 122)。null/undefined = 細分化なし。静電場 (Solve・
+    // プロファイル) と PIC に適用 (軌道追跡・DSMC・流体は基本格子)。適応細分化は静電場のみ
     amr?: AmrSettings | null;
   };
   solver?: { backend: "numpy" | "cupy" | "auto" };

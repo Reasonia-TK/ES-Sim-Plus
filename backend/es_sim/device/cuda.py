@@ -50,10 +50,14 @@ def _read_source(path: Path, seen: set[str] | None = None) -> str:
 
 
 @lru_cache(maxsize=None)
-def load_module(name: str) -> cp.RawModule:
-    """``kernels/<name>.cu`` を RawModule としてコンパイル・ロードする (プロセス内キャッシュ)。"""
+def load_module(name: str, defines: tuple[str, ...] = ()) -> cp.RawModule:
+    """``kernels/<name>.cu`` を RawModule としてコンパイル・ロードする (プロセス内キャッシュ)。
+
+    defines: プリプロセッサマクロ (例 ``("ES_AMR",)``)。同じソースを別の変種としてコンパイルする
+    (pic.cu の一様格子版と AMR 版など)。変種ごとに別モジュールになるので関数名は同じでよい。
+    """
     src = _read_source(KERNEL_DIR / f"{name}.cu")
-    mod = cp.RawModule(code=src, options=_OPTIONS)
+    mod = cp.RawModule(code=src, options=_OPTIONS + tuple(f"-D{d}" for d in defines))
     mod.compile()  # 構文エラーをロード時点で顕在化させる
     return mod
 

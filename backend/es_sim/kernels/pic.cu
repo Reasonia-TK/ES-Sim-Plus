@@ -59,6 +59,70 @@ __device__ __forceinline__ unsigned long long es_ord(double v)
 }
 
 // ---------------------------------------------------------------------------
+// Grid variants. This source is compiled twice: for the uniform Cartesian grid
+// (default) and, with -DES_AMR, for the block-structured AMR composite grid
+// (prompts/122). The AMR variant appends five table pointers to every kernel
+// that maps positions to nodes (ES_GRID_PARAMS) and finds the leaf cell with
+// es_locate(); node arrays are then indexed by composite node number.
+//   amr_dd  : x0, y0, 1/dx0, 1/dy0 (level 0)
+//   amr_di  : L, bf, nx0, ny0, then per level l: offset_l, nbx_l
+//   amr_ref : per level, per block (row-major): 1 if the block is refined
+//   amr_bid : per level, per block: block number (-1 outside the level region)
+//   amr_tab : per block, (bf+1)^2 composite node numbers of its grid points
+// ---------------------------------------------------------------------------
+#ifdef ES_AMR
+#define ES_GRID_PARAMS , const double* __restrict__ amr_dd, const long long* __restrict__ amr_di, \
+    const unsigned char* __restrict__ amr_ref, const int* __restrict__ amr_bid, const int* __restrict__ amr_tab
+#define ES_GRID_ARGS , amr_dd, amr_di, amr_ref, amr_bid, amr_tab
+
+// Leaf cell of (px, py): its 4 corner nodes (00, 10, 01, 11), bilinear weights
+// and a cell number (block * bf^2 + local). Coordinates are doubled exactly at
+// each level, so the child index is always consistent with the parent cell.
+__device__ __forceinline__ void es_locate(double px, double py, int* nd, double* wx, double* wy,
+                                          long long* cell ES_GRID_PARAMS)
+{
+    const int L = (int)amr_di[0], bf = (int)amr_di[1];
+    int nx = (int)amr_di[2], ny = (int)amr_di[3];
+    double fx = (px - amr_dd[0]) * amr_dd[2];
+    double fy = (py - amr_dd[1]) * amr_dd[3];
+    int lvl = 0;
+    for (;;) {
+        int i = (int)floor(fx), j = (int)floor(fy);
+        i = i < 0 ? 0 : (i > nx - 1 ? nx - 1 : i);
+        j = j < 0 ? 0 : (j > ny - 1 ? ny - 1 : j);
+        const long long off = amr_di[4 + 2 * lvl];
+        const int nbx = (int)amr_di[5 + 2 * lvl];
+        const int bi = i / bf, bj = j / bf;
+        const long long bk = off + (long long)bj * nbx + bi;
+        if (lvl < L && amr_ref[bk]) {
+            ++lvl;
+            fx *= 2.0;
+            fy *= 2.0;
+            nx *= 2;
+            ny *= 2;
+            continue;
+        }
+        const long long b = (long long)amr_bid[bk];
+        const int a = i - bi * bf, c = j - bj * bf;
+        const int s = bf + 1;
+        const int* t = amr_tab + b * s * s;
+        nd[0] = t[c * s + a];
+        nd[1] = t[c * s + a + 1];
+        nd[2] = t[(c + 1) * s + a];
+        nd[3] = t[(c + 1) * s + a + 1];
+        const double ux = fx - i, uy = fy - j;
+        *wx = ux < 0.0 ? 0.0 : (ux > 1.0 ? 1.0 : ux);
+        *wy = uy < 0.0 ? 0.0 : (uy > 1.0 ? 1.0 : uy);
+        *cell = b * bf * bf + c * bf + a;
+        return;
+    }
+}
+#else
+#define ES_GRID_PARAMS
+#define ES_GRID_ARGS
+#endif
+
+// ---------------------------------------------------------------------------
 // Per-step bookkeeping: time, flags, phase bin, zeroed diagnostics.
 // ---------------------------------------------------------------------------
 extern "C" __global__ void begin_step(double* __restrict__ prm, unsigned long long* __restrict__ cnt,
@@ -315,15 +379,24 @@ extern "C" __global__ void push(double* __restrict__ x, double* __restrict__ y,
                                 const double inv_dy, const int nx, const int ny,
                                 const double qm, const double dt_s, const int rz, const int ridx,
                                 const int use_b, const double* __restrict__ R, const double half_m,
-                                const double* __restrict__ prm, double* __restrict__ ke_out)
+                                const double* __restrict__ prm, double* __restrict__ ke_out ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
     const bool active = (species == 0) || (prm[P_ION_STEP] != 0.0);
     double ke = 0.0;
     if (active && p < n && w[p] != 0.0) {
-        int i, j;
         double wx, wy;
+#ifdef ES_AMR
+        int nd[4];
+        long long cell;
+        es_locate(x[p], y[p], nd, &wx, &wy, &cell ES_GRID_ARGS);
+        const double w00 = (1.0 - wx) * (1.0 - wy), w10 = wx * (1.0 - wy);
+        const double w01 = (1.0 - wx) * wy, w11 = wx * wy;
+        const double Ex = w00 * ex[nd[0]] + w10 * ex[nd[1]] + w01 * ex[nd[2]] + w11 * ex[nd[3]];
+        const double Ey = w00 * ey[nd[0]] + w10 * ey[nd[1]] + w01 * ey[nd[2]] + w11 * ey[nd[3]];
+#else
+        int i, j;
         es_cell(x[p], y[p], x0, y0, inv_dx, inv_dy, nx, ny, &i, &j, &wx, &wy);
         const int s = nx + 1;
         const int k = j * s + i;
@@ -331,6 +404,7 @@ extern "C" __global__ void push(double* __restrict__ x, double* __restrict__ y,
         const double w01 = (1.0 - wx) * wy, w11 = wx * wy;
         const double Ex = w00 * ex[k] + w10 * ex[k + 1] + w01 * ex[k + s] + w11 * ex[k + s + 1];
         const double Ey = w00 * ey[k] + w10 * ey[k + 1] + w01 * ey[k + s] + w11 * ey[k + s + 1];
+#endif
         const double qmdt = qm * dt_s;
         const double ux = vx[p], uy = vy[p], uz = vz[p];
         if (!rz) {
@@ -403,10 +477,19 @@ __device__ __forceinline__ bool es_in_polygon(double px, double py, const double
 
 __device__ __forceinline__ void es_dep_point(double* __restrict__ out, double px, double py, double q,
                                              double x0, double y0, double inv_dx, double inv_dy,
-                                             int nx, int ny, int pxp, int pyp)
+                                             int nx, int ny, int pxp, int pyp ES_GRID_PARAMS)
 {
-    int i, j;
     double wx, wy;
+#ifdef ES_AMR
+    int nd[4];
+    long long cell;
+    es_locate(px, py, nd, &wx, &wy, &cell ES_GRID_ARGS);
+    atomicAdd(out + nd[0], q * (1.0 - wx) * (1.0 - wy));
+    atomicAdd(out + nd[1], q * wx * (1.0 - wy));
+    atomicAdd(out + nd[2], q * (1.0 - wx) * wy);
+    atomicAdd(out + nd[3], q * wx * wy);
+#else
+    int i, j;
     es_cell(px, py, x0, y0, inv_dx, inv_dy, nx, ny, &i, &j, &wx, &wy);
     const int s = nx + 1;
     int i1 = i + 1, j1 = j + 1;
@@ -416,6 +499,7 @@ __device__ __forceinline__ void es_dep_point(double* __restrict__ out, double px
     atomicAdd(out + j * s + i1, q * wx * (1.0 - wy));
     atomicAdd(out + j1 * s + i, q * (1.0 - wx) * wy);
     atomicAdd(out + j1 * s + i1, q * wx * wy);
+#endif
 }
 
 extern "C" __global__ void boundary(
@@ -437,7 +521,7 @@ extern "C" __global__ void boundary(
     const int n_coll, const double* __restrict__ coll, const double mass,
     double* __restrict__ rec_e, double* __restrict__ rec_a, double* __restrict__ rec_w,
     unsigned long long* __restrict__ rec_n, double* __restrict__ coll_w, const long long rec_cap,
-    const double* __restrict__ prm, const unsigned long long seed)
+    const double* __restrict__ prm, const unsigned long long seed ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
@@ -593,7 +677,8 @@ extern "C" __global__ void boundary(
 
     // (a) dielectric surface charge (RHS units: /2pi in RZ)
     if (diel >= 0)
-        es_dep_point(qsurf, hx, hy, qw_scale * wp * two_pi_inv, X0, Y0, inv_dx, inv_dy, nx, ny, pxp, pyp);
+        es_dep_point(qsurf, hx, hy, qw_scale * wp * two_pi_inv, X0, Y0, inv_dx, inv_dy, nx, ny, pxp, pyp
+                     ES_GRID_ARGS);
 
     // (b) IEDF/IADF collectors (ions, averaging window)
     if (species == 1 && n_coll > 0 && prm[P_ACCUM] != 0.0) {
@@ -633,7 +718,7 @@ extern "C" __global__ void boundary(
                 atomicAdd(cnt + C_SEE_EV, 1ull);
                 if (diel >= 0)  // the surface loses an electron: +e*w
                     es_dep_point(qsurf, hx, hy, 1.602176634e-19 * wp * two_pi_inv, X0, Y0, inv_dx, inv_dy,
-                                 nx, ny, pxp, pyp);
+                                 nx, ny, pxp, pyp ES_GRID_ARGS);
             } else {
                 atomicAdd(cnt + C_OVERFLOW, 1ull);
             }
@@ -662,7 +747,8 @@ extern "C" __global__ void deposit(const double* __restrict__ x, const double* _
                                    double* __restrict__ out2, const int use_out2, const long long n_nodes,
                                    const int gate, const double* __restrict__ prm,
                                    const double x0, const double y0, const double inv_dx,
-                                   const double inv_dy, const int nx, const int ny, const int px, const int py)
+                                   const double inv_dy, const int nx, const int ny, const int px, const int py
+                                   ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (gate == 1 && prm[P_ACCUM] == 0.0) return;
@@ -673,10 +759,12 @@ extern "C" __global__ void deposit(const double* __restrict__ x, const double* _
     double v = wp;
     if (mode == 1) v *= (vx[p] * vx[p] + vy[p] * vy[p] + vz[p] * vz[p]);
     v *= scale;
-    es_dep_point(out, x[p], y[p], v, x0, y0, inv_dx, inv_dy, nx, ny, px, py);
+    es_dep_point(out, x[p], y[p], v, x0, y0, inv_dx, inv_dy, nx, ny, px, py ES_GRID_ARGS);
     if (use_out2) {
         const int bin = (int)prm[P_BIN];
-        if (bin >= 0) es_dep_point(out2 + (long long)bin * n_nodes, x[p], y[p], v, x0, y0, inv_dx, inv_dy, nx, ny, px, py);
+        if (bin >= 0)
+            es_dep_point(out2 + (long long)bin * n_nodes, x[p], y[p], v, x0, y0, inv_dx, inv_dy, nx, ny, px, py
+                         ES_GRID_ARGS);
     }
 }
 
@@ -699,15 +787,22 @@ extern "C" __global__ void deposit_cell(const double* __restrict__ x, const doub
                                         const double* __restrict__ w, const unsigned long long* __restrict__ cnt,
                                         const int species, double* __restrict__ out, const double x0,
                                         const double y0, const double inv_dx, const double inv_dy,
-                                        const int nx, const int ny)
+                                        const int nx, const int ny ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
     if (p >= n || w[p] == 0.0) return;
-    int i, j;
     double wx, wy;
+#ifdef ES_AMR
+    int nd[4];
+    long long cell;
+    es_locate(x[p], y[p], nd, &wx, &wy, &cell ES_GRID_ARGS);
+    atomicAdd(out + cell, w[p]);
+#else
+    int i, j;
     es_cell(x[p], y[p], x0, y0, inv_dx, inv_dy, nx, ny, &i, &j, &wx, &wy);
     atomicAdd(out + j * nx + i, w[p]);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -778,7 +873,7 @@ extern "C" __global__ void mcc_electron(
     const unsigned long long seed,
     double* __restrict__ acc_ion, double* __restrict__ cyc_ion, const int use_cyc, const long long n_nodes,
     const double x0, const double y0, const double inv_dx, const double inv_dy,
-    const int nx, const int ny, const int pxp, const int pyp)
+    const int nx, const int ny, const int pxp, const int pyp ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     const long long n = (long long)cnt[C_SNAP_E];
@@ -845,10 +940,11 @@ extern "C" __global__ void mcc_electron(
         ix[ki] = xp; iy[ki] = yp; ivx[ki] = vth_gas * g0; ivy[ki] = vth_gas * g1; ivz[ki] = vth_gas * g2; iw[ki] = wp;
         atomicAdd(cnt + C_ION_EV, 1ull);
         if (prm[P_ACCUM] != 0.0) {
-            es_dep_point(acc_ion, xp, yp, wp, x0, y0, inv_dx, inv_dy, nx, ny, pxp, pyp);
+            es_dep_point(acc_ion, xp, yp, wp, x0, y0, inv_dx, inv_dy, nx, ny, pxp, pyp ES_GRID_ARGS);
             const int bin = (int)prm[P_BIN];
             if (use_cyc && bin >= 0)
-                es_dep_point(cyc_ion + (long long)bin * n_nodes, xp, yp, wp, x0, y0, inv_dx, inv_dy, nx, ny, pxp, pyp);
+                es_dep_point(cyc_ion + (long long)bin * n_nodes, xp, yp, wp, x0, y0, inv_dx, inv_dy, nx, ny, pxp, pyp
+                             ES_GRID_ARGS);
         }
     } else {
         // capacity exceeded: keep counts consistent by marking the slots as dead
@@ -1007,6 +1103,113 @@ extern "C" __global__ void eedf_hist(const double* __restrict__ x, const double*
         }
     }
 }
+
+// ===========================================================================
+// AMR composite-grid field kernels (prompts/122), compiled only with ES_AMR.
+// Matrices are CSR (int32 indices) over an extended column space: columns
+// below the base size refer to a node/unknown vector, the remaining columns to
+// the Dirichlet group potentials vg.
+// ===========================================================================
+#ifdef ES_AMR
+// b[r] = sum_k a[k] * (col < N ? qs + rho + qsurf : vg[col - N])   (b_c = P^T q + Coup_c V)
+extern "C" __global__ void amr_rhs(double* __restrict__ b, const int* __restrict__ ip, const int* __restrict__ ix,
+                                   const double* __restrict__ a, const double* __restrict__ qs,
+                                   const double* __restrict__ rho, const double* __restrict__ qsurf,
+                                   const double* __restrict__ vg, const int n_nodes, const int n_rows)
+{
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= n_rows) return;
+    double s = 0.0;
+    for (int k = ip[r]; k < ip[r + 1]; ++k) {
+        const int c = ix[k];
+        s += a[k] * (c < n_nodes ? qs[c] + rho[c] + qsurf[c] : vg[c - n_nodes]);
+    }
+    b[r] = s;
+}
+
+// phi[r] = sum_k a[k] * (col < nC ? xc[col] : vg[col - nC])   (phi_all = P_node x_c + C_node V); min/max
+extern "C" __global__ void amr_fill_phi(double* __restrict__ phi, const int* __restrict__ ip,
+                                        const int* __restrict__ ix, const double* __restrict__ a,
+                                        const double* __restrict__ xc, const double* __restrict__ vg,
+                                        const int n_c, const int n_nodes, unsigned long long* __restrict__ cnt)
+{
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= n_nodes) return;
+    double s = 0.0;
+    for (int k = ip[r]; k < ip[r + 1]; ++k) {
+        const int c = ix[k];
+        s += a[k] * (c < n_c ? xc[c] : vg[c - n_c]);
+    }
+    phi[r] = s;
+    const unsigned long long o = es_ord(s);
+    atomicMin(cnt + C_PHIMIN, o);
+    atomicMax(cnt + C_PHIMAX, o);
+}
+
+// Node field: ex = Gx [phi; vg], ey = Gy [phi; vg]  (es_sim/amr/fieldops.py)
+extern "C" __global__ void amr_efield(double* __restrict__ ex, double* __restrict__ ey,
+                                      const int* __restrict__ gxp, const int* __restrict__ gxi,
+                                      const double* __restrict__ gxa, const int* __restrict__ gyp,
+                                      const int* __restrict__ gyi, const double* __restrict__ gya,
+                                      const double* __restrict__ phi, const double* __restrict__ vg,
+                                      const int n_nodes)
+{
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= n_nodes) return;
+    double sx = 0.0, sy = 0.0;
+    for (int k = gxp[r]; k < gxp[r + 1]; ++k) {
+        const int c = gxi[k];
+        sx += gxa[k] * (c < n_nodes ? phi[c] : vg[c - n_nodes]);
+    }
+    for (int k = gyp[r]; k < gyp[r + 1]; ++k) {
+        const int c = gyi[k];
+        sy += gya[k] * (c < n_nodes ? phi[c] : vg[c - n_nodes]);
+    }
+    ex[r] = sx;
+    ey[r] = sy;
+}
+
+// Discrete field energy over the composite edge list and Dirichlet couplings (x 1/2, 2 pi on the host)
+extern "C" __global__ void amr_edge_energy(const double* __restrict__ phi, const int* __restrict__ eu,
+                                           const int* __restrict__ ev, const double* __restrict__ eg,
+                                           const long long ne, const int* __restrict__ cu,
+                                           const int* __restrict__ cgrp, const double* __restrict__ cg,
+                                           const long long nc, const double* __restrict__ vg,
+                                           double* __restrict__ out)
+{
+    const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    double e = 0.0;
+    if (t < ne) {
+        const double d = phi[eu[t]] - phi[ev[t]];
+        e = eg[t] * d * d;
+    } else if (t < ne + nc) {
+        const long long u = t - ne;
+        const double d = phi[cu[u]] - vg[cgrp[u]];
+        e = cg[u] * d * d;
+    }
+    es_block_sum_atomic(e, out);
+}
+
+// Initial backward half kick of the in-plane velocity: v -= (q/m) E(x) dt/2
+extern "C" __global__ void kick_half(const double* __restrict__ x, const double* __restrict__ y,
+                                     double* __restrict__ vx, double* __restrict__ vy,
+                                     const double* __restrict__ w, const unsigned long long* __restrict__ cnt,
+                                     const int species, const double* __restrict__ ex,
+                                     const double* __restrict__ ey, const double qm_half_dt ES_GRID_PARAMS)
+{
+    const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
+    if (p >= n || w[p] == 0.0) return;
+    int nd[4];
+    long long cell;
+    double wx, wy;
+    es_locate(x[p], y[p], nd, &wx, &wy, &cell ES_GRID_ARGS);
+    const double w00 = (1.0 - wx) * (1.0 - wy), w10 = wx * (1.0 - wy);
+    const double w01 = (1.0 - wx) * wy, w11 = wx * wy;
+    vx[p] -= qm_half_dt * (w00 * ex[nd[0]] + w10 * ex[nd[1]] + w01 * ex[nd[2]] + w11 * ex[nd[3]]);
+    vy[p] -= qm_half_dt * (w00 * ey[nd[0]] + w10 * ey[nd[1]] + w01 * ey[nd[2]] + w11 * ey[nd[3]]);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Order-preserving compaction of live particles (w > 0), in three kernels:

@@ -20,6 +20,15 @@ server の /ws/pic からそのまま駆動できる (mesh.mode="cartesian" の�
   (前ステップ解から warm start、残差を定期監視して反復数を自動調整)。
 - 診断 (history) は GPU 上のリングバッファに書き、まとめてホストへ転送する。
 
+## AMR (prompts/122)
+
+mesh.amr で実際に細分化が起きるなら、AMR 階層の合成格子で同じステップを実行する
+(amr.pic_layout の表・行列と、kernels/pic.cu を -DES_AMR でコンパイルした変種)。
+粒子の所属セルはブロック表で O(レベル数) に求め (es_locate)、電荷は葉セルの 4 隅へ CIC で堆積、
+場は b_c = PTq [q; V] → GPU AMG-PCG (amr.gpu_solver) → φ = PC [x_c; V] → E = G [φ; V]
+(節点電場ステンシル、amr.fieldops) → 葉セルの CIC 補間。細分化が無ければ一様格子の経路と
+機械精度で一致する。粗細界面には運動量保存型でも自己力が残る (大きさは prompts/122)。
+
 ## 物理 (v1 と同じ所・違う所)
 
 同じ: 2d3v リープフロッグ (初期半ステップ後退キック)、一様 B の Boris 回転 (xy のみ)、
@@ -62,7 +71,7 @@ from ..geom.model import EPS0, GeometryModel
 from ..mcc import MccModel
 from ..particles import ME, MP, QE, _boris_matrix, b_vector
 from ..schema import Project
-from .geometry import HIT_CONDUCTOR, HIT_DIELECTRIC, ParticleGeometry, triangle_gradients
+from .geometry import HIT_CONDUCTOR, HIT_DIELECTRIC, DisplayMesh, ParticleGeometry, triangle_gradients
 
 MAX_FRAME_PARTICLES = 2000
 COLLECTOR_MAX_SAMPLES = 50000
@@ -167,31 +176,38 @@ class GpuPicSimulation:
         t_setup = time.perf_counter()
         self.model = model = GeometryModel(project)
         self.grid = grid = make_grid(model.domain, float(project.mesh.size))
+        # mesh.amr で実際に細分化が起きるなら AMR 階層の合成格子で解く (prompts/122)
+        self.amr = self._build_amr_layout(project, model, grid)
         with self._stream:
-            self.solver = GMGSolver(model, grid, dev)
-            self.solver.enable_async()
-        op = self.op = self.solver.finest
+            if self.amr is None:
+                self.solver = GMGSolver(model, grid, dev)
+                self.solver.enable_async()
+                op = self.op = self.solver.finest
+            else:
+                from ..amr.gpu_solver import AmgGpuSolver
+
+                op = self.op = self.amr.op
+                self.solver = AmgGpuSolver(op.A_c, dev, singular=op.singular)
         self.pgeo = ParticleGeometry(model, grid)
         self.ridx = model.radial_axis()
         self.rz = self.ridx is not None
         self._two_pi = 2.0 * math.pi if self.rz else 1.0
         self.warnings: list[str] = list(op.warnings)
-        amr = project.mesh.amr
-        if amr is not None and (amr.max_level > 0 or amr.regions):
-            self.warnings.append("PIC は局所細分化 (AMR) に未対応です: 基本格子 (一様) で計算します")
         self.effective_threads = 1
-        mod = load_module("pic")
-        self._k = {name: mod.get_function(name) for name in (
-            "begin_step", "end_step", "eval_groups", "rhs_base", "rhs_coupling", "fill_phi",
-            "efield_nodes", "edge_energy", "push", "boundary", "deposit", "accum_phi",
-            "deposit_cell", "vmax2", "numax_lookup", "mcc_electron", "mcc_ion", "history_row",
-            "sum_into", "eedf_hist", "compact_scan", "compact_scan_blocks", "compact_scatter",
-        )}
-        self._k_copy = self.solver._async["copy_vec"]
+        mod = load_module("pic", ("ES_AMR",) if self.amr is not None else ())
+        names = ["begin_step", "end_step", "eval_groups", "push", "boundary", "deposit", "accum_phi",
+                 "deposit_cell", "vmax2", "numax_lookup", "mcc_electron", "mcc_ion", "history_row",
+                 "sum_into", "eedf_hist", "compact_scan", "compact_scan_blocks", "compact_scatter"]
+        if self.amr is None:
+            names += ["rhs_base", "rhs_coupling", "fill_phi", "efield_nodes", "edge_energy"]
+        else:
+            names += ["amr_rhs", "amr_fill_phi", "amr_efield", "amr_edge_energy", "kick_half"]
+        self._k = {name: mod.get_function(name) for name in names}
+        self._k_copy = load_module("poisson").get_function("copy_vec")
 
         g = grid
-        self.n_nodes = g.n_nodes
-        self._shape = g.shape
+        self.n_nodes = g.n_nodes if self.amr is None else self.amr.n_nodes
+        self._shape = g.shape if self.amr is None else (self.amr.n_nodes,)
         self._inv_dx = 1.0 / g.dx
         self._inv_dy = 1.0 / g.dy
         self._px = int(model.periodic_x)
@@ -260,6 +276,38 @@ class GpuPicSimulation:
                 "v2 PIC (mesh.mode='cartesian') は次の機能に未対応です: " + "、".join(unsupported)
                 + " (v1 PIC を使う場合はメッシュを unstructured/structured にしてください)"
             )
+
+    @staticmethod
+    def _build_amr_layout(project: Project, model: GeometryModel, grid):
+        """mesh.amr が細分化を起こすなら AMR PIC の表 (amr.pic_layout)、それ以外は None。"""
+        amr = project.mesh.amr
+        if amr is None or (amr.max_level <= 0 and not amr.regions):
+            return None
+        from ..amr import AmrHierarchy, AmrSpec
+        from ..amr.pic_layout import build_pic_layout
+
+        hier = AmrHierarchy(model, grid, AmrSpec.from_settings(amr))
+        if hier.max_level == 0:
+            return None
+        return build_pic_layout(model, hier)
+
+    def _disp(self, a: np.ndarray) -> np.ndarray:
+        """節点値 (最後の軸) を表示用メッシュの節点へ。
+
+        AMR は表示節点 → 合成格子の節点。一様格子は同じ並びだが、周期境界の従属節点
+        (右端・上端) には堆積が入らない (主節点へ巻き戻す) ので主節点の値を写す。
+        """
+        if self.amr is not None:
+            return a[..., self.amr.disp_idx]
+        if not (self._px or self._py):
+            return a
+        g = self.grid
+        idx = np.arange((g.ny + 1) * (g.nx + 1)).reshape(g.ny + 1, g.nx + 1)
+        if self._px:
+            idx[:, g.nx] = idx[:, 0]
+        if self._py:
+            idx[g.ny, :] = idx[0, :]
+        return a[..., idx.ravel()]
 
     def _side_kinds(self) -> list[int]:
         """外周の粒子境界 [left, right, bottom, top]: 0 吸収、1 鏡面反射、2 周期。"""
@@ -338,29 +386,56 @@ class GpuPicSimulation:
         shp = self._shape
 
         # ---- 場・右辺 ----
-        coo = op.coupling.tocoo()
-        self._crow = cp.asarray(coo.row.astype(np.int64))
-        self._ccol = cp.asarray(coo.col.astype(np.int64))
-        self._cval = cp.asarray(coo.data.astype(np.float64))
-        self._nnz = int(coo.nnz)
-        self._q_static = cp.asarray(op.q_static)
         self._q_surf = cp.zeros(shp)
         self._rho = cp.zeros(shp)
-        self._b = cp.zeros(shp)
-        self._x = cp.zeros(shp)
         self._phi = cp.zeros(shp)
         self._ex = cp.zeros(shp)
         self._ey = cp.zeros(shp)
-        self._fixed = cp.asarray((op.mask == MASK_FIXED).astype(np.uint8))
-        self._fgrp = cp.asarray(np.maximum(op.fixed_group, 0).astype(np.int64))
-        self._mask = cp.asarray(op.mask)
-        self._cut_theta = cp.asarray(op.cut_theta)
-        self._cut_group = cp.asarray(np.maximum(op.cut_group, 0).astype(np.int32))
-        self._cx = self.solver.levels[0].cx
-        self._cy = self.solver.levels[0].cy
-        vol_phys = self._two_pi * op.vol_gas
+        self._gx = ()
+        if self.amr is None:
+            coo = op.coupling.tocoo()
+            self._crow = cp.asarray(coo.row.astype(np.int64))
+            self._ccol = cp.asarray(coo.col.astype(np.int64))
+            self._cval = cp.asarray(coo.data.astype(np.float64))
+            self._nnz = int(coo.nnz)
+            self._q_static = cp.asarray(op.q_static)
+            self._b = cp.zeros(shp)
+            self._x = cp.zeros(shp)
+            self._fixed = cp.asarray((op.mask == MASK_FIXED).astype(np.uint8))
+            self._fgrp = cp.asarray(np.maximum(op.fixed_group, 0).astype(np.int64))
+            self._mask = cp.asarray(op.mask)
+            self._cut_theta = cp.asarray(op.cut_theta)
+            self._cut_group = cp.asarray(np.maximum(op.cut_group, 0).astype(np.int32))
+            self._cx = self.solver.levels[0].cx
+            self._cy = self.solver.levels[0].cy
+            vol_gas = op.vol_gas
+            # 周期の従属節点 (右端列・上端行) は主節点と同じ体積を複製して持つので総和から除く
+            nyv = vol_gas.shape[0] - (1 if op.periodic_y else 0)
+            nxv = vol_gas.shape[1] - (1 if op.periodic_x else 0)
+            self._total_gas_volume = float(self._two_pi * vol_gas[:nyv, :nxv].sum())
+        else:
+            lay = self.amr
+            i32 = lambda a: cp.asarray(np.ascontiguousarray(a, dtype=np.int32))  # noqa: E731
+
+            def dev_csr(m):
+                m = m.tocsr()
+                m.sort_indices()
+                return (i32(m.indptr), i32(m.indices), cp.asarray(m.data.astype(np.float64)))
+
+            self._q_static = cp.asarray(lay.q_static)
+            self._b = cp.zeros(max(lay.n_c, 1))
+            self._x = cp.zeros(max(lay.n_c, 1))
+            self._csr = {name: dev_csr(getattr(lay, name)) for name in ("PTq", "PC", "Gx", "Gy")}
+            self._e_lists = (i32(lay.edge_u), i32(lay.edge_v), cp.asarray(lay.edge_g, dtype=np.float64),
+                             np.int64(lay.edge_u.size), i32(lay.coup_u), i32(lay.coup_grp),
+                             cp.asarray(lay.coup_g, dtype=np.float64), np.int64(lay.coup_u.size))
+            self._gx = (cp.asarray(lay.dd), cp.asarray(lay.di), cp.asarray(lay.refined), i32(lay.blockid),
+                        i32(lay.tab))
+            vol_gas = lay.node_vol_gas / self._two_pi
+            self._total_gas_volume = float(lay.total_gas_volume)
+        vol_phys = self._two_pi * vol_gas
         self._inv_vol_phys = cp.asarray(np.where(vol_phys > 0.0, 1.0 / np.where(vol_phys > 0, vol_phys, 1.0), 0.0))
-        self._vol_gas = op.vol_gas
+        self._vol_gas = vol_gas
 
         # ---- Dirichlet グループの電位波形 ----
         groups = model.groups
@@ -428,14 +503,23 @@ class GpuPicSimulation:
         self._diel_gamma = f64([o.region.see_gamma if o.type == "dielectric" else 0.0 for o in model.others])
         self._see_on = int(np.any(grp_gamma > 0.0) or np.any(self._diel_gamma.get() > 0.0))
         self._see_speed = math.sqrt(2.0 * pic.see_energy_ev * QE / ME)
-        self._see_delta = 1e-3 * min(self.grid.dx, self.grid.dy)
+        h_min = min(self.grid.dx, self.grid.dy) if self.amr is None else self.amr.h_min
+        self._see_delta = 1e-3 * h_min
         self._has_diel = any(o.type == "dielectric" for o in model.others)
 
         # ---- 表示用メッシュ (v1 UI 互換) ----
-        dm = pg.display_mesh()
+        if self.amr is None:
+            dm = pg.display_mesh()
+            self._cell_vol_gas = self._cell_gas_volume()
+            self._n_cells = self.grid.nx * self.grid.ny
+        else:
+            lay = self.amr
+            dm = DisplayMesh(nodes=lay.disp_nodes, triangles=lay.disp_tris, tri_region=lay.disp_tri_region,
+                             tri_cell=lay.tri_cell)
+            self._cell_vol_gas = lay.cell_vol_gas
+            self._n_cells = lay.n_cells
         self._dmesh = dm
         self.mesh = _DisplayMeshView(nodes=dm.nodes, triangles=dm.triangles, tri_region=dm.tri_region)
-        self._cell_vol_gas = self._cell_gas_volume()
 
         # ---- 一様磁場 (xy のみ) ----
         self._bvec = b_vector(self.project)
@@ -535,7 +619,7 @@ class GpuPicSimulation:
             need -= take
         x = np.concatenate(xs)
         y = np.concatenate(ys)
-        v_gas = float(self._two_pi * self._vol_gas.sum())
+        v_gas = self._total_gas_volume
         if v_gas <= 0.0:
             raise ValueError("粒子を装荷できる気体領域がありません")
         w0 = ip.density * v_gas / n_macro
@@ -670,7 +754,11 @@ class GpuPicSimulation:
             k["deposit"](self._grid1(sp.cap), (_BLOCK,),
                          (sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.int32(0),
                           np.float64(sp.q / self._two_pi), self._rho, self._rho, np.int32(0), np.int64(n),
-                          np.int32(0), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py)))
+                          np.int32(0), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py),
+                          *self._gx))
+        if self.amr is not None:
+            self._launch_field_amr()
+            return
         k["rhs_base"](self._grid1(n), (_BLOCK,), (self._b, self._q_static, self._rho, self._q_surf, np.int64(n)))
         if self._nnz:
             k["rhs_coupling"](self._grid1(self._nnz), (_BLOCK,),
@@ -688,6 +776,23 @@ class GpuPicSimulation:
                           np.int32(self._py), self._crow, self._ccol, self._cval, np.int64(self._nnz), self._vg,
                           self._dsl[2:3]))
 
+    def _launch_field_amr(self) -> None:
+        """AMR: b_c = PTq [q; V] → AMG-PCG → φ_all = PC [x_c; V] → E = G [φ; V]・場のエネルギー。"""
+        k = self._k
+        lay = self.amr
+        n, n_c = lay.n_nodes, lay.n_c
+        ptq, pc, gx, gy = (self._csr[name] for name in ("PTq", "PC", "Gx", "Gy"))
+        if n_c:
+            k["amr_rhs"](self._grid1(n_c), (_BLOCK,), (self._b, *ptq, self._q_static, self._rho, self._q_surf,
+                                                      self._vg, np.int32(n), np.int32(n_c)))
+            self.solver.launch_solve(self._b, self._x, self._pcg_iters)
+        k["amr_fill_phi"](self._grid1(n), (_BLOCK,), (self._phi, *pc, self._x, self._vg, np.int32(n_c), np.int32(n),
+                                                     self._cnt))
+        k["amr_efield"](self._grid1(n), (_BLOCK,), (self._ex, self._ey, *gx, *gy, self._phi, self._vg, np.int32(n)))
+        eu, ev, eg, ne, cu, cgrp, cg, nc = self._e_lists
+        k["amr_edge_energy"](self._grid1(int(ne) + int(nc)), (_BLOCK,),
+                             (self._phi, eu, ev, eg, ne, cu, cgrp, cg, nc, self._vg, self._dsl[2:3]))
+
     def _launch_push(self, sp: _Species) -> None:
         if not sp.mobile:
             return
@@ -698,7 +803,7 @@ class GpuPicSimulation:
                          *self._grid_args, np.float64(sp.q / sp.m), np.float64(dt_s), np.int32(1 if self.rz else 0),
                          np.int32(self.ridx if self.rz else 0), np.int32(1 if use_b else 0),
                          self._R[sp.name] if use_b else self._R_dummy, np.float64(0.5 * sp.m), self._prm,
-                         self._dsl[sp.index:sp.index + 1]))
+                         self._dsl[sp.index:sp.index + 1], *self._gx))
 
     def _launch_boundary(self, sp: _Species) -> None:
         if not sp.mobile:
@@ -719,7 +824,7 @@ class GpuPicSimulation:
             el.x, el.y, el.vx, el.vy, el.vz, el.w, np.int64(el.cap),
             np.int32(self._n_coll), self._coll, np.float64(sp.m),
             self._rec_e, self._rec_a, self._rec_w, self._rec_n, self._coll_w, np.int64(COLLECTOR_MAX_SAMPLES),
-            self._prm, self._see_seed,
+            self._prm, self._see_seed, *self._gx,
         ))
 
     def _launch_mcc(self) -> None:
@@ -743,7 +848,7 @@ class GpuPicSimulation:
                 np.int32(1 if self.pic.mcc.ionization_split == "half" else 0), np.float64(mc.vth_gas),
                 self._prm, self._mcc_seed,
                 self._acc_ion, self._cyc_ion if use_cyc else self._acc_ion, np.int32(1 if use_cyc else 0),
-                np.int64(self.n_nodes), *self._grid_args, np.int32(self._px), np.int32(self._py),
+                np.int64(self.n_nodes), *self._grid_args, np.int32(self._px), np.int32(self._py), *self._gx,
             ))
         if self._mi_n and io.mobile:
             dt_i = self.dt * self._sub
@@ -772,13 +877,15 @@ class GpuPicSimulation:
             k["deposit"](self._grid1(sp.cap), (_BLOCK,),
                          (sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.int32(0),
                           np.float64(1.0), self._acc_n[name], out2, np.int32(1 if use_cyc else 0), np.int64(n),
-                          np.int32(1), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py)))
+                          np.int32(1), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py),
+                          *self._gx))
         el = self.species["electron"]
         out2 = self._cyc["ke"] if use_cyc else self._acc_ke
         k["deposit"](self._grid1(el.cap), (_BLOCK,),
                      (el.x, el.y, el.vx, el.vy, el.vz, el.w, self._cnt, np.int32(0), np.int32(1),
                       np.float64(0.5 * ME), self._acc_ke, out2, np.int32(1 if use_cyc else 0), np.int64(n),
-                      np.int32(1), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py)))
+                      np.int32(1), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py),
+                      *self._gx))
         if self._n_eedf:
             shm = self._n_eedf * (self._eedf_bins + 3) * 8
             k["eedf_hist"](self._grid1(el.cap), (_BLOCK,),
@@ -832,6 +939,11 @@ class GpuPicSimulation:
             if n == 0:
                 continue
             dt_s = self.dt * (self._sub if sp.index == 1 else 1)
+            if self.amr is not None:
+                self._k["kick_half"](self._grid1(sp.cap), (_BLOCK,),
+                                     (sp.x, sp.y, sp.vx, sp.vy, sp.w, self._cnt, np.int32(sp.index), self._ex,
+                                      self._ey, np.float64(sp.q / sp.m * 0.5 * dt_s), *self._gx))
+                continue
             x, y = sp.x[:n], sp.y[:n]
             fx = (x - g.x0) * self._inv_dx
             fy = (y - g.y0) * self._inv_dy
@@ -940,21 +1052,21 @@ class GpuPicSimulation:
         self._eedf_reg[...] = cp.asarray(reg)
 
     def _node_density(self, acc, count: int) -> np.ndarray:
-        return (acc * self._inv_vol_phys / max(count, 1)).get().ravel()
+        return self._disp((acc * self._inv_vol_phys / max(count, 1)).get().ravel())
 
     def averaged_fields(self) -> dict | None:
         if self._accum_start is None or self._accum_count == 0:
             return None
         cnt = self._accum_count
-        phi = (self._acc_phi / cnt).get().ravel()
+        phi = self._disp((self._acc_phi / cnt).get().ravel())
         grad = triangle_gradients(self._dmesh.nodes, self._dmesh.triangles, phi)
         e_abs = np.hypot(grad[:, 0], grad[:, 1])
         n_e = self._node_density(self._acc_n["electron"], cnt)
         n_i = self._node_density(self._acc_n["ion"], cnt)
-        w_e = self._acc_n["electron"].get().ravel()
-        ke = self._acc_ke.get().ravel()
+        w_e = self._disp(self._acc_n["electron"].get().ravel())
+        ke = self._disp(self._acc_ke.get().ravel())
         te = np.where(w_e > 0.0, (2.0 / 3.0) * ke / np.where(w_e > 0, w_e, 1.0) / QE, 0.0)
-        ion_rate = (self._acc_ion * self._inv_vol_phys).get().ravel() / (cnt * self.dt)
+        ion_rate = self._disp((self._acc_ion * self._inv_vol_phys).get().ravel()) / (cnt * self.dt)
         return {"phi": phi, "e_abs": e_abs, "n_e": n_e, "n_i": n_i, "te_ev": te, "ion_rate": ion_rate,
                 "avg_steps": cnt}
 
@@ -966,15 +1078,15 @@ class GpuPicSimulation:
         if counts.sum() == 0:
             return None
         b = self._cycle_bins
-        cnt_d = cp.asarray(np.maximum(counts, 1.0))[:, None, None]
-        phi = (self._cyc["phi"] / cnt_d).get().reshape(b, -1)
+        cnt_d = cp.asarray(np.maximum(counts, 1.0)).reshape((b,) + (1,) * len(self._shape))
         inv_v = self._inv_vol_phys[None]
-        n_e = (self._cyc["n_e"] * inv_v / cnt_d).get().reshape(b, -1)
-        n_i = (self._cyc["n_i"] * inv_v / cnt_d).get().reshape(b, -1)
-        ne_w = self._cyc["n_e"].get().reshape(b, -1)
-        ke = self._cyc["ke"].get().reshape(b, -1)
+        phi = self._disp((self._cyc["phi"] / cnt_d).get().reshape(b, -1))
+        n_e = self._disp((self._cyc["n_e"] * inv_v / cnt_d).get().reshape(b, -1))
+        n_i = self._disp((self._cyc["n_i"] * inv_v / cnt_d).get().reshape(b, -1))
+        ne_w = self._disp(self._cyc["n_e"].get().reshape(b, -1))
+        ke = self._disp(self._cyc["ke"].get().reshape(b, -1))
         te = np.where(ne_w > 0.0, (2.0 / 3.0) * ke / np.where(ne_w > 0, ne_w, 1.0) / QE, 0.0)
-        ion_rate = (self._cyc_ion * inv_v / cnt_d).get().reshape(b, -1) / self.dt
+        ion_rate = self._disp((self._cyc_ion * inv_v / cnt_d).get().reshape(b, -1)) / self.dt
         grad = triangle_gradients(self._dmesh.nodes, self._dmesh.triangles, phi)
         e_abs = np.hypot(grad[..., 0], grad[..., 1])
         particles = {}
@@ -1123,12 +1235,12 @@ class GpuPicSimulation:
         particles = {name: self._subsample_positions(sp, MAX_FRAME_PARTICLES).tolist()
                      for name, sp in self.species.items()}
         diag = {key: v[-1] for key, v in self.history.items() if v}
-        g = self.grid
         dens = {}
         for name, sp in self.species.items():
-            cells = cp.zeros(g.nx * g.ny)
+            cells = cp.zeros(self._n_cells)
             self._k["deposit_cell"](self._grid1(sp.cap), (_BLOCK,),
-                                    (sp.x, sp.y, sp.w, self._cnt, np.int32(sp.index), cells, *self._grid_args))
+                                    (sp.x, sp.y, sp.w, self._cnt, np.int32(sp.index), cells, *self._grid_args,
+                                     *self._gx))
             c = cells.get()
             vol = self._cell_vol_gas.ravel()
             dens[name] = np.where(vol > 0, c / np.where(vol > 0, vol, 1.0), 0.0)[self._dmesh.tri_cell]
@@ -1136,7 +1248,7 @@ class GpuPicSimulation:
             "type": "frame",
             "step": self.step_count,
             "t": self.t,
-            "phi": self._phi.get().ravel().tolist(),
+            "phi": self._disp(self._phi.get().ravel()).tolist(),
             "n_e": dens["electron"].tolist(),
             "n_i": dens["ion"].tolist(),
             "particles": particles,

@@ -1,8 +1,12 @@
-"""AMR (合成格子) 静電場ソルバーの高レベル API (prompts/121)。
+"""AMR (合成格子) 静電場ソルバーの高レベル API (prompts/121, 122)。
 
 field.electrostatic.solve_electrostatic (一様格子) の AMR 版。v1 fem.solve と同じ量
 (電位・電場・エネルギー・電極電荷・容量) を返し、表示用に全レベルの葉セルを 2 三角形に
 分割したメッシュを持つ (ぶら下がり節点は拘束値を持つので粗いセルの三角形と値が連続する)。
+
+spec.adaptive なら解に基づく適応細分化 (prompts/122): 求解 → 節点の二階差分 η ≈ h²φ''
+(fieldops.build_second_difference) → η > adapt_tol × (電位の範囲) の角を持つ葉セルを 1 段細かく
+(max_level まで、既存の細分化は保つ) を、新しいタグが無くなるか adapt_iters 回まで繰り返す。
 """
 
 from __future__ import annotations
@@ -36,6 +40,8 @@ class AmrStaticSolution:
     info: AmrSolveInfo
     timing: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # 適応細分化の履歴: 反復ごとの {"n_unknowns", "eta_rel" (最大指標/電位範囲), "tagged"}
+    adapt_history: list = field(default_factory=list)
 
     @property
     def n_unknowns(self) -> int:
@@ -86,15 +92,17 @@ class AmrStaticSolution:
         return phi, ex, ey
 
 
-def display_mesh(model: GeometryModel, hier: AmrHierarchy):
+def display_mesh(model: GeometryModel, hier: AmrHierarchy, return_cells: bool = False):
     """全レベルの葉セルを市松の対角線で 2 三角形に分割した表示用メッシュ (導体内のセルは穴)。
 
     返り値: (nodes (Nd, 2), triangles (M, 3), tri_region (M,), node_keys (Nd,) 正準節点キー)。
+    return_cells=True なら 5 つ目に三角形ごとの葉セル (M, 3) = (レベル, i, j) を返す。
     ぶら下がり節点は細かい側の三角形の頂点になり、粗い側の三角形の辺上に乗る (T 字接続)。
     """
     L = hier.max_level
     tri_keys = []
     cells_xy = []
+    cells_id = []
     for lvl in range(hier.n_levels):
         ci, cj = hier.leaf_cells(lvl)
         if ci.size == 0:
@@ -104,6 +112,7 @@ def display_mesh(model: GeometryModel, hier: AmrHierarchy):
         yc = g.y0 + (cj + 0.5) * g.dy
         keep = model.classify_conductor(xc, yc, 0.0) < 0 if model.conductors else np.ones(ci.size, dtype=bool)
         ci, cj = ci[keep], cj[keep]
+        cells_id.append(np.repeat(np.stack([np.full(ci.size, lvl, dtype=np.int64), ci, cj], axis=1), 2, axis=0))
         s = L - lvl
         # 巻き戻さない最細添字 (表示では周期の両側を別の節点にする)
         a = np.stack([ci << s, cj << s], axis=1)
@@ -119,8 +128,9 @@ def display_mesh(model: GeometryModel, hier: AmrHierarchy):
         tri_keys.append(tri)
         cells_xy.append(np.repeat(np.stack([xc[keep], yc[keep]], axis=1), 2, axis=0))
     if not tri_keys:
-        return (np.zeros((0, 2)), np.zeros((0, 3), dtype=np.int64), np.zeros(0, dtype=np.int64),
-                np.zeros(0, dtype=np.int64))
+        empty = (np.zeros((0, 2)), np.zeros((0, 3), dtype=np.int64), np.zeros(0, dtype=np.int64),
+                 np.zeros(0, dtype=np.int64))
+        return empty + (np.zeros((0, 3), dtype=np.int64),) if return_cells else empty
     tri = np.concatenate(tri_keys)                    # (M, 3, 2) 最細添字 (I, J)
     nxf = hier.base.nx << L
     raw = tri[..., 1] * (nxf + 1) + tri[..., 0]
@@ -132,7 +142,8 @@ def display_mesh(model: GeometryModel, hier: AmrHierarchy):
     other = model.classify_other(cent[:, 0], cent[:, 1])
     region_idx = np.array([o.index for o in model.others] + [-1], dtype=np.int64)
     tri_region = np.where(other >= 0, region_idx[np.maximum(other, 0)], -1)
-    return nodes, triangles, tri_region, _canon_key(hier, uI, uJ)
+    out = (nodes, triangles, tri_region, _canon_key(hier, uI, uJ))
+    return out + (np.concatenate(cells_id),) if return_cells else out
 
 
 def _display_mesh(model: GeometryModel, hier: AmrHierarchy, op: CompositeOperator, phi: np.ndarray):
@@ -151,11 +162,17 @@ def build_hierarchy(project: Project, *, h: float | None = None, spec: AmrSpec |
 
 def solve_electrostatic_amr(project: Project, *, h: float | None = None, t: float | None = None,
                             tol: float = 1e-10, spec: AmrSpec | None = None,
-                            hier: AmrHierarchy | None = None) -> AmrStaticSolution:
-    """project.mesh.amr (または spec・作成済みの hier) の階層で静電場を解く (CPU、AMG-CG)。"""
+                            hier: AmrHierarchy | None = None, device=None) -> AmrStaticSolution:
+    """project.mesh.amr (または spec・作成済みの hier) の階層で静電場を解く (AMG-CG)。
+
+    device: "auto" | "cpu" | "cuda" | Device | None (None は ES_SIM_DEVICE、未設定なら auto =
+    GPU があれば GPU の AMG-PCG、無ければ pyamg)。
+    """
+    from ..device import Device, get_device
     from ..gpic.geometry import triangle_gradients
 
     t_start = time.perf_counter()
+    dev = device if isinstance(device, Device) else get_device(device)
     if hier is None:
         hier = build_hierarchy(project, h=h, spec=spec)
     model = hier.model
@@ -163,7 +180,20 @@ def solve_electrostatic_amr(project: Project, *, h: float | None = None, t: floa
     op = assemble_composite(model, hier)
     t_a = time.perf_counter()
     v = group_voltages(model, t)
-    phi, info = solve_composite(op, v, tol=tol)
+    phi, info = solve_composite(op, v, tol=tol, device=dev)
+    history = []
+    if hier.spec.adaptive and hier.spec.max_level > 0:
+        for _ in range(hier.spec.adapt_iters):
+            tags, eta_rel, n_new = adapt_tags(model, hier, op, phi, hier.spec.adapt_tol)
+            history.append({"n_unknowns": op.n_unknowns, "eta_rel": eta_rel, "tagged": n_new})
+            if n_new == 0:
+                break
+            hier = AmrHierarchy(model, hier.base, hier.spec, extra_tags=tags)
+            op = assemble_composite(model, hier)
+            phi, info = solve_composite(op, v, tol=tol, device=dev)
+        else:
+            _, eta_rel, n_new = adapt_tags(model, hier, op, phi, hier.spec.adapt_tol)
+            history.append({"n_unknowns": op.n_unknowns, "eta_rel": eta_rel, "tagged": n_new})
     t_s = time.perf_counter()
     energy, q = energy_and_charges(model, op, phi, v)
     charges = [(g.label, float(g.voltage if t is None else v[k]), float(q[k])) for k, g in enumerate(model.groups)]
@@ -181,4 +211,42 @@ def solve_electrostatic_amr(project: Project, *, h: float | None = None, t: floa
         timing={"hierarchy_s": t_h - t_start, "assemble_s": t_a - t_h, "solve_s": t_s - t_a,
                 "total_s": time.perf_counter() - t_start},
         warnings=list(op.warnings),
+        adapt_history=history,
     )
+
+
+def adapt_tags(model: GeometryModel, hier: AmrHierarchy, op: CompositeOperator, phi: np.ndarray,
+               tol: float) -> tuple[list[np.ndarray], float, int]:
+    """適応細分化のタグ (レベル l < max_level のセルマスク)。既存の細分化もタグとして含める。
+
+    戻り値: (tags, 最大指標/電位範囲, 新たに細分化する葉セル数)。
+    """
+    from .fieldops import build_second_difference
+    from .hierarchy import _upsample
+
+    cap = hier.spec.max_level
+    b = hier.base
+    tags = [np.zeros((b.ny << lvl, b.nx << lvl), dtype=bool) for lvl in range(cap)]
+    for lvl in range(min(hier.max_level, cap)):
+        tags[lvl] |= _upsample(hier.refined[lvl], hier.bf)
+    rng = float(np.max(phi) - np.min(phi)) if phi.size else 0.0
+    if rng <= 0.0:
+        return tags, 0.0, 0
+    d2x, d2y = build_second_difference(model, hier, op)
+    eta = np.maximum(np.abs(d2x @ phi), np.abs(d2y @ phi))
+    thr = tol * rng
+    L = hier.max_level
+    n_new = 0
+    for lvl in range(min(hier.n_levels, cap)):
+        ci, cj = hier.leaf_cells(lvl)
+        if ci.size == 0:
+            continue
+        s = L - lvl
+        eta_c = np.zeros(ci.size)
+        for a in (0, 1):
+            for bb in (0, 1):
+                eta_c = np.maximum(eta_c, eta[op.node_index(_canon_key(hier, (ci + a) << s, (cj + bb) << s))])
+        hot = eta_c > thr
+        n_new += int(hot.sum())
+        tags[lvl][cj[hot], ci[hot]] = True
+    return tags, float(np.max(eta)) / rng, n_new

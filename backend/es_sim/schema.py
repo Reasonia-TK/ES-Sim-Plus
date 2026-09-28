@@ -222,6 +222,11 @@ class AmrSettings(BaseModel):
     buffer_cells: int = Field(2, ge=0, le=16)
     blocking_factor: int = Field(8, ge=1, le=64)
     regions: list[AmrRegion] = []
+    # 解に基づく適応細分化 (静電場のみ、prompts/122)。求解 → 誤差指標 (節点の二階差分 ≈ h²φ'') →
+    # adapt_tol × (電位の範囲) を超える葉セルを 1 段細かく、を最大 adapt_iters 回 (max_level まで)
+    adaptive: bool = False
+    adapt_tol: float = Field(1e-3, gt=0.0, le=0.5)
+    adapt_iters: int = Field(3, ge=1, le=8)
 
 
 class MeshSettings(BaseModel):

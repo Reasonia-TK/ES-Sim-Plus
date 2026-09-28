@@ -337,9 +337,18 @@ def _cell_eps_and_purity(model: GeometryModel, hier: AmrHierarchy, he: _HalfEdge
 
 def _static_charge(model: GeometryModel, hier: AmrHierarchy, n_nodes: int, node_of) -> np.ndarray:
     """葉セルの四分体ごとの ∫ρ dV を角の節点へ (節点番号の配列を返す関数 node_of(I, J))。"""
-    q = np.zeros(n_nodes)
     if not model.has_charge:
-        return q
+        return np.zeros(n_nodes)
+    return dual_integral(model, hier, n_nodes, node_of, model.rho_at)
+
+
+def dual_integral(model: GeometryModel, hier: AmrHierarchy, n_nodes: int, node_of, fn) -> np.ndarray:
+    """葉セルの四分体ごとの ∫ fn dV (軸対称は ∫ fn r dA、2π なし) を角の節点へ加える。
+
+    eb.build._dual_integral の合成格子版: 境界 (導体・誘電体・電荷領域) が通らない純セルは
+    中心の値 × 四分体体積、混合セルは N_SUB×N_SUB の中点則。fn=None は体積そのもの。
+    """
+    q = np.zeros(n_nodes)
     rad = model.radial_axis()
     shapes = [c.shape for c in model.conductors] + [o.shape for o in model.others]
     L = hier.max_level
@@ -349,7 +358,7 @@ def _static_charge(model: GeometryModel, hier: AmrHierarchy, n_nodes: int, node_
         if ci.size == 0:
             continue
         g = hier.level_grid(lvl)
-        mixed = _mark_boundary_cells(shapes, g)[cj, ci]
+        mixed = _mark_boundary_cells(shapes, g)[cj, ci] if shapes else np.zeros(ci.size, dtype=bool)
         sh = L - lvl
         for a in (0, 1):
             for b in (0, 1):
@@ -362,19 +371,53 @@ def _static_charge(model: GeometryModel, hier: AmrHierarchy, n_nodes: int, node_
                     vq = (xhi - xlo) * 0.5 * (yhi**2 - ylo**2)
                 else:
                     vq = (yhi - ylo) * 0.5 * (xhi**2 - xlo**2)
-                val = model.rho_at(0.5 * (xlo + xhi), 0.5 * (ylo + yhi)) * vq
-                m = np.nonzero(mixed)[0]
-                if m.size:
-                    sx = xlo[m][:, None, None] + (xhi - xlo)[m][:, None, None] * s_pts[None, None, :]
-                    sy = ylo[m][:, None, None] + (yhi - ylo)[m][:, None, None] * s_pts[None, :, None]
-                    sx, sy = np.broadcast_arrays(sx, sy)
-                    f = model.rho_at(sx, sy)
-                    wr = 1.0 if rad is None else (sy if rad == 1 else sx)
-                    sub = ((xhi - xlo)[m] * (yhi - ylo)[m] / N_SUB**2)[:, None, None]
-                    val[m] = np.sum(f * wr * sub, axis=(1, 2))
+                if fn is None:
+                    val = vq
+                else:
+                    val = np.asarray(fn(0.5 * (xlo + xhi), 0.5 * (ylo + yhi)), dtype=np.float64) * vq
+                    m = np.nonzero(mixed)[0]
+                    if m.size:
+                        sx = xlo[m][:, None, None] + (xhi - xlo)[m][:, None, None] * s_pts[None, None, :]
+                        sy = ylo[m][:, None, None] + (yhi - ylo)[m][:, None, None] * s_pts[None, :, None]
+                        sx, sy = np.broadcast_arrays(sx, sy)
+                        f = np.asarray(fn(sx, sy), dtype=np.float64)
+                        wr = 1.0 if rad is None else (sy if rad == 1 else sx)
+                        sub = ((xhi - xlo)[m] * (yhi - ylo)[m] / N_SUB**2)[:, None, None]
+                        val[m] = np.sum(f * wr * sub, axis=(1, 2))
                 idx = node_of((ci + a) << sh, (cj + b) << sh)
                 np.add.at(q, idx, val)
     return q
+
+
+def cell_integral(model: GeometryModel, hier: AmrHierarchy, lvl: int, ci: np.ndarray, cj: np.ndarray,
+                  fn) -> np.ndarray:
+    """レベル lvl のセル (ci, cj) ごとの ∫ fn dV (軸対称は r 重み、2π なし)。混合セルは中点則。"""
+    rad = model.radial_axis()
+    shapes = [c.shape for c in model.conductors] + [o.shape for o in model.others]
+    g = hier.level_grid(lvl)
+    xlo = g.x0 + ci * g.dx
+    ylo = g.y0 + cj * g.dy
+    xhi, yhi = xlo + g.dx, ylo + g.dy
+    if rad is None:
+        vol = (xhi - xlo) * (yhi - ylo)
+    elif rad == 1:
+        vol = (xhi - xlo) * 0.5 * (yhi**2 - ylo**2)
+    else:
+        vol = (yhi - ylo) * 0.5 * (xhi**2 - xlo**2)
+    if fn is None:
+        return vol
+    val = np.asarray(fn(0.5 * (xlo + xhi), 0.5 * (ylo + yhi)), dtype=np.float64) * vol
+    mixed = _mark_boundary_cells(shapes, g)[cj, ci] if shapes else np.zeros(ci.size, dtype=bool)
+    m = np.nonzero(mixed)[0]
+    if m.size:
+        s_pts = (np.arange(N_SUB) + 0.5) / N_SUB
+        sx = xlo[m][:, None, None] + g.dx * s_pts[None, None, :]
+        sy = ylo[m][:, None, None] + g.dy * s_pts[None, :, None]
+        sx, sy = np.broadcast_arrays(sx, sy)
+        f = np.asarray(fn(sx, sy), dtype=np.float64)
+        wr = 1.0 if rad is None else (sy if rad == 1 else sx)
+        val[m] = np.sum(f * wr, axis=(1, 2)) * (g.dx * g.dy / N_SUB**2)
+    return val
 
 
 def assemble_composite(model: GeometryModel, hier: AmrHierarchy) -> CompositeOperator:
@@ -592,11 +635,17 @@ class AmrSolveInfo:
 
 
 def solve_composite(op: CompositeOperator, v_groups: np.ndarray, *, tol: float = 1e-10,
-                    max_iter: int = 500) -> tuple[np.ndarray, AmrSolveInfo]:
-    """A_c x = q_c + coup_c V を AMG-CG で解き、全節点の電位 (固定節点は V) を返す。"""
+                    max_iter: int = 500, device=None) -> tuple[np.ndarray, AmrSolveInfo]:
+    """A_c x = q_c + coup_c V を AMG-CG で解き、全節点の電位 (固定節点は V) を返す。
+
+    device が GPU なら GPU の AMG-PCG (gpu_solver、Chebyshev 平滑化)、それ以外は pyamg (CPU)。
+    """
     import pyamg
 
+    from ..device import Device, get_device
+
     t0 = time.perf_counter()
+    dev = device if isinstance(device, Device) else (get_device(device) if device is not None else None)
     vg = np.asarray(v_groups, dtype=np.float64)
     vK = np.zeros(op.coup_c.shape[1])
     vK[: vg.size] = vg
@@ -606,6 +655,12 @@ def solve_composite(op: CompositeOperator, v_groups: np.ndarray, *, tol: float =
     if b.size == 0:
         x = np.zeros(0)
         info = AmrSolveInfo(0, 0.0, True, 0.0)
+    elif dev is not None and dev.is_gpu:
+        from .gpu_solver import AmgGpuSolver
+
+        xd, info = AmgGpuSolver(op.A_c, dev, singular=op.singular).solve(b, tol=tol, max_iter=max_iter)
+        x = xd.get()
+        info.elapsed_s = time.perf_counter() - t0
     else:
         ml = pyamg.smoothed_aggregation_solver(op.A_c, symmetry="symmetric", max_coarse=500)
         res: list[float] = []

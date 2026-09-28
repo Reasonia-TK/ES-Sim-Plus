@@ -152,6 +152,34 @@ def test_solve_endpoint_cartesian_rejects_non_rectangular_domain():
 
 
 @pytest.mark.skipif(not cuda_available(), reason="CUDA (CuPy) が使えない環境")
+def test_ws_pic_with_amr_uses_refined_display_mesh():
+    """mesh.amr (prompts/122): /ws/pic は AMR 階層の PIC を実行し、細分化された表示メッシュで返す。"""
+    p = _plates_amr(1)
+    p["pic"] = {
+        "initial_plasma": {"density": 1e14, "te_ev": 1.0, "ti_ev": 0.03, "ion_mass_amu": 40.0, "seed": 1},
+        "n_macro": 20000, "n_steps": 100, "frame_every": 50, "phase_bins": 0,
+    }
+    client = TestClient(app)
+    with client.websocket_connect("/ws/pic") as ws:
+        ws.send_text(json.dumps({"cmd": "start", "project": p}))
+        msgs = []
+        while True:
+            m = ws.receive_json()
+            msgs.append(m)
+            if m["type"] in ("done", "error"):
+                break
+    assert [m["type"] for m in msgs][-1] == "done", msgs[-1]
+    started, done = msgs[0], msgs[-1]
+    area = _triangle_areas(started["mesh"])
+    assert area.min() == pytest.approx(area.max() / 4, rel=1e-6)          # 2 レベル (格子幅 1/2)
+    assert len(done["fields"]["n_e"]) == len(started["mesh"]["nodes"])
+    assert len(done["fields"]["e_abs"]) == len(started["mesh"]["triangles"])
+    frames = [m for m in msgs if m["type"] == "frame"]
+    assert frames and len(frames[-1]["n_e"]) == len(started["mesh"]["triangles"])
+    assert len(frames[-1]["phi"]) == len(started["mesh"]["nodes"])
+
+
+@pytest.mark.skipif(not cuda_available(), reason="CUDA (CuPy) が使えない環境")
 def test_ws_pic_cartesian_runs_gpu_engine():
     p = _plates()
     p["geometry"]["regions"] = []

@@ -22,12 +22,17 @@ from .electrostatic import StaticSolution, solve_electrostatic
 
 
 def amr_hierarchy(project: Project, model: GeometryModel | None = None) -> AmrHierarchy | None:
-    """mesh.amr が実際に細分化を起こすならその階層、そうでなければ None (一様格子で解く)。"""
+    """mesh.amr が実際に細分化を起こす (または適応細分化が有効な) ならその階層、それ以外は None。
+
+    適応細分化 (adaptive) は求解時に階層を作り直すので、/mesh が返すのは適応前の階層。
+    """
     amr = project.mesh.amr
     if amr is None or (amr.max_level <= 0 and not amr.regions):
         return None
     hier = build_hierarchy(project, model=model)
-    return hier if hier.max_level > 0 else None
+    if hier.max_level > 0 or (amr.adaptive and amr.max_level > 0):
+        return hier
+    return None
 
 
 def _mesh_result(nodes: np.ndarray, triangles: np.ndarray, tri_region: np.ndarray) -> MeshResult:
@@ -55,7 +60,7 @@ def cartesian_solve(project: Project, device: str | None = None
     model = GeometryModel(project)
     hier = amr_hierarchy(project, model)
     if hier is not None:
-        sol = solve_electrostatic_amr(project, hier=hier)
+        sol = solve_electrostatic_amr(project, hier=hier, device=device)
         nodes, tris, tri_region, v, e_tri = sol.nodes, sol.triangles, sol.tri_region, sol.phi_display, sol.e_tri
     else:
         grid = make_grid(model.domain, float(project.mesh.size))
@@ -89,7 +94,7 @@ def cartesian_profile(project: Project, p1, p2, n: int, device: str | None = Non
     s = t * float(np.linalg.norm(p2 - p1))
     hier = amr_hierarchy(project, model)
     if hier is not None:
-        sol = solve_electrostatic_amr(project, hier=hier)
+        sol = solve_electrostatic_amr(project, hier=hier, device=device)
         v, ex, ey = sol.sample(pts[:, 0], pts[:, 1])
         e_abs = np.hypot(ex, ey)
         inside = ~np.isnan(v)
