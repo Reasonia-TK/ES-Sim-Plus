@@ -324,6 +324,16 @@ button.danger:hover { background: #b34747; }
 .collector-row .collector-tol-input { width: 52px; flex: none; padding: 2px 4px; font-size: 11px; }
 .collector-row .collector-delete { flex: none; padding: 1px 7px; font-size: 12px; line-height: 1.4; }
 
+/* v2 直交格子の局所細分化 (AMR、prompts/121) の細分化矩形一覧 */
+.amr-region-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 3px 4px; padding: 4px 6px;
+  border: 1px solid var(--border); border-radius: 3px; font-size: 11px; margin-bottom: 3px;
+}
+.amr-region-row .amr-region-label { flex: none; width: 22px; color: var(--muted); }
+.amr-region-row input.amr-coord { width: 52px; padding: 2px 4px; font-size: 11px; }
+.amr-region-row select { width: auto; flex: none; font-size: 11px; }
+.amr-region-row .collector-delete { margin-left: auto; flex: none; padding: 1px 7px; font-size: 12px; line-height: 1.4; }
+
 /* ガスパネル: DSMC 境界条件一覧 (エッジ番号/タイプ + 温度/圧力、追加/削除、prompts/54) */
 .dsmc-boundary-row {
   display: flex; flex-direction: column; gap: 3px; padding: 5px 6px; border-radius: 3px;

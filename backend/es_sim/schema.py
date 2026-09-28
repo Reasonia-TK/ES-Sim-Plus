@@ -200,6 +200,30 @@ class EdgeMeshSize(BaseModel):
     dist_out: float | None = Field(None, gt=0)
 
 
+class AmrRegion(BaseModel):
+    """ユーザー指定の細分化領域 (軸平行矩形、対角の 2 点)。level までの細分化を保証する。"""
+
+    p1: Point
+    p2: Point
+    level: int = Field(1, ge=1, le=6)
+
+
+class AmrSettings(BaseModel):
+    """v2 直交格子エンジン (mesh.mode="cartesian") の局所細分化 (prompts/121)。
+
+    レベル l の格子幅は size/2^l。細分化の単位は blocking_factor × blocking_factor セルの
+    ブロックで、細かいレベルは粗いレベルの内側に 1 ブロックの緩衝帯を持って入る (proper
+    nesting、隣接する葉セルのレベル差は高々 1)。max_level=0 は細分化なし。
+    """
+
+    max_level: int = Field(0, ge=0, le=6)
+    # 導体・誘電体の境界から buffer_cells セル以内を max_level まで細分化する
+    refine_boundaries: bool = True
+    buffer_cells: int = Field(2, ge=0, le=16)
+    blocking_factor: int = Field(8, ge=1, le=64)
+    regions: list[AmrRegion] = []
+
+
 class MeshSettings(BaseModel):
     size: float = Field(..., gt=0, description="全体特性長 [m]")
     local_sizes: list[LocalSize] = []
@@ -210,8 +234,11 @@ class MeshSettings(BaseModel):
     # 等間隔構造格子 (三角形2分割)。local_sizes / local_edge_sizes は structured では無視される。
     # cartesian (prompts/119) は v2 エンジン: 直交格子 + 埋め込み境界 (EB)。静電場は GMG-PCG
     # (CPU/GPU)、PIC は GPU 版 (es_sim.gpic) で解く。size は要求メッシュ幅 (実際の格子は
-    # マルチグリッド向けに最大 ~12% 細かくなる)。local_sizes / local_edge_sizes は未対応 (AMR で対応予定)
+    # マルチグリッド向けに最大 ~12% 細かくなる)。local_sizes / local_edge_sizes は無視され、
+    # 局所細分化は amr で指定する (prompts/121)
     mode: Literal["unstructured", "structured", "cartesian"] = "unstructured"
+    # cartesian モードの局所細分化 (prompts/121)。None = 細分化なし。他のモードでは無視される
+    amr: AmrSettings | None = None
 
 
 class SolverSettings(BaseModel):

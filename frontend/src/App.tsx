@@ -67,6 +67,7 @@ import { isAxisymmetric, toDiagArray } from "./types";
 import { LENGTH_UNIT_LABEL } from "./units";
 import type { LengthUnit } from "./units";
 import type {
+  AmrSettings,
   BField,
   BoltzOpts,
   BoltzProgressMsg,
@@ -1905,6 +1906,12 @@ export default function App() {
     commitProject({ ...p, mesh: { ...p.mesh, mode } });
   };
 
+  // v2 直交格子の局所細分化 (AMR、prompts/121)。null で解除
+  const setMeshAmr = (amr: AmrSettings | null) => {
+    const p = projectRef.current;
+    commitProject({ ...p, mesh: { ...p.mesh, amr } });
+  };
+
   // --- 一様磁場 (prompts/51) ---
   // 全成分0なら b_field を undefined にする (バックエンドでは磁場なしと同値)
   const setBField = (patch: Partial<BField>) => {
@@ -2999,6 +3006,7 @@ export default function App() {
                 setEdgeSeeGamma={setEdgeSeeGamma}
                 setMeshSize={setMeshSize}
                 setMeshMode={setMeshMode}
+                setMeshAmr={setMeshAmr}
                 setBField={setBField}
                 meshResult={meshResult}
                 selectedRegionId={selectedRegionId}

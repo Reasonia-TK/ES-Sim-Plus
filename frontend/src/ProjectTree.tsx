@@ -364,6 +364,14 @@ export default function ProjectTree({
                   <span className="tree-row-sub">
                     {mToUnit(project.mesh.size, lengthUnit).toFixed(2)}
                     {LENGTH_UNIT_LABEL[lengthUnit]}
+                    {/* v2 直交格子の局所細分化 (prompts/121): 最大レベル (矩形の指定レベルを含む) */}
+                    {project.mesh.mode === "cartesian" &&
+                      project.mesh.amr &&
+                      (() => {
+                        const amr = project.mesh.amr;
+                        const lv = Math.max(amr.max_level, ...(amr.regions ?? []).map((r) => r.level));
+                        return lv > 0 ? ` · AMR L${lv}` : null;
+                      })()}
                   </span>
                 </div>
               )}

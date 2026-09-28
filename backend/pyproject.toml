@@ -18,6 +18,8 @@ dependencies = [
     # (prompts/117、es_sim/boltz.py) と LXCat 断面積の Boltzmann 解析に使う。
     # 旧 boltzpm (git 依存、リポジトリ消滅) の後継で API 互換 (prompts/119)
     "boltzpmp>=0.5,<0.6",
+    # v2 AMR の合成格子 Poisson の前処理 (smoothed aggregation 代数マルチグリッド、prompts/121)
+    "pyamg>=5.0",
 ]
 
 [project.optional-dependencies]

@@ -99,6 +99,15 @@ def test_energy_conservation():
     assert np.max(np.abs(total - total[0])) / total[0] < 0.05
 
 
+def test_amr_settings_are_reported_as_unsupported_for_pic():
+    """mesh.amr (prompts/121) は静電場のみ: PIC は基本格子で計算し、その旨を警告する。"""
+    p = _oscillation_project(10, n_macro=2000)
+    assert not any("AMR" in w for w in _sim(p).warnings)
+    d = p.model_dump()
+    d["mesh"]["amr"] = {"max_level": 2}
+    assert any("AMR" in w for w in _sim(Project.model_validate(d)).warnings)
+
+
 # ---- 3, 4. MCC ------------------------------------------------------------------------
 
 

@@ -15,6 +15,23 @@ export interface EdgeMeshSize {
   dist_out?: number | null;
 }
 
+// v2 直交格子 (mesh.mode="cartesian") の局所細分化 (AMR、prompts/121)。レベル l の格子幅は
+// size/2^l。細分化の単位は blocking_factor × blocking_factor セルのブロックで、細かいレベルは
+// 粗いレベルの内側に 1 ブロックの緩衝帯を持って入る (隣接セルのレベル差は高々 1)
+export interface AmrRegion {
+  p1: Point; // 矩形の対角 2 点 [m]
+  p2: Point;
+  level: number; // この矩形を少なくともこのレベルまで細分化する (1〜6)
+}
+
+export interface AmrSettings {
+  max_level: number; // 0 = 細分化なし
+  refine_boundaries?: boolean; // 導体・誘電体の境界近傍を max_level まで細分化 (既定 true)
+  buffer_cells?: number; // 境界からのセル数 (各レベルのセル単位、既定 2)
+  blocking_factor?: number; // ブロックの一辺のセル数 (既定 8)
+  regions?: AmrRegion[];
+}
+
 // 円領域のパラメトリック形状 (中心+半径)。メッシュ生成時にバックエンド側で多角形化する
 export interface CircleShape {
   kind: "circle";
@@ -1338,6 +1355,9 @@ export interface Project {
     local_edge_sizes?: EdgeMeshSize[];
     // "cartesian" (prompts/119): v2 エンジン (直交格子 + 埋め込み境界)。静電場は GMG-PCG、PIC は GPU
     mode?: "unstructured" | "structured" | "cartesian";
+    // cartesian モードの局所細分化 (prompts/121)。null/undefined = 細分化なし。静電場 (Solve・
+    // プロファイル) のみ対応し、PIC は基本格子 (一様) で計算する
+    amr?: AmrSettings | null;
   };
   solver?: { backend: "numpy" | "cupy" | "auto" };
   particles?: ParticleSettings;

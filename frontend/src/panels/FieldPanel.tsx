@@ -5,6 +5,8 @@ import { LENGTH_UNIT_LABEL, mToUnit, unitToM } from "../units";
 import type { LengthUnit } from "../units";
 import { isAxisymmetric, rfComponents } from "../types";
 import type {
+  AmrRegion,
+  AmrSettings,
   BField,
   CircleShape,
   EdgeBcType,
@@ -206,6 +208,143 @@ export function WaveformImportEditor({
   );
 }
 
+// domain 多角形の外接矩形 [x0, y0, x1, y1] [m]
+function domainBBox(project: Project): [number, number, number, number] {
+  const pts = project.geometry.domain.polygon;
+  if (pts.length === 0) return [0, 0, 0, 0];
+  const xs = pts.map((p) => p[0]);
+  const ys = pts.map((p) => p[1]);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+// v2 直交格子の局所細分化 (AMR、prompts/121) の編集 UI。レベル l の格子幅は size/2^l。
+// 境界近傍 (導体・誘電体) と指定矩形を細分化する。max_level=0 かつ矩形なしは細分化なし
+function AmrEditor({
+  amr,
+  lengthUnit,
+  bbox,
+  onChange,
+}: {
+  amr: AmrSettings | null | undefined;
+  lengthUnit: LengthUnit;
+  bbox: [number, number, number, number]; // domain の外接矩形 [x0, y0, x1, y1] [m]
+  onChange: (next: AmrSettings | null) => void;
+}) {
+  const cur: AmrSettings = amr ?? { max_level: 0 };
+  const regions = cur.regions ?? [];
+  const unitLabel = LENGTH_UNIT_LABEL[lengthUnit];
+  const update = (patch: Partial<AmrSettings>) => onChange({ ...cur, ...patch });
+  const setRegion = (index: number, patch: Partial<AmrRegion>) =>
+    update({ regions: regions.map((r, i) => (i === index ? { ...r, ...patch } : r)) });
+  const addRegion = () => {
+    const [x0, y0, x1, y1] = bbox;
+    const w = x1 - x0;
+    const h = y1 - y0;
+    const r: AmrRegion = {
+      p1: [x0 + 0.375 * w, y0 + 0.375 * h],
+      p2: [x0 + 0.625 * w, y0 + 0.625 * h],
+      level: Math.max(1, cur.max_level),
+    };
+    update({ regions: [...regions, r] });
+  };
+  const levelOptions = [1, 2, 3, 4];
+  const coordInput = (value: number, commit: (v: number) => void, title: string) => (
+    <span title={title}>
+      <CommitNumberInput
+        className="amr-coord"
+        value={mToUnit(value, lengthUnit)}
+        onCommit={(v) => commit(unitToM(v, lengthUnit))}
+      />
+    </span>
+  );
+  return (
+    <>
+      <div className="subheading">局所細分化 (AMR)</div>
+      <div className="field">
+        <span className="label">最大レベル</span>
+        <select value={cur.max_level} onChange={(e) => update({ max_level: Number(e.target.value) })}>
+          <option value={0}>0 (細分化なし)</option>
+          {levelOptions.map((l) => (
+            <option key={l} value={l}>
+              {l} (格子幅 1/{2 ** l})
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="field">
+        <Toggle
+          label="導体・誘電体の境界近傍を細分化"
+          checked={cur.refine_boundaries ?? true}
+          onChange={(v) => update({ refine_boundaries: v })}
+        />
+      </div>
+      <div className="field">
+        <span className="label">緩衝セル数</span>
+        <CommitNumberInput
+          value={cur.buffer_cells ?? 2}
+          onCommit={(v) => {
+            if (Number.isInteger(v) && v >= 0 && v <= 16) update({ buffer_cells: v });
+          }}
+        />
+      </div>
+      <div className="field">
+        <span className="label">ブロック [セル]</span>
+        <select
+          value={cur.blocking_factor ?? 8}
+          onChange={(e) => update({ blocking_factor: Number(e.target.value) })}
+        >
+          {[4, 8, 16].map((b) => (
+            <option key={b} value={b}>
+              {b}×{b}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="hint">
+        境界近傍は最大レベルまで、下の矩形は指定レベルまで格子幅を 1/2 ずつ細かくします
+        (隣り合うセルのレベル差は 1 以下)。静電場 (Solve・プロファイル) で有効で、CPU の
+        代数マルチグリッドで解きます。PIC は基本格子 (一様) で計算します。
+      </div>
+      <div className="collector-list">
+        {regions.length === 0 && <div className="muted">(細分化矩形なし)</div>}
+        {regions.map((r, i) => (
+          <div key={i} className="amr-region-row">
+            <span className="amr-region-label">{`R${i + 1}`}</span>
+            {coordInput(r.p1[0], (v) => setRegion(i, { p1: [v, r.p1[1]] }), `x1 [${unitLabel}]`)}
+            {coordInput(r.p1[1], (v) => setRegion(i, { p1: [r.p1[0], v] }), `y1 [${unitLabel}]`)}
+            <span className="muted">–</span>
+            {coordInput(r.p2[0], (v) => setRegion(i, { p2: [v, r.p2[1]] }), `x2 [${unitLabel}]`)}
+            {coordInput(r.p2[1], (v) => setRegion(i, { p2: [r.p2[0], v] }), `y2 [${unitLabel}]`)}
+            <select
+              value={r.level}
+              title="この矩形の細分化レベル"
+              onChange={(e) => setRegion(i, { level: Number(e.target.value) })}
+            >
+              {levelOptions.map((l) => (
+                <option key={l} value={l}>
+                  L{l}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="danger collector-delete"
+              onClick={() => update({ regions: regions.filter((_, k) => k !== i) })}
+              title="この細分化矩形を削除"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+      <button type="button" className="rf-add-btn" onClick={addRegion}>
+        + 細分化矩形を追加
+      </button>
+      <div className="hint">矩形は対角 2 点 (x1, y1)–(x2, y2) [{unitLabel}] で指定します。</div>
+    </>
+  );
+}
+
 // 矩形 domain の外周エッジ順: 0=下, 1=右, 2=上, 3=左
 // (ProjectTree でもエッジ名を揃えて表示するため export する)
 export const EDGE_LABELS_XY = ["下 (y=0)", "右 (x=w)", "上 (y=h)", "左 (x=0)"];
@@ -236,6 +375,8 @@ interface Props {
   setEdgeSeeGamma: (edgeIndex: number, see_gamma: number) => void;
   setMeshSize: (size: number) => void;
   setMeshMode: (mode: "unstructured" | "structured" | "cartesian") => void;
+  // v2 直交格子の局所細分化 (AMR、prompts/121)。null で解除
+  setMeshAmr: (amr: AmrSettings | null) => void;
   setBField: (patch: Partial<BField>) => void;
   meshResult: MeshResult | null;
   selectedRegionId: string | null;
@@ -284,6 +425,7 @@ export default function FieldPanel({
   setEdgeSeeGamma,
   setMeshSize,
   setMeshMode,
+  setMeshAmr,
   setBField,
   meshResult,
   selectedRegionId,
@@ -471,13 +613,21 @@ export default function FieldPanel({
             </div>
           )}
           {project.mesh.mode === "cartesian" && (
-            <div className="hint">
-              v2 エンジン (矩形domainのみ)。導体・誘電体の境界は格子と厳密に交差させる埋め込み境界
-              (2次精度) で、静電場はマルチグリッド (CPU/GPU)、PIC は GPU (CUDA) で高速に解きます。
-              格子はマルチグリッド向けに指定サイズより最大 ~12% 細かくなります。表示は各セルを
-              三角形2分割したものです。粒子注入・FN放出・粒子マージ・DSMC連成は未対応
-              (軌道追跡・DSMC・流体2Dは同じ解像度の構造格子で実行されます)。
-            </div>
+            <>
+              <div className="hint">
+                v2 エンジン (矩形domainのみ)。導体・誘電体の境界は格子と厳密に交差させる埋め込み境界
+                (2次精度) で、静電場はマルチグリッド (CPU/GPU)、PIC は GPU (CUDA) で高速に解きます。
+                格子はマルチグリッド向けに指定サイズより最大 ~12% 細かくなります。表示は各セルを
+                三角形2分割したものです。粒子注入・FN放出・粒子マージ・DSMC連成は未対応
+                (軌道追跡・DSMC・流体2Dは同じ解像度の構造格子で実行されます)。
+              </div>
+              <AmrEditor
+                amr={project.mesh.amr}
+                lengthUnit={lengthUnit}
+                bbox={domainBBox(project)}
+                onChange={setMeshAmr}
+              />
+            </>
           )}
 
           <div className="subheading">辺ローカルサイズ</div>

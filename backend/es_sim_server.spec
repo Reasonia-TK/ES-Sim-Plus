@@ -78,6 +78,9 @@ hiddenimports = [
 ]
 # uvicorn のワーカ/ループ/プロトコル実装は動的インポートされる
 hiddenimports += collect_submodules("uvicorn")
+# v2 AMR の合成格子ソルバー (es_sim/amr/composite.py) は関数内で pyamg を import し、
+# pyamg の C++ 拡張 (amg_core) はサブモジュールから読まれるため明示する (prompts/121)
+hiddenimports += collect_submodules("pyamg", filter=lambda name: ".tests" not in name)
 
 # boltzpmp 同梱の LXCat 断面積データ (boltzpmp/data/Ar.txt 等、load_argon() が参照する。
 # 本体の LMEA テーブル生成 (xsprocess_to_mixture) 自体はこれらを使わないが、

@@ -176,6 +176,9 @@ class GpuPicSimulation:
         self.rz = self.ridx is not None
         self._two_pi = 2.0 * math.pi if self.rz else 1.0
         self.warnings: list[str] = list(op.warnings)
+        amr = project.mesh.amr
+        if amr is not None and (amr.max_level > 0 or amr.regions):
+            self.warnings.append("PIC は局所細分化 (AMR) に未対応です: 基本格子 (一様) で計算します")
         self.effective_threads = 1
         mod = load_module("pic")
         self._k = {name: mod.get_function(name) for name in (

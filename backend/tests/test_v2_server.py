@@ -82,6 +82,67 @@ def test_profile_endpoint_cartesian():
     assert np.all(np.diff(v) > 0)                  # y=5 mm は誘電体の外: 単調増加
 
 
+def _plates_amr(max_level: int = 2) -> dict:
+    p = _plates()
+    p["mesh"]["amr"] = {"max_level": max_level}
+    return p
+
+
+def _triangle_areas(mesh: dict) -> np.ndarray:
+    P = np.asarray(mesh["nodes"])[np.asarray(mesh["triangles"])]
+    return 0.5 * np.abs((P[:, 1, 0] - P[:, 0, 0]) * (P[:, 2, 1] - P[:, 0, 1])
+                        - (P[:, 2, 0] - P[:, 0, 0]) * (P[:, 1, 1] - P[:, 0, 1]))
+
+
+def test_mesh_endpoint_amr_refines_near_dielectric():
+    """mesh.amr (prompts/121): 誘電体の境界近傍が 2 レベル細かい三角形になる。"""
+    client = TestClient(app)
+    m0 = client.post("/mesh", json=_plates()).json()
+    m2 = client.post("/mesh", json=_plates_amr(2)).json()
+    area = _triangle_areas(m2)
+    assert area.sum() == pytest.approx(0.1 * 0.05, rel=1e-12)
+    assert area.min() == pytest.approx(area.max() / 16, rel=1e-6)     # 格子幅 1/4 → 面積 1/16
+    assert len(m2["triangles"]) > len(m0["triangles"])
+    assert len(m2["region_of_triangle"]) == len(m2["triangles"])
+    assert {0, -1} <= set(m2["region_of_triangle"])
+
+
+def test_solve_endpoint_amr_is_closer_to_fine_grid():
+    client = TestClient(app)
+    b = client.post("/solve", json=_plates_amr(2)).json()
+    coarse = client.post("/solve", json=_plates()).json()
+    fine = _plates()
+    fine["mesh"]["size"] = 0.0005
+    f = client.post("/solve", json=fine).json()
+    assert len(b["v"]) == len(b["mesh"]["nodes"])
+    assert len(b["e_field"]) == len(b["mesh"]["triangles"])
+    assert b["v_min"] == pytest.approx(0.0, abs=1e-9) and b["v_max"] == pytest.approx(100.0)
+    assert [c["label"] for c in b["charges"]] == [c["label"] for c in coarse["charges"]]
+    err_amr = abs(b["capacitance"] - f["capacitance"])
+    err_coarse = abs(coarse["capacitance"] - f["capacitance"])
+    assert err_amr < err_coarse / 2
+    assert b["energy"] == pytest.approx(0.5 * b["capacitance"] * 100.0**2, rel=1e-9)
+
+
+def test_profile_endpoint_amr():
+    body = {"project": _plates_amr(2), "p1": [0.0, 0.005], "p2": [0.1, 0.005], "n": 51}
+    r = TestClient(app).post("/profile", json=body)
+    assert r.status_code == 200
+    v = np.asarray(r.json()["v"], dtype=float)
+    assert v[0] == pytest.approx(0.0, abs=1e-6) and v[-1] == pytest.approx(100.0, abs=1e-6)
+    assert np.all(np.diff(v) > 0)
+
+
+def test_amr_without_tags_falls_back_to_uniform_grid():
+    """細分化の対象 (境界・領域) が無ければ一様格子 (GMG-PCG、GPU 可) で解く。"""
+    p = _plates_amr(2)
+    p["geometry"]["regions"] = []
+    q = _plates()
+    q["geometry"]["regions"] = []
+    client = TestClient(app)
+    assert client.post("/mesh", json=p).json() == client.post("/mesh", json=q).json()
+
+
 def test_solve_endpoint_cartesian_rejects_non_rectangular_domain():
     p = _plates()
     p["geometry"]["domain"]["polygon"] = [[0, 0], [0.1, 0], [0.05, 0.05]]
