@@ -152,8 +152,13 @@ def _add_edge_mesh_fields(entries: list[EdgeMeshSize], lc: float) -> None:
 
 
 def generate_mesh(project: Project) -> Mesh:
-    """メッシュ生成の入口。mesh.mode に応じて非構造 (gmsh) / 構造格子を切り替える。"""
-    if project.mesh.mode == "structured":
+    """メッシュ生成の入口。mesh.mode に応じて非構造 (gmsh) / 構造格子を切り替える。
+
+    mode="cartesian" (v2 直交格子 + EB エンジン、prompts/119) は静電場 (/solve・/profile) と
+    PIC (/ws/pic) を v2 で解くが、v2 へ未移植の v1 ソルバー (軌道追跡・DSMC・流体 2D など)
+    はこの関数を通るため、同じ矩形 domain 前提の構造格子 (階段近似) にフォールバックする。
+    """
+    if project.mesh.mode in ("structured", "cartesian"):
         return _generate_structured(project)
     return _generate_unstructured(project)
 

@@ -207,8 +207,11 @@ class MeshSettings(BaseModel):
     # 幾何に依存しない任意の線分を指定できる。local_sizes と同じく structured では無視される
     local_edge_sizes: list[EdgeMeshSize] = []
     # メッシュ生成モード (prompts/34)。structured は軸平行矩形 domain 専用の
-    # 等間隔構造格子 (三角形2分割)。local_sizes / local_edge_sizes は structured では無視される
-    mode: Literal["unstructured", "structured"] = "unstructured"
+    # 等間隔構造格子 (三角形2分割)。local_sizes / local_edge_sizes は structured では無視される。
+    # cartesian (prompts/119) は v2 エンジン: 直交格子 + 埋め込み境界 (EB)。静電場は GMG-PCG
+    # (CPU/GPU)、PIC は GPU 版 (es_sim.gpic) で解く。size は要求メッシュ幅 (実際の格子は
+    # マルチグリッド向けに最大 ~12% 細かくなる)。local_sizes / local_edge_sizes は未対応 (AMR で対応予定)
+    mode: Literal["unstructured", "structured", "cartesian"] = "unstructured"
 
 
 class SolverSettings(BaseModel):
