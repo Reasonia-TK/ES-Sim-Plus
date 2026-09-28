@@ -1,0 +1,1239 @@
+"""v2 GPU PIC-MCC — 直交格子 + 埋め込み境界 (EB) 上の 2d3v / 軸対称 PIC (prompts/119 P3)。
+
+v1 ``pic.PicSimulation`` と**同じ外部インターフェース** (run_batch / fields / cycle /
+collector_results / eedf_results / timing / prepare_continue / mesh / dt / warnings) を持ち、
+server の /ws/pic からそのまま駆動できる (mesh.mode="cartesian" のとき)。結果は v1 UI が
+描ける三角形メッシュ (直交格子のセルを 2 分割、geometry.DisplayMesh) 上の値で返す。
+
+## 高速化の設計 (AMReX / WarpX の GPU 実装と同じ考え方)
+
+- **ホスト同期ゼロの 1 ステップ**: 粒子数・カウンタ・時刻・電極電位 V(t)・適応 ν_max・
+  平均化フラグ・位相ビンを全て GPU メモリに置き、カーネルがそれを読む。1 ステップは
+  固定のカーネル列になり、**CUDA Graph** として一度記録して毎ステップ 1 回の起動で再生する
+  (Windows の WDDM ではホスト同期 1 回あたりの待ちが大きく、同期を残すと小規模問題で
+  CPU 版より遅くなるため)。
+- 粒子は容量固定の SoA 配列。吸収粒子は w = 0 にして次の圧縮 (COMPACT_EVERY ステップ
+  ごと、順序保存) で詰める。電離・二次電子の生成粒子は atomicAdd で末尾に追加する。
+- 吸収粒子の後処理 (衝突点・法線の厳密計算、誘電体の表面電荷、SEE、IEDF コレクタ) も
+  GPU 上で行う。
+- 場: 未知数 ≤ 4096 の小さな問題は密な逆行列で厳密に、それ以上は GMG-PCG を固定反復
+  (前ステップ解から warm start、残差を定期監視して反復数を自動調整)。
+- 診断 (history) は GPU 上のリングバッファに書き、まとめてホストへ転送する。
+
+## 物理 (v1 と同じ所・違う所)
+
+同じ: 2d3v リープフロッグ (初期半ステップ後退キック)、一様 B の Boris 回転 (xy のみ)、
+null-collision MCC (電子: 弾性/励起/電離、イオン: 等方/電荷交換、ガス質量 = イオン質量、
+電離の余剰エネルギー分配 half/random、イオンの lab/com 参照エネルギー、適応 ν_max)、
+電極・誘電体の SEE、誘電体の表面電荷、IEDF/IADF コレクタ、EEDF 領域、時間平均・
+RF 位相分解、イオンサブサイクリング、quiet start、既定 dt = 0.1/ωpe、
+イオン質量 = amu × 陽子質量 (v1 と同じ換算)。
+
+違う:
+- 場: 節点 FV Poisson (EB ゴーストフルイド)。v1 は P1-FEM + 前分解 LU。
+- 形状関数: 双一次 (CIC) の堆積と節点電場の双一次補間 (運動量保存型)。v1 は P1 堆積と
+  要素一定電場 (エネルギー保存型)。
+- 粒子位置の特定: 格子なので O(1) (v1 は隣接要素 walk)。
+- 軸対称の押し出し: 3D 直線移動→子午面へ回転 (角運動量厳密保存、軸で r ≥ 0 のまま)。
+- 乱数: カウンタ方式 Philox (GPU)。統計的には等価だがビット一致はしない。電荷堆積・
+  粒子追加は atomic なので同じシードでも実行ごとに丸め誤差レベルで変わる。
+- 電極 SEE・誘電体 SEE の放出方向: どちらも衝突点の法線方向 (v1 は誘電体のみ
+  入射と逆方向の近似)。
+- 時間平均の電子温度: 双一次重みで堆積した w·v² から評価 (v1 は P1 重み)。
+
+未対応 (指定するとエラー): 粒子注入 (injection)、FN 電界放出、粒子マージ、
+DSMC ガス場連成 (use_dsmc_gas)。
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from ..device import Device, get_device
+from ..eb.build import MASK_FIXED
+from ..eb.grid import make_grid
+from ..field.gmg import GMGSolver
+from ..geom.model import EPS0, GeometryModel
+from ..mcc import MccModel
+from ..particles import ME, MP, QE, _boris_matrix, b_vector
+from ..schema import Project
+from .geometry import HIT_CONDUCTOR, HIT_DIELECTRIC, ParticleGeometry, triangle_gradients
+
+MAX_FRAME_PARTICLES = 2000
+COLLECTOR_MAX_SAMPLES = 50000
+#: フレーム生成の最小間隔 [s] (GPU は速いので frame_every ごとだと JSON 化が律速になる)
+MIN_FRAME_INTERVAL_S = 0.25
+#: 位相分解データ (bins × 節点数) の上限。超えたら位相ビン数を減らす
+CYCLE_MAX_VALUES = 4_000_000
+#: 吸収粒子の圧縮・容量検査の間隔 [ステップ]
+COMPACT_EVERY = 32
+#: 容量の余裕 (圧縮時に n > CAP_HIGH·cap なら cap を CAP_GROW·n に拡張)
+CAP_HIGH = 0.75
+CAP_GROW = 1.6
+#: GPU 上の history リングバッファの行数
+HISTORY_ROWS = 2048
+#: PCG の反復数の初期値・上限と、残差監視の間隔 [ステップ]
+PCG_ITERS_INIT = 3
+PCG_ITERS_MAX = 30
+PCG_TOL = 1e-8
+MONITOR_EVERY = 64
+
+_BLOCK = 256
+_HIST_COLS = (
+    "t", "ke_e", "ke_i", "fe", "n_e", "n_i", "wall_e", "wall_i", "phi_min", "phi_max",
+    "coll_e", "ion_events", "see_events", "surf_q",
+)
+_HISTORY_KEYS = _HIST_COLS + ("fn_i", "fn_events", "merged")
+_TIMING_KEYS = ("solve", "gather_push", "walk", "deposit", "mcc", "other", "frame")
+
+# prm (double) の位置 — kernels/pic.cu の P_* と一致させること
+P_T, P_STEP, P_DT, P_ACCUM, P_BIN, P_ION_STEP = 0, 1, 2, 3, 4, 5
+P_NUMAX_E, P_PCAND_E, P_NUMAX_I, P_PCAND_I = 6, 7, 8, 9
+P_ACC_START, P_PERIOD, P_NBINS, P_SUB, P_T0, P_STEP0 = 10, 11, 12, 13, 14, 15
+# cnt (uint64) の位置 — kernels/pic.cu の C_* と一致させること
+C_NE, C_NI, C_OVERFLOW = 0, 1, 9
+_N_CNT = 16
+
+
+class _Species:
+    """GPU 上の粒子 (SoA、容量固定)。v[2] は xy なら vz、軸対称なら vθ。数はデバイスの cnt[index]。"""
+
+    FIELDS = ("x", "y", "vx", "vy", "vz", "w")
+
+    def __init__(self, name: str, index: int, q: float, m: float, mobile: bool, cp, cap: int):
+        self.name = name
+        self.index = index
+        self.q = q
+        self.m = m
+        self.mobile = mobile
+        self._cp = cp
+        self.cap = 0
+        self.arrays: dict[str, object] = {}
+        self._alloc(cap)
+
+    def _alloc(self, cap: int) -> None:
+        cp = self._cp
+        old = self.arrays
+        self.arrays = {k: cp.zeros(cap) for k in self.FIELDS}
+        if old:
+            n = min(self.cap, cap)
+            for k in self.FIELDS:
+                self.arrays[k][:n] = old[k][:n]
+        self.cap = cap
+
+    def __getattr__(self, item):
+        arrays = self.__dict__.get("arrays")
+        if arrays is not None and item in arrays:
+            return arrays[item]
+        raise AttributeError(item)
+
+
+@dataclass
+class _DisplayMeshView:
+    nodes: np.ndarray
+    triangles: np.ndarray
+    tri_region: np.ndarray = field(default_factory=lambda: np.zeros(0))
+
+
+class GpuPicSimulation:
+    """v2 GPU PIC-MCC。コンストラクタは v1 PicSimulation と同じ (project, gas_field)。"""
+
+    def __init__(self, project: Project, gas_field=None, device: Device | str | None = None):
+        if project.pic is None:
+            raise ValueError("project.pic が指定されていません")
+        dev = device if isinstance(device, Device) else get_device(device or "cuda")
+        if not dev.is_gpu:
+            raise RuntimeError(
+                "v2 PIC (mesh.mode='cartesian') は現状 GPU (CUDA) 専用です。"
+                "CPU で実行する場合はメッシュを unstructured/structured にしてください (v1 PIC)"
+            )
+        import cupy as cp
+
+        from ..device.cuda import load_module
+
+        self.cp = cp
+        self.device = dev
+        self.project = project
+        self.pic = pic = project.pic
+        self._check_supported(project, gas_field)
+        self._use_graph = os.environ.get("ES_SIM_NO_GRAPH") != "1"
+        self._stream = cp.cuda.Stream(non_blocking=True)
+
+        t_setup = time.perf_counter()
+        self.model = model = GeometryModel(project)
+        self.grid = grid = make_grid(model.domain, float(project.mesh.size))
+        with self._stream:
+            self.solver = GMGSolver(model, grid, dev)
+            self.solver.enable_async()
+        op = self.op = self.solver.finest
+        self.pgeo = ParticleGeometry(model, grid)
+        self.ridx = model.radial_axis()
+        self.rz = self.ridx is not None
+        self._two_pi = 2.0 * math.pi if self.rz else 1.0
+        self.warnings: list[str] = list(op.warnings)
+        self.effective_threads = 1
+        mod = load_module("pic")
+        self._k = {name: mod.get_function(name) for name in (
+            "begin_step", "end_step", "eval_groups", "rhs_base", "rhs_coupling", "fill_phi",
+            "efield_nodes", "edge_energy", "push", "boundary", "deposit", "accum_phi",
+            "deposit_cell", "vmax2", "numax_lookup", "mcc_electron", "mcc_ion", "history_row",
+            "sum_into", "eedf_hist", "compact_scan", "compact_scan_blocks", "compact_scatter",
+        )}
+        self._k_copy = self.solver._async["copy_vec"]
+
+        g = grid
+        self.n_nodes = g.n_nodes
+        self._shape = g.shape
+        self._inv_dx = 1.0 / g.dx
+        self._inv_dy = 1.0 / g.dy
+        self._px = int(model.periodic_x)
+        self._py = int(model.periodic_y)
+        self._grid_args = (np.float64(g.x0), np.float64(g.y0), np.float64(self._inv_dx), np.float64(self._inv_dy),
+                           np.int32(g.nx), np.int32(g.ny))
+
+        # ---- dt・プラズマパラメータ (v1 と同じ規約) -------------------------------------
+        ip = pic.initial_plasma
+        amu = ip.ion_mass_amu if ip is not None else 40.0
+        self.m_ion = amu * MP
+        wpe = math.sqrt(ip.density * QE**2 / (EPS0 * ME)) if ip is not None else 0.0
+        if pic.dt is not None:
+            self.dt = float(pic.dt)
+        elif wpe > 0.0:
+            self.dt = 0.1 / wpe
+        else:
+            raise ValueError("pic.dt を指定してください (初期密度が無いため自動決定できません)")
+        self._stability_warnings(ip, wpe)
+        self._sub = max(1, int(pic.ion_subcycle))
+
+        with self._stream:
+            self._setup_device_state(ip)
+        self._pcg_iters = PCG_ITERS_INIT
+        self._graph = None
+        self._graph_key = None
+
+        # ---- 診断 ----------------------------------------------------------------------
+        self.t = 0.0
+        self.step_count = 0
+        self.history: dict[str, list[float]] = {k: [] for k in _HISTORY_KEYS}
+        self.timing: dict[str, float] = {k: 0.0 for k in _TIMING_KEYS}
+        self._hist_pending = 0
+        self.fields = None
+        self.cycle = None
+        self.collector_results = None
+        self.collector_result = None
+        self.eedf_results = None
+        self._last_frame_wall = -math.inf
+        self._reset_accumulators()
+
+        # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ) -----------------------
+        with self._stream:
+            self._kick_backward_half()
+        self._stream.synchronize()
+        self.setup_s = time.perf_counter() - t_setup
+
+    # ======================================================================================
+    # 設定の検査・補助
+    # ======================================================================================
+
+    @staticmethod
+    def _check_supported(project: Project, gas_field) -> None:
+        pic = project.pic
+        unsupported = []
+        if pic.injection is not None:
+            unsupported.append("粒子注入 (injection)")
+        if pic.fn is not None:
+            unsupported.append("FN 電界放出 (fn)")
+        if pic.merge is not None:
+            unsupported.append("粒子マージ (merge)")
+        if gas_field is not None or (pic.mcc is not None and pic.mcc.use_dsmc_gas):
+            unsupported.append("DSMC ガス場 (use_dsmc_gas)")
+        if unsupported:
+            raise ValueError(
+                "v2 PIC (mesh.mode='cartesian') は次の機能に未対応です: " + "、".join(unsupported)
+                + " (v1 PIC を使う場合はメッシュを unstructured/structured にしてください)"
+            )
+
+    def _side_kinds(self) -> list[int]:
+        """外周の粒子境界 [left, right, bottom, top]: 0 吸収、1 鏡面反射、2 周期。"""
+        m = self.model
+        reflect = set(self.pic.reflect_edges)
+        kinds = {}
+        for side, s in m.sides.items():
+            if s.kind == "periodic":
+                kinds[side] = 2
+            elif s.kind == "symmetry" or s.edge in reflect:
+                kinds[side] = 1
+            else:
+                kinds[side] = 0
+        if self.ridx == 1 and m.domain.y0 <= m.tol:
+            kinds["bottom"] = 1
+        elif self.ridx == 0 and m.domain.x0 <= m.tol:
+            kinds["left"] = 1
+        return [kinds["left"], kinds["right"], kinds["bottom"], kinds["top"]]
+
+    def _find_rf_freq(self) -> float | None:
+        for gr in self.model.groups:
+            if gr.rf:
+                return float(gr.rf[0].freq_hz)
+        for gr in self.model.groups:
+            if gr.waveform is not None:
+                return float(gr.waveform.freq_hz)
+        return None
+
+    def _stability_warnings(self, ip, wpe: float) -> None:
+        if wpe <= 0.0:
+            return
+        if wpe * self.dt > 0.3:
+            self.warnings.append(f"ωpe·dt = {wpe * self.dt:.3g} > 0.3: 時間刻みが粗すぎます (数値不安定の恐れ)")
+        if ip.te_ev > 0.0:
+            lam_d = math.sqrt(EPS0 * ip.te_ev * QE / (ip.density * QE**2))
+            h = max(self.grid.dx, self.grid.dy)
+            if h > 3.0 * lam_d:
+                self.warnings.append(
+                    f"セルサイズ {h:.3g} m > 3×デバイ長 {lam_d:.3g} m: メッシュがデバイ長を解像していません"
+                )
+
+    def _cell_gas_volume(self) -> np.ndarray:
+        """セルごとの気体体積 (物理単位、軸対称は 2π 込み) — フレームの要素密度用。"""
+        g = self.grid
+        n_sub = 6
+        xs, ys = g.xs, g.ys
+        s = (np.arange(n_sub) + 0.5) / n_sub
+        vol = np.zeros((g.ny, g.nx))
+        state = self.pgeo.cell_state
+        if self.ridx is None:
+            full = np.full((g.ny, g.nx), g.dx * g.dy)
+        elif self.ridx == 1:
+            full = g.dx * 0.5 * (ys[1:, None] ** 2 - ys[:-1, None] ** 2) * np.ones((1, g.nx))
+        else:
+            full = g.dy * 0.5 * (xs[None, 1:] ** 2 - xs[None, :-1] ** 2) * np.ones((g.ny, 1))
+        vol[state == 0] = full[state == 0]
+        jc, ic = np.nonzero(state == 2)
+        if jc.size:
+            sx = xs[ic][:, None, None] + g.dx * s[None, None, :]
+            sy = ys[jc][:, None, None] + g.dy * s[None, :, None]
+            sx, sy = np.broadcast_arrays(sx, sy)
+            gas = self.model.gas_at(sx, sy).astype(np.float64)
+            wgt = np.ones_like(sx) if self.ridx is None else (sy if self.ridx == 1 else sx)
+            vol[jc, ic] = np.sum(gas * wgt, axis=(1, 2)) * g.dx * g.dy / n_sub**2
+        return self._two_pi * vol
+
+    # ======================================================================================
+    # デバイス状態の構築
+    # ======================================================================================
+
+    def _setup_device_state(self, ip) -> None:
+        cp = self.cp
+        op = self.op
+        model = self.model
+        pic = self.pic
+        shp = self._shape
+
+        # ---- 場・右辺 ----
+        coo = op.coupling.tocoo()
+        self._crow = cp.asarray(coo.row.astype(np.int64))
+        self._ccol = cp.asarray(coo.col.astype(np.int64))
+        self._cval = cp.asarray(coo.data.astype(np.float64))
+        self._nnz = int(coo.nnz)
+        self._q_static = cp.asarray(op.q_static)
+        self._q_surf = cp.zeros(shp)
+        self._rho = cp.zeros(shp)
+        self._b = cp.zeros(shp)
+        self._x = cp.zeros(shp)
+        self._phi = cp.zeros(shp)
+        self._ex = cp.zeros(shp)
+        self._ey = cp.zeros(shp)
+        self._fixed = cp.asarray((op.mask == MASK_FIXED).astype(np.uint8))
+        self._fgrp = cp.asarray(np.maximum(op.fixed_group, 0).astype(np.int64))
+        self._mask = cp.asarray(op.mask)
+        self._cut_theta = cp.asarray(op.cut_theta)
+        self._cut_group = cp.asarray(np.maximum(op.cut_group, 0).astype(np.int32))
+        self._cx = self.solver.levels[0].cx
+        self._cy = self.solver.levels[0].cy
+        vol_phys = self._two_pi * op.vol_gas
+        self._inv_vol_phys = cp.asarray(np.where(vol_phys > 0.0, 1.0 / np.where(vol_phys > 0, vol_phys, 1.0), 0.0))
+        self._vol_gas = op.vol_gas
+
+        # ---- Dirichlet グループの電位波形 ----
+        groups = model.groups
+        n_g = max(len(groups), 1)
+        self._n_groups = len(groups)
+        dc = np.zeros(n_g)
+        rf_off = [0]
+        rf_amp, rf_om, rf_ph = [], [], []
+        wf_off = [0]
+        wf_freq = np.zeros(n_g)
+        wf_ph, wf_v = [], []
+        for k, gr in enumerate(groups):
+            dc[k] = gr.voltage
+            for c in gr.rf:
+                rf_amp.append(c.amplitude)
+                rf_om.append(2.0 * math.pi * c.freq_hz)
+                rf_ph.append(math.radians(c.phase_deg))
+            rf_off.append(len(rf_amp))
+            if gr.waveform is not None:
+                wf_ph.extend(gr.waveform.phase)
+                wf_v.extend(gr.waveform.v)
+                wf_freq[k] = gr.waveform.freq_hz
+            wf_off.append(len(wf_ph))
+        while len(rf_off) < n_g + 1:
+            rf_off.append(rf_off[-1])
+            wf_off.append(wf_off[-1])
+        f64 = lambda a: cp.asarray(np.asarray(a if len(a) else [0.0], dtype=np.float64))  # noqa: E731
+        self._g_dc = cp.asarray(dc)
+        self._g_rf_off = cp.asarray(np.asarray(rf_off, dtype=np.int32))
+        self._g_rf = (f64(rf_amp), f64(rf_om), f64(rf_ph))
+        self._g_wf_off = cp.asarray(np.asarray(wf_off, dtype=np.int32))
+        self._g_wf = (cp.asarray(wf_freq), f64(wf_ph), f64(wf_v))
+        self._vg = cp.zeros(n_g)
+
+        # ---- 粒子の境界 (固体形状の統一表) ----
+        pg = self.pgeo
+        s_type, s_kind, s_index, s_off, pxy, circ = [], [], [], [0], [], []
+        for s in pg.solids:
+            if hasattr(s.shape, "vertices"):
+                s_type.append(0)
+                pxy.extend(s.shape.vertices.ravel().tolist())
+                circ.extend([0.0, 0.0, 0.0])
+            else:
+                s_type.append(1)
+                circ.extend([s.shape.cx, s.shape.cy, s.shape.r])
+            s_kind.append(1 if s.kind == HIT_CONDUCTOR else 2)
+            s_index.append(s.index)
+            s_off.append(len(pxy) // 2)
+        i32 = lambda a: cp.asarray(np.asarray(a if len(a) else [0], dtype=np.int32))  # noqa: E731
+        self._n_solid = len(pg.solids)
+        self._s_type, self._s_kind, self._s_index, self._s_off = i32(s_type), i32(s_kind), i32(s_index), i32(s_off)
+        self._s_pxy = f64(pxy)
+        self._s_circ = f64(circ)
+        self._cell_state = cp.asarray(pg.cell_state)
+        self._side_kind = cp.asarray(np.asarray(self._side_kinds(), dtype=np.int32))
+        grp_gamma = np.array([gr.see_gamma for gr in groups] + [0.0])
+        side_gamma = np.zeros(4)
+        for k, side in enumerate(("left", "right", "bottom", "top")):
+            gidx = model.side_group.get(side)
+            if gidx is not None:
+                side_gamma[k] = grp_gamma[gidx]
+        self._side_gamma = cp.asarray(side_gamma)
+        cg = np.asarray(model.conductor_group, dtype=np.int64)
+        self._cond_gamma = f64(grp_gamma[cg] if len(cg) else [])
+        self._diel_gamma = f64([o.region.see_gamma if o.type == "dielectric" else 0.0 for o in model.others])
+        self._see_on = int(np.any(grp_gamma > 0.0) or np.any(self._diel_gamma.get() > 0.0))
+        self._see_speed = math.sqrt(2.0 * pic.see_energy_ev * QE / ME)
+        self._see_delta = 1e-3 * min(self.grid.dx, self.grid.dy)
+        self._has_diel = any(o.type == "dielectric" for o in model.others)
+
+        # ---- 表示用メッシュ (v1 UI 互換) ----
+        dm = pg.display_mesh()
+        self._dmesh = dm
+        self.mesh = _DisplayMeshView(nodes=dm.nodes, triangles=dm.triangles, tri_region=dm.tri_region)
+        self._cell_vol_gas = self._cell_gas_volume()
+
+        # ---- 一様磁場 (xy のみ) ----
+        self._bvec = b_vector(self.project)
+        self._R = {}
+        if self._bvec is not None:
+            if self.rz:
+                raise ValueError("軸対称モードでは一様磁場を指定できません")
+            for name, q_s, m_s in (("electron", -QE, ME), ("ion", QE, self.m_ion)):
+                dt_s = self.dt * self._sub if (name == "ion" and self._sub > 1) else self.dt
+                self._R[name] = cp.asarray(_boris_matrix(q_s, m_s, dt_s, self._bvec).ravel())
+            wc_e = QE * float(np.linalg.norm(self._bvec)) / ME
+            if wc_e * self.dt > 0.3:
+                self.warnings.append(f"ωce·dt = {wc_e * self.dt:.3g} > 0.3: 電子サイクロトロン運動を解像できていません")
+        self._R_dummy = cp.zeros(9)
+
+        # ---- RF 位相分解 ----
+        self._cycle_freq = self._find_rf_freq()
+        self._cycle_bins = int(pic.phase_bins)
+        if self._cycle_freq is not None and self._cycle_bins * self.n_nodes > CYCLE_MAX_VALUES:
+            nb = max(1, CYCLE_MAX_VALUES // self.n_nodes)
+            self.warnings.append(
+                f"位相分解データが大きすぎるため位相ビン数を {self._cycle_bins} → {nb} に減らしました (節点数 {self.n_nodes})"
+            )
+            self._cycle_bins = nb
+        self._cycle_enabled = self._cycle_freq is not None and self._cycle_bins > 0
+        self._cycle_period = 1.0 / self._cycle_freq if self._cycle_enabled else 0.0
+
+        # ---- パラメータ・カウンタ ----
+        self._prm = cp.zeros(16)
+        prm = np.zeros(16)
+        prm[P_DT] = self.dt
+        prm[P_ACC_START] = 1e300
+        prm[P_PERIOD] = self._cycle_period if self._cycle_enabled else 0.0
+        prm[P_NBINS] = max(self._cycle_bins, 1)
+        prm[P_SUB] = self._sub
+        self._prm[...] = cp.asarray(prm)
+        self._cnt = cp.zeros(_N_CNT, dtype=np.uint64)
+        self._dsl = cp.zeros(8)   # 0 ke_e, 1 ke_i, 2 fe, 3 surf_q
+        self._hist = cp.zeros((HISTORY_ROWS, len(_HIST_COLS)))
+
+        # ---- 粒子 ----
+        n0 = int(pic.n_macro) if ip is not None else 0
+        cap = max(2 * n0, n0 + 65536)
+        self.species = {
+            "electron": _Species("electron", 0, -QE, ME, True, cp, cap),
+            "ion": _Species("ion", 1, QE, self.m_ion, not (ip is not None and ip.immobile_ions), cp, cap),
+        }
+        self._scan_buffers(cap)
+        self._w0 = None
+        if ip is not None:
+            self._load_initial_plasma(ip)
+
+        # ---- MCC ----
+        self.mcc = None
+        self._mcc_seed = np.uint64(0)
+        if pic.mcc is not None:
+            self.mcc = MccModel(pic.mcc, self.m_ion)
+            self._mcc_seed = np.uint64(int(pic.mcc.seed) & 0xFFFFFFFFFFFFFFFF)
+            self._setup_mcc_tables()
+            self._check_collision_probability()
+        self._see_seed = np.uint64(((pic.mcc.seed if pic.mcc else 0) + 7919) & 0xFFFFFFFFFFFFFFFF)
+
+        # ---- コレクタ・EEDF ----
+        self._init_collectors()
+        self._init_eedf()
+
+    def _scan_buffers(self, cap: int) -> None:
+        cp = self.cp
+        nb = (cap + 1023) // 1024
+        self._scan_off = cp.zeros(nb * 1024, dtype=np.int32)
+        self._scan_flag = cp.zeros(nb * 1024, dtype=np.uint8)
+        self._scan_bsum = cp.zeros(nb, dtype=np.int64)
+        self._tmp = {k: cp.zeros(cap) for k in _Species.FIELDS}
+
+    def _load_initial_plasma(self, ip) -> None:
+        cp = self.cp
+        rng = np.random.default_rng(ip.seed)
+        n_macro = int(self.pic.n_macro)
+        d = self.model.domain
+        xs, ys = [], []
+        need = n_macro
+        while need > 0:
+            m = max(1024, int(need * 1.3) + 64)
+            if self.ridx == 1:
+                x = rng.uniform(d.x0, d.x1, m)
+                y = np.sqrt(rng.uniform(d.y0**2, d.y1**2, m))
+            elif self.ridx == 0:
+                x = np.sqrt(rng.uniform(d.x0**2, d.x1**2, m))
+                y = rng.uniform(d.y0, d.y1, m)
+            else:
+                x = rng.uniform(d.x0, d.x1, m)
+                y = rng.uniform(d.y0, d.y1, m)
+            ok = self.model.gas_at(x, y)
+            take = int(min(ok.sum(), need))
+            xs.append(x[ok][:take])
+            ys.append(y[ok][:take])
+            need -= take
+        x = np.concatenate(xs)
+        y = np.concatenate(ys)
+        v_gas = float(self._two_pi * self._vol_gas.sum())
+        if v_gas <= 0.0:
+            raise ValueError("粒子を装荷できる気体領域がありません")
+        w0 = ip.density * v_gas / n_macro
+        self._w0 = w0
+        for name, m_s, t_ev in (("electron", ME, ip.te_ev), ("ion", self.m_ion, ip.ti_ev)):
+            sigma = math.sqrt(t_ev * QE / m_s) if t_ev > 0.0 else 0.0
+            v = rng.normal(0.0, sigma, size=(n_macro, 3)) if sigma > 0.0 else np.zeros((n_macro, 3))
+            self._write_particles(name, {"x": x, "y": y, "vx": v[:, 0], "vy": v[:, 1], "vz": v[:, 2],
+                                         "w": np.full(n_macro, w0)})
+
+    def _write_particles(self, name: str, host: dict[str, np.ndarray]) -> None:
+        """ホスト配列で種の粒子を丸ごと置き換える (容量不足なら拡張)。"""
+        cp = self.cp
+        sp = self.species[name]
+        n = len(host["x"])
+        if n > CAP_HIGH * sp.cap:
+            self._grow(sp, int(CAP_GROW * n) + 1024)
+        for k in _Species.FIELDS:
+            a = sp.arrays[k]
+            a[:n] = cp.asarray(np.asarray(host[k], dtype=np.float64))
+            a[n:] = 0.0
+        cnt = self._cnt.get()
+        cnt[sp.index] = n
+        cnt[14 + sp.index] = cnt[4 + sp.index]   # 吸収カウンタの基準 (生存数 = 格納数 − 基準以後の吸収)
+        self._cnt[...] = cp.asarray(cnt)
+        self._graph = None
+
+    def _grow(self, sp: _Species, cap: int) -> None:
+        sp._alloc(cap)
+        cap_max = max(s.cap for s in self.species.values()) if hasattr(self, "species") else cap
+        if self._scan_off.size < ((cap_max + 1023) // 1024) * 1024 or self._tmp["x"].size < cap_max:
+            self._scan_buffers(cap_max)
+        self._graph = None
+
+    def _setup_mcc_tables(self) -> None:
+        cp = self.cp
+        mc = self.mcc
+        kind_code = {"elastic": 0, "excitation": 1, "ionization": 2, "isotropic": 0, "backscat": 1}
+        self._me_n = len(mc.e_procs)
+        if mc.e_procs:
+            e_tab, s_tab, lens = mc._e_xs_pack
+            self._me_kind = cp.asarray(np.array([kind_code[p.kind] for p in mc.e_procs], dtype=np.int32))
+            self._me_thr = cp.asarray(np.array([p.threshold_ev for p in mc.e_procs], dtype=np.float64))
+            self._me_mr = cp.asarray(np.array([p.mass_ratio for p in mc.e_procs], dtype=np.float64))
+            self._me_tab_e, self._me_tab_s = cp.asarray(e_tab), cp.asarray(s_tab)
+            self._me_len = cp.asarray(lens.astype(np.int32))
+            self._me_w = int(e_tab.shape[1])
+            grid, pref = mc._nu_e_table
+            self._me_pref = cp.asarray(pref)
+            self._me_ecap = float(grid[-1])
+            self._me_ngrid = len(grid)
+        self._mi_n = len(mc.i_procs)
+        if mc.i_procs:
+            e_tab, s_tab, lens = mc._i_xs_pack
+            self._mi_kind = cp.asarray(np.array([kind_code[p.kind] for p in mc.i_procs], dtype=np.int32))
+            self._mi_tab_e, self._mi_tab_s = cp.asarray(e_tab), cp.asarray(s_tab)
+            self._mi_len = cp.asarray(lens.astype(np.int32))
+            self._mi_w = int(e_tab.shape[1])
+            grid, pref = mc._nu_i_table
+            self._mi_pref = cp.asarray(pref)
+            self._mi_ecap = float(grid[-1])
+            self._mi_ngrid = len(grid)
+
+    def _check_collision_probability(self) -> None:
+        mc = self.mcc
+        for label, numax, dt_s in (("電子", mc.numax_e, self.dt), ("イオン", mc.numax_i, self.dt * self._sub)):
+            p = 1.0 - math.exp(-numax * dt_s) if numax > 0 else 0.0
+            if p > 0.5:
+                self.warnings.append(
+                    f"{label}の null-collision 候補確率 {p:.2f} > 0.5 (ν_max·dt = {numax * dt_s:.3g}): dt が大きすぎます"
+                )
+
+    def _init_collectors(self) -> None:
+        cp = self.cp
+        tol_default = float(self.project.mesh.size)
+        params = []
+        for c in self.pic.collectors:
+            p1 = np.asarray(c.p1, dtype=np.float64)
+            p2 = np.asarray(c.p2, dtype=np.float64)
+            seg = p2 - p1
+            length = float(np.linalg.norm(seg))
+            if length <= 0.0:
+                raise ValueError("コレクタ線分の長さが 0 です")
+            tan = seg / length
+            params.extend([p1[0], p1[1], tan[0], tan[1], -tan[1], tan[0], length,
+                           float(c.tol) if c.tol is not None else tol_default])
+        self._n_coll = len(self.pic.collectors)
+        self._coll = cp.asarray(np.asarray(params if params else [0.0] * 8, dtype=np.float64))
+        nc = max(self._n_coll, 1)
+        self._rec_e = cp.zeros(nc * COLLECTOR_MAX_SAMPLES)
+        self._rec_a = cp.zeros(nc * COLLECTOR_MAX_SAMPLES)
+        self._rec_w = cp.zeros(nc * COLLECTOR_MAX_SAMPLES)
+        self._rec_n = cp.zeros(nc, dtype=np.uint64)
+        self._coll_w = cp.zeros(nc)
+
+    def _init_eedf(self) -> None:
+        cp = self.cp
+        regs = self.pic.eedf_regions
+        self._n_eedf = len(regs)
+        self._eedf_bins = max((int(r.bins) for r in regs), default=1)
+        self._eedf_auto = [r.e_max_ev is None for r in regs]
+        self._eedf_meta = [{"label": r.label, "bins": int(r.bins)} for r in regs]
+        reg = []
+        for r in regs:
+            x0, x1 = sorted((r.p1[0], r.p2[0]))
+            y0, y1 = sorted((r.p1[1], r.p2[1]))
+            reg.extend([x0, x1, y0, y1, float(r.e_max_ev) if r.e_max_ev is not None else 30.0])
+        self._eedf_reg = cp.asarray(np.asarray(reg if reg else [0.0] * 5, dtype=np.float64))
+        self._eedf_hist = cp.zeros(max(self._n_eedf, 1) * self._eedf_bins)
+        self._eedf_sums = cp.zeros(max(self._n_eedf, 1) * 3)
+        self._eedf_samples = 0
+
+    # ======================================================================================
+    # カーネル起動 (1 ステップ = 固定のカーネル列)
+    # ======================================================================================
+
+    def _grid1(self, n: int) -> tuple[int]:
+        return (max(1, (int(n) + _BLOCK - 1) // _BLOCK),)
+
+    def _launch_field(self) -> None:
+        """電荷堆積 → 右辺 → 求解 → φ (Dirichlet 値・周期スレーブ込み) → 節点電場・場エネルギー。"""
+        from ..device.cuda import grid_2d
+
+        k = self._k
+        g = self.grid
+        n = self.n_nodes
+        k["eval_groups"]((1,), (max(32, self._n_groups),),
+                         (self._vg, np.int32(self._n_groups), self._g_dc, self._g_rf_off, *self._g_rf,
+                          self._g_wf_off, *self._g_wf, self._prm))
+        self._rho.fill(0.0)
+        for sp in self.species.values():
+            k["deposit"](self._grid1(sp.cap), (_BLOCK,),
+                         (sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.int32(0),
+                          np.float64(sp.q / self._two_pi), self._rho, self._rho, np.int32(0), np.int64(n),
+                          np.int32(0), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py)))
+        k["rhs_base"](self._grid1(n), (_BLOCK,), (self._b, self._q_static, self._rho, self._q_surf, np.int64(n)))
+        if self._nnz:
+            k["rhs_coupling"](self._grid1(self._nnz), (_BLOCK,),
+                              (self._b, self._crow, self._ccol, self._cval, self._vg, np.int64(self._nnz)))
+        self.solver.launch_solve(self._b, self._x, self._pcg_iters)
+        gr, bl = grid_2d(g.nx + 1, g.ny + 1)
+        k["fill_phi"](gr, bl, (self._phi, self._x, self._fixed, self._fgrp, self._vg, np.int32(g.nx), np.int32(g.ny),
+                               np.int32(self._px), np.int32(self._py), self._cnt))
+        k["efield_nodes"](gr, bl, (self._ex, self._ey, self._phi, self._mask, self._cut_theta, self._cut_group,
+                                   self._vg, np.int32(g.nx), np.int32(g.ny), np.float64(g.dx), np.float64(g.dy),
+                                   np.int32(self._px), np.int32(self._py)))
+        n_edges = (g.ny + 1) * g.nx + g.ny * (g.nx + 1) + self._nnz
+        k["edge_energy"](self._grid1(n_edges), (_BLOCK,),
+                         (self._phi, self._cx, self._cy, np.int32(g.nx), np.int32(g.ny), np.int32(self._px),
+                          np.int32(self._py), self._crow, self._ccol, self._cval, np.int64(self._nnz), self._vg,
+                          self._dsl[2:3]))
+
+    def _launch_push(self, sp: _Species) -> None:
+        if not sp.mobile:
+            return
+        dt_s = self.dt * (self._sub if sp.index == 1 else 1)
+        use_b = sp.name in self._R
+        self._k["push"](self._grid1(sp.cap), (_BLOCK,),
+                        (sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), self._ex, self._ey,
+                         *self._grid_args, np.float64(sp.q / sp.m), np.float64(dt_s), np.int32(1 if self.rz else 0),
+                         np.int32(self.ridx if self.rz else 0), np.int32(1 if use_b else 0),
+                         self._R[sp.name] if use_b else self._R_dummy, np.float64(0.5 * sp.m), self._prm,
+                         self._dsl[sp.index:sp.index + 1]))
+
+    def _launch_boundary(self, sp: _Species) -> None:
+        if not sp.mobile:
+            return
+        d = self.model.domain
+        el = self.species["electron"]
+        dt_s = self.dt * (self._sub if sp.index == 1 else 1)
+        self._k["boundary"](self._grid1(sp.cap), (_BLOCK,), (
+            sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.float64(dt_s),
+            np.int32(1 if self.rz else 0), np.int32(self.ridx if self.rz else 0),
+            np.float64(d.x0), np.float64(d.y0), np.float64(d.x1), np.float64(d.y1), self._side_kind,
+            self._cell_state, np.float64(self._inv_dx), np.float64(self._inv_dy),
+            np.int32(self.grid.nx), np.int32(self.grid.ny), np.int32(self._px), np.int32(self._py),
+            np.int32(self._n_solid), self._s_type, self._s_kind, self._s_index, self._s_off, self._s_pxy,
+            self._s_circ, self._side_gamma, self._cond_gamma, self._diel_gamma,
+            self._q_surf, np.float64(sp.q), np.float64(1.0 / self._two_pi),
+            np.int32(self._see_on), np.float64(self._see_speed), np.float64(self._see_delta),
+            el.x, el.y, el.vx, el.vy, el.vz, el.w, np.int64(el.cap),
+            np.int32(self._n_coll), self._coll, np.float64(sp.m),
+            self._rec_e, self._rec_a, self._rec_w, self._rec_n, self._coll_w, np.int64(COLLECTOR_MAX_SAMPLES),
+            self._prm, self._see_seed,
+        ))
+
+    def _launch_mcc(self) -> None:
+        if self.mcc is None:
+            return
+        k = self._k
+        mc = self.mcc
+        el, io = self.species["electron"], self.species["ion"]
+        g = self.grid
+        if self._me_n:
+            k["vmax2"](self._grid1(el.cap), (_BLOCK,), (el.vx, el.vy, el.vz, el.w, self._cnt, np.int32(0), self._prm))
+            k["numax_lookup"]((1,), (1,), (self._prm, self._cnt, np.int32(0), np.float64(ME), np.float64(mc.mu),
+                                           np.float64(mc.vth_gas), np.int32(0), self._me_pref,
+                                           np.int32(self._me_ngrid), np.float64(self._me_ecap), np.float64(self.dt)))
+            use_cyc = self._cyc_ion is not None
+            k["mcc_electron"](self._grid1(el.cap), (_BLOCK,), (
+                el.x, el.y, el.vx, el.vy, el.vz, el.w, np.int64(el.cap),
+                io.x, io.y, io.vx, io.vy, io.vz, io.w, np.int64(io.cap),
+                self._cnt, np.int32(self._me_n), self._me_kind, self._me_thr, self._me_mr, self._me_tab_e,
+                self._me_tab_s, self._me_len, np.int32(self._me_w), np.float64(mc.n_gas),
+                np.int32(1 if self.pic.mcc.ionization_split == "half" else 0), np.float64(mc.vth_gas),
+                self._prm, self._mcc_seed,
+                self._acc_ion, self._cyc_ion if use_cyc else self._acc_ion, np.int32(1 if use_cyc else 0),
+                np.int64(self.n_nodes), *self._grid_args, np.int32(self._px), np.int32(self._py),
+            ))
+        if self._mi_n and io.mobile:
+            dt_i = self.dt * self._sub
+            k["vmax2"](self._grid1(io.cap), (_BLOCK,), (io.vx, io.vy, io.vz, io.w, self._cnt, np.int32(1), self._prm))
+            k["numax_lookup"]((1,), (1,), (self._prm, self._cnt, np.int32(1), np.float64(mc.m_ion),
+                                           np.float64(mc.mu), np.float64(mc.vth_gas),
+                                           np.int32(1 if mc.ion_energy_frame == "com" else 0), self._mi_pref,
+                                           np.int32(self._mi_ngrid), np.float64(self._mi_ecap), np.float64(dt_i)))
+            k["mcc_ion"](self._grid1(io.cap), (_BLOCK,), (
+                io.vx, io.vy, io.vz, io.w, self._cnt, np.int32(self._mi_n), self._mi_kind, self._mi_tab_e,
+                self._mi_tab_s, self._mi_len, np.int32(self._mi_w), np.float64(mc.n_gas), np.float64(mc.m_ion),
+                np.float64(mc.mu), np.float64(mc.vth_gas), np.int32(1 if mc.ion_energy_frame == "com" else 0),
+                self._prm, self._mcc_seed,
+            ))
+        del g
+
+    def _launch_accumulate(self) -> None:
+        k = self._k
+        n = self.n_nodes
+        use_cyc = self._cyc is not None
+        k["accum_phi"](self._grid1(n), (_BLOCK,), (self._phi, self._acc_phi, self._cyc["phi"] if use_cyc else self._acc_phi,
+                                                  np.int32(1 if use_cyc else 0), np.int64(n), self._prm, self._cyc_count))
+        for name, sp in self.species.items():
+            key = "n_e" if sp.index == 0 else "n_i"
+            out2 = self._cyc[key] if use_cyc else self._acc_n[name]
+            k["deposit"](self._grid1(sp.cap), (_BLOCK,),
+                         (sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.int32(0),
+                          np.float64(1.0), self._acc_n[name], out2, np.int32(1 if use_cyc else 0), np.int64(n),
+                          np.int32(1), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py)))
+        el = self.species["electron"]
+        out2 = self._cyc["ke"] if use_cyc else self._acc_ke
+        k["deposit"](self._grid1(el.cap), (_BLOCK,),
+                     (el.x, el.y, el.vx, el.vy, el.vz, el.w, self._cnt, np.int32(0), np.int32(1),
+                      np.float64(0.5 * ME), self._acc_ke, out2, np.int32(1 if use_cyc else 0), np.int64(n),
+                      np.int32(1), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py)))
+        if self._n_eedf:
+            shm = self._n_eedf * (self._eedf_bins + 3) * 8
+            k["eedf_hist"](self._grid1(el.cap), (_BLOCK,),
+                           (el.x, el.y, el.vx, el.vy, el.vz, el.w, self._cnt, self._eedf_reg, np.int32(self._n_eedf),
+                            np.int32(self._eedf_bins), self._eedf_hist, self._eedf_sums, self._prm), shared_mem=shm)
+
+    def _launch_step(self) -> None:
+        """1 ステップ分のカーネル列を現在のストリームに積む (同期なし、CUDA Graph に記録可能)。"""
+        k = self._k
+        k["begin_step"]((1,), (1,), (self._prm, self._cnt, self._dsl, np.int32(8)))
+        self._launch_field()
+        el, io = self.species["electron"], self.species["ion"]
+        self._launch_push(el)
+        self._launch_push(io)
+        self._launch_boundary(el)
+        self._launch_boundary(io)
+        self._launch_mcc()
+        self._launch_accumulate()
+        if self._has_diel:
+            k["sum_into"]((64,), (_BLOCK,), (self._q_surf, np.int64(self.n_nodes), self._dsl[3:4]))
+        k["history_row"]((1,), (1,), (self._hist, np.int32(HISTORY_ROWS), np.int32(len(_HIST_COLS)), self._prm,
+                                      self._cnt, self._dsl, np.float64(0.5 * self._two_pi), np.float64(self._two_pi)))
+        k["end_step"]((1,), (1,), (self._prm,))
+
+    def _run_one_step(self) -> None:
+        if self._use_graph:
+            key = (tuple(sp.cap for sp in self.species.values()), self._pcg_iters, id(self._acc_phi))
+            if self._graph is None or self._graph_key != key:
+                with self._stream:
+                    self._stream.begin_capture()
+                    try:
+                        self._launch_step()
+                    finally:
+                        self._graph = self._stream.end_capture()
+                self._graph_key = key
+            self._graph.launch(self._stream)
+        else:
+            with self._stream:
+                self._launch_step()
+
+    def _kick_backward_half(self) -> None:
+        """初期の半ステップ後退キック v(-dt/2) = v(0) − (q/m) E(x0) dt/2 (面内 2 成分)。"""
+        cp = self.cp
+        self._k["begin_step"]((1,), (1,), (self._prm, self._cnt, self._dsl, np.int32(8)))
+        self._launch_field()
+        g = self.grid
+        for sp in self.species.values():
+            if not sp.mobile:
+                continue
+            n = int(self._cnt[sp.index].get())
+            if n == 0:
+                continue
+            dt_s = self.dt * (self._sub if sp.index == 1 else 1)
+            x, y = sp.x[:n], sp.y[:n]
+            fx = (x - g.x0) * self._inv_dx
+            fy = (y - g.y0) * self._inv_dy
+            i = cp.clip(cp.floor(fx).astype(np.int64), 0, g.nx - 1)
+            j = cp.clip(cp.floor(fy).astype(np.int64), 0, g.ny - 1)
+            wx = cp.clip(fx - i, 0.0, 1.0)
+            wy = cp.clip(fy - j, 0.0, 1.0)
+            s = g.nx + 1
+            kk = j * s + i
+            exf, eyf = self._ex.reshape(-1), self._ey.reshape(-1)
+
+            def interp(f):
+                return (1 - wx) * (1 - wy) * f[kk] + wx * (1 - wy) * f[kk + 1] + (1 - wx) * wy * f[kk + s] + wx * wy * f[kk + s + 1]
+
+            qm = sp.q / sp.m
+            sp.vx[:n] -= qm * interp(exf) * 0.5 * dt_s
+            sp.vy[:n] -= qm * interp(eyf) * 0.5 * dt_s
+
+    def _compact(self) -> None:
+        """吸収粒子 (w = 0) を詰める (順序保存)。容量不足・溢れも検査する (ここで同期)。"""
+        k = self._k
+        with self._stream:
+            for sp in self.species.values():
+                nb = (sp.cap + 1023) // 1024
+                k["compact_scan"]((nb,), (1024,), (sp.w, self._cnt, np.int32(sp.index), self._scan_off,
+                                                    self._scan_flag, self._scan_bsum, np.int64(sp.cap)))
+                k["compact_scan_blocks"]((1,), (1,), (self._scan_bsum, np.int64(nb), self._cnt, np.int32(sp.index)))
+                t = self._tmp
+                k["compact_scatter"](self._grid1(sp.cap), (_BLOCK,),
+                                     (self._scan_flag, np.int64(sp.cap), self._scan_off, self._scan_bsum,
+                                      sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w,
+                                      t["x"], t["y"], t["vx"], t["vy"], t["vz"], t["w"]))
+                for f in _Species.FIELDS:
+                    self._k_copy(self._grid1(sp.cap), (_BLOCK,), (sp.arrays[f], t[f], np.int64(sp.cap)))
+        cnt = self._cnt.get()
+        if int(cnt[C_OVERFLOW]):
+            raise RuntimeError(
+                f"粒子配列の容量を超えました (溢れ {int(cnt[C_OVERFLOW])} 個)。電離が急増しています — "
+                "粒子数 (n_macro) や dt を見直してください"
+            )
+        for sp in self.species.values():
+            n = int(cnt[sp.index])
+            if n > CAP_HIGH * sp.cap:
+                self._grow(sp, int(CAP_GROW * n) + 1024)
+
+    # ======================================================================================
+    # 時間平均・位相分解・コレクタ・EEDF
+    # ======================================================================================
+
+    def _reset_accumulators(self) -> None:
+        cp = self.cp
+        shp = self._shape
+        self._accum_start: int | None = None
+        self._accum_count = 0
+        self._acc_phi = cp.zeros(shp)
+        self._acc_n = {"electron": cp.zeros(shp), "ion": cp.zeros(shp)}
+        self._acc_ke = cp.zeros(shp)
+        self._acc_ion = cp.zeros(shp)
+        self._cyc = None
+        self._cyc_ion = None
+        self._cyc_count = cp.zeros(max(self._cycle_bins, 1), dtype=np.uint64)
+        self._cycle_particles = None
+        self._snap_t_start = math.inf
+        self._rec_n.fill(0)
+        self._coll_w.fill(0.0)
+        self._eedf_hist.fill(0.0)
+        self._eedf_sums.fill(0.0)
+        self._eedf_samples = 0
+        self._graph = None
+
+    def enable_density_accum(self, start_step: int) -> None:
+        cp = self.cp
+        self._accum_start = int(start_step)
+        self._accum_count = 0
+        if self._cycle_enabled:
+            b = self._cycle_bins
+            shp = self._shape
+            self._cyc = {key: cp.zeros((b, *shp)) for key in ("phi", "n_e", "n_i", "ke")}
+            self._cyc_ion = cp.zeros((b, *shp))
+            self._cyc_count = cp.zeros(b, dtype=np.uint64)
+        self._prm[P_ACC_START] = float(start_step)
+        self._graph = None
+
+    def _phase_bin(self, t: float) -> int:
+        ph = (t / self._cycle_period) % 1.0
+        return min(int(ph * self._cycle_bins), self._cycle_bins - 1)
+
+    def _prepare_eedf_auto(self) -> None:
+        """平均区間の最初のステップで、e_max 自動の EEDF 領域を「領域内の最大エネルギー×1.2」に決める。"""
+        if not any(self._eedf_auto):
+            return
+        cp = self.cp
+        el = self.species["electron"]
+        n = int(self._cnt[0].get())
+        x, y = el.x[:n], el.y[:n]
+        e = 0.5 * ME * (el.vx[:n] ** 2 + el.vy[:n] ** 2 + el.vz[:n] ** 2) / QE
+        alive = el.w[:n] != 0.0
+        reg = self._eedf_reg.get()
+        for r, auto in enumerate(self._eedf_auto):
+            if not auto:
+                continue
+            x0, x1, y0, y1 = reg[5 * r: 5 * r + 4]
+            sel = alive & (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
+            em = float(cp.max(cp.where(sel, e, 0.0))) if n else 0.0
+            reg[5 * r + 4] = em * 1.2 if em > 0.0 else 30.0
+        self._eedf_reg[...] = cp.asarray(reg)
+
+    def _node_density(self, acc, count: int) -> np.ndarray:
+        return (acc * self._inv_vol_phys / max(count, 1)).get().ravel()
+
+    def averaged_fields(self) -> dict | None:
+        if self._accum_start is None or self._accum_count == 0:
+            return None
+        cnt = self._accum_count
+        phi = (self._acc_phi / cnt).get().ravel()
+        grad = triangle_gradients(self._dmesh.nodes, self._dmesh.triangles, phi)
+        e_abs = np.hypot(grad[:, 0], grad[:, 1])
+        n_e = self._node_density(self._acc_n["electron"], cnt)
+        n_i = self._node_density(self._acc_n["ion"], cnt)
+        w_e = self._acc_n["electron"].get().ravel()
+        ke = self._acc_ke.get().ravel()
+        te = np.where(w_e > 0.0, (2.0 / 3.0) * ke / np.where(w_e > 0, w_e, 1.0) / QE, 0.0)
+        ion_rate = (self._acc_ion * self._inv_vol_phys).get().ravel() / (cnt * self.dt)
+        return {"phi": phi, "e_abs": e_abs, "n_e": n_e, "n_i": n_i, "te_ev": te, "ion_rate": ion_rate,
+                "avg_steps": cnt}
+
+    def cycle_data(self) -> dict | None:
+        if self._cyc is None:
+            return None
+        cp = self.cp
+        counts = self._cyc_count.get().astype(np.float64)
+        if counts.sum() == 0:
+            return None
+        b = self._cycle_bins
+        cnt_d = cp.asarray(np.maximum(counts, 1.0))[:, None, None]
+        phi = (self._cyc["phi"] / cnt_d).get().reshape(b, -1)
+        inv_v = self._inv_vol_phys[None]
+        n_e = (self._cyc["n_e"] * inv_v / cnt_d).get().reshape(b, -1)
+        n_i = (self._cyc["n_i"] * inv_v / cnt_d).get().reshape(b, -1)
+        ne_w = self._cyc["n_e"].get().reshape(b, -1)
+        ke = self._cyc["ke"].get().reshape(b, -1)
+        te = np.where(ne_w > 0.0, (2.0 / 3.0) * ke / np.where(ne_w > 0, ne_w, 1.0) / QE, 0.0)
+        ion_rate = (self._cyc_ion * inv_v / cnt_d).get().reshape(b, -1) / self.dt
+        grad = triangle_gradients(self._dmesh.nodes, self._dmesh.triangles, phi)
+        e_abs = np.hypot(grad[..., 0], grad[..., 1])
+        particles = {}
+        empty = np.zeros((0, 2))
+        for name in ("electron", "ion"):
+            snaps = self._cycle_particles[name] if self._cycle_particles is not None else [None] * b
+            particles[name] = [s if s is not None else empty for s in snaps]
+        return {"bins": b, "period_s": self._cycle_period, "phi": phi, "n_e": n_e, "n_i": n_i,
+                "e_abs": e_abs, "te_ev": te, "ion_rate": ion_rate, "particles": particles}
+
+    def _collector_data(self) -> list[dict] | None:
+        if not self._n_coll:
+            return None
+        rec_n = self._rec_n.get().astype(np.int64)
+        coll_w = self._coll_w.get()
+        e = self._rec_e.get().reshape(-1, COLLECTOR_MAX_SAMPLES)
+        a = self._rec_a.get().reshape(-1, COLLECTOR_MAX_SAMPLES)
+        w = self._rec_w.get().reshape(-1, COLLECTOR_MAX_SAMPLES)
+        out = []
+        for c in range(self._n_coll):
+            count = int(rec_n[c])
+            s = min(count, COLLECTOR_MAX_SAMPLES)
+            out.append({"count": count, "total_weight": float(coll_w[c]), "energies_ev": e[c, :s].copy(),
+                        "angles_deg": a[c, :s].copy(), "weights": w[c, :s].copy(),
+                        "truncated": count > COLLECTOR_MAX_SAMPLES})
+        return out
+
+    def _eedf_data(self) -> list[dict] | None:
+        if not self._n_eedf:
+            return None
+        hist = self._eedf_hist.get().reshape(self._n_eedf, self._eedf_bins)
+        sums = self._eedf_sums.get().reshape(self._n_eedf, 3)
+        reg = self._eedf_reg.get().reshape(self._n_eedf, 5)
+        out = []
+        for r, meta in enumerate(self._eedf_meta):
+            bins = meta["bins"]
+            e_max = float(reg[r, 4])
+            edges = np.linspace(0.0, e_max, bins + 1)
+            centers = 0.5 * (edges[1:] + edges[:-1])
+            de = edges[1] - edges[0]
+            h = hist[r, :bins]
+            tot = float(h.sum())
+            f = h / (tot * de) if tot > 0.0 else np.zeros(bins)
+            sw, swe, ov = sums[r]
+            mean_e = swe / sw if sw > 0.0 else 0.0
+            out.append({"label": meta["label"], "e_centers": centers, "f": f, "mean_energy_ev": mean_e,
+                        "t_eff_ev": 2.0 / 3.0 * mean_e, "total_weight": float(sw),
+                        "overflow_frac": float(ov / sw) if sw > 0.0 else 0.0, "n_samples": self._eedf_samples})
+        return out
+
+    def _snapshot_particles(self, t_step: float) -> None:
+        b = self._phase_bin(t_step)
+        for name in ("electron", "ion"):
+            if self._cycle_particles[name][b] is not None:
+                continue
+            self._cycle_particles[name][b] = self._subsample_positions(self.species[name], 1000)
+
+    def _subsample_positions(self, sp: _Species, limit: int) -> np.ndarray:
+        n = int(self._cnt[sp.index].get())
+        if n == 0:
+            return np.zeros((0, 2))
+        stride = max(1, int(math.ceil(n / limit)))
+        alive = sp.w[:n:stride] != 0.0
+        return np.stack([sp.x[:n:stride][alive].get(), sp.y[:n:stride][alive].get()], axis=1)
+
+    # ======================================================================================
+    # 粒子状態の読み書き (テスト・検証スクリプト用。実装非依存の API)
+    # ======================================================================================
+
+    def get_particles(self, name: str) -> dict[str, np.ndarray]:
+        """種 name の生存粒子をホスト配列で返す (x, y, vx, vy, vz, w)。v は半ステップ時刻の値。"""
+        self._stream.synchronize()
+        sp = self.species[name]
+        n = int(self._cnt[sp.index].get())
+        w = sp.w[:n].get()
+        alive = w != 0.0
+        return {f: (w if f == "w" else sp.arrays[f][:n].get())[alive] for f in _Species.FIELDS}
+
+    def set_particles(self, name: str, **arrays) -> None:
+        """種 name の粒子状態を置き換える。与えなかった成分は現在値のまま (粒子数を変えるなら全成分)。"""
+        cur = self.get_particles(name)
+        n = None
+        for key, v in arrays.items():
+            if key not in cur:
+                raise KeyError(key)
+            n = len(v) if n is None else n
+            if len(v) != n:
+                raise ValueError("set_particles: 配列の長さが揃っていません")
+        if n is not None and n != len(cur["x"]):
+            missing = [key for key in cur if key not in arrays]
+            if missing:
+                raise ValueError(f"粒子数を変える場合は全成分を与えてください (不足: {missing})")
+        merged = {key: np.asarray(arrays.get(key, cur[key]), dtype=np.float64) for key in cur}
+        self._write_particles(name, merged)
+
+    # ======================================================================================
+    # 1 ステップ・フレーム・実行
+    # ======================================================================================
+
+    def _flush_history(self) -> None:
+        """GPU のリングバッファに溜まった history 行をホストへ移す (ここで同期)。"""
+        m = self._hist_pending
+        if m == 0:
+            return
+        rows = self._hist.get()
+        start = (self.step_count - m) % HISTORY_ROWS
+        idx = (start + np.arange(m)) % HISTORY_ROWS
+        block = rows[idx]
+        h = self.history
+        for c, key in enumerate(_HIST_COLS):
+            col = block[:, c]
+            if key in ("n_e", "n_i", "wall_e", "wall_i", "coll_e", "ion_events", "see_events"):
+                h[key].extend(int(v) for v in col)
+            else:
+                h[key].extend(float(v) for v in col)
+        h["fn_i"].extend([0.0] * m)
+        h["fn_events"].extend([0] * m)
+        h["merged"].extend([0] * m)
+        self._hist_pending = 0
+
+    def _check_solver(self) -> None:
+        """PCG の残差を監視して反復数を自動調整する (ここで同期)。"""
+        if self.solver.direct:
+            return
+        rn, bn = self.solver.monitor()
+        rel = rn / bn if bn > 0.0 else 0.0
+        if rel > PCG_TOL and self._pcg_iters < PCG_ITERS_MAX:
+            self._pcg_iters = min(PCG_ITERS_MAX, self._pcg_iters + 2)
+        elif rel < 1e-3 * PCG_TOL and self._pcg_iters > 1:
+            self._pcg_iters -= 1
+
+    def step(self):
+        """1 ステップ進める (テスト・デバッグ用の同期 API)。戻り値は電位 (デバイス配列)。"""
+        self._run_one_step()
+        self.step_count += 1
+        self.t += self.dt
+        self._hist_pending += 1
+        self._stream.synchronize()
+        if self._hist_pending >= HISTORY_ROWS:
+            self._flush_history()
+        return self._phi
+
+    def _make_frame(self) -> dict:
+        cp = self.cp
+        self._flush_history()
+        particles = {name: self._subsample_positions(sp, MAX_FRAME_PARTICLES).tolist()
+                     for name, sp in self.species.items()}
+        diag = {key: v[-1] for key, v in self.history.items() if v}
+        g = self.grid
+        dens = {}
+        for name, sp in self.species.items():
+            cells = cp.zeros(g.nx * g.ny)
+            self._k["deposit_cell"](self._grid1(sp.cap), (_BLOCK,),
+                                    (sp.x, sp.y, sp.w, self._cnt, np.int32(sp.index), cells, *self._grid_args))
+            c = cells.get()
+            vol = self._cell_vol_gas.ravel()
+            dens[name] = np.where(vol > 0, c / np.where(vol > 0, vol, 1.0), 0.0)[self._dmesh.tri_cell]
+        return {
+            "type": "frame",
+            "step": self.step_count,
+            "t": self.t,
+            "phi": self._phi.get().ravel().tolist(),
+            "n_e": dens["electron"].tolist(),
+            "n_i": dens["ion"].tolist(),
+            "particles": particles,
+            "diag": diag,
+        }
+
+    def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
+        """n_steps 回実行して (診断履歴, フレーム列) を返す (v1 PicSimulation.run_batch と同じ契約)。"""
+        t_run = time.perf_counter()
+        if self._accum_start is None:
+            avg = self.pic.avg_steps if self.pic.avg_steps is not None else max(1, self.pic.n_steps // 4)
+            avg = min(avg, self.pic.n_steps)
+            self.enable_density_accum(self.step_count + self.pic.n_steps - avg + 1)
+        if self._cycle_enabled:
+            self._cycle_particles = {"electron": [None] * self._cycle_bins, "ion": [None] * self._cycle_bins}
+            self._snap_t_start = self.t + self.pic.n_steps * self.dt - self._cycle_period
+        frames: list[dict] = []
+        n_total = self.pic.n_steps
+        t_frames = 0.0
+        for step_i in range(n_total):
+            if should_stop is not None and should_stop():
+                break
+            if self.step_count + 1 == self._accum_start:
+                self._prepare_eedf_auto()
+            self._run_one_step()
+            self.step_count += 1
+            self.t += self.dt
+            self._hist_pending += 1
+            if self._accum_start is not None and self.step_count >= self._accum_start:
+                self._accum_count += 1
+                if self._n_eedf:
+                    self._eedf_samples += 1
+            last = step_i == n_total - 1
+            if self.step_count % COMPACT_EVERY == 0:
+                self._compact()
+            if self.step_count % MONITOR_EVERY == 0:
+                self._check_solver()
+            if self._hist_pending >= HISTORY_ROWS:
+                self._flush_history()
+            if self._cycle_enabled and self.t - self.dt >= self._snap_t_start - 1e-30:
+                self._stream.synchronize()
+                self._snapshot_particles(self.t - self.dt)
+            do_frame = (self.step_count % self.pic.frame_every == 0 or last) and (callback is not None or store_frames)
+            if do_frame:
+                now = time.perf_counter()
+                if now - self._last_frame_wall >= MIN_FRAME_INTERVAL_S or last:
+                    self._last_frame_wall = now
+                    self._check_finite()
+                    frame = self._make_frame()
+                    if store_frames:
+                        frames.append(frame)
+                    if callback is not None:
+                        callback(frame)
+                    t_frames += time.perf_counter() - now
+        self._stream.synchronize()
+        self._flush_history()
+        self._check_finite()
+        self.fields = self.averaged_fields()
+        self.cycle = self.cycle_data()
+        self.collector_results = self._collector_data()
+        self.collector_result = self.collector_results[0] if self.collector_results else None
+        self.eedf_results = self._eedf_data()
+        # GPU では位相ごとの時間を測ると同期で遅くなるため、実行時間を solve 以外の内訳に
+        # 按分せず "gather_push" (= GPU の 1 ステップ全体) と "frame" に分けて報告する
+        total = time.perf_counter() - t_run
+        self.timing["frame"] += t_frames
+        self.timing["gather_push"] += total - t_frames
+        return self.history, frames
+
+    def _check_finite(self) -> None:
+        h = self.history
+        if not h["phi_min"]:
+            return
+        if not (math.isfinite(h["phi_min"][-1]) and math.isfinite(h["phi_max"][-1]) and math.isfinite(h["ke_e"][-1])):
+            raise ValueError(
+                f"数値発散を検出しました (step {self.step_count}: 電位またはエネルギーが非有限値)。"
+                "dt を小さくする、初期密度を下げる、メッシュを細かくする等を検討してください"
+            )
+
+    def prepare_continue(self, n_steps: int, frame_every=None, avg_steps=None, phase_bins=None) -> None:
+        """完了/停止後の状態から追加実行の準備 (v1 と同じ契約。粒子・表面電荷・時刻は維持)。"""
+        self.pic.n_steps = int(n_steps)
+        if frame_every is not None:
+            self.pic.frame_every = int(frame_every)
+        if avg_steps is not None:
+            self.pic.avg_steps = int(avg_steps)
+        if phase_bins is not None:
+            self.pic.phase_bins = int(phase_bins)
+            self._cycle_bins = int(phase_bins)
+            self._cycle_enabled = self._cycle_freq is not None and self._cycle_bins > 0
+            self._cycle_period = 1.0 / self._cycle_freq if self._cycle_enabled else 0.0
+            self._prm[P_PERIOD] = self._cycle_period if self._cycle_enabled else 0.0
+            self._prm[P_NBINS] = float(max(self._cycle_bins, 1))
+        self._flush_history()
+        self.history = {key: [] for key in self.history}
+        self.timing = {key: 0.0 for key in self.timing}
+        self._reset_accumulators()
+        self._prm[P_ACC_START] = 1e300
+        self.fields = None
+        self.cycle = None
+        self.collector_results = None
+        self.collector_result = None
+        self.eedf_results = None
