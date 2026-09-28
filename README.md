@@ -35,7 +35,10 @@
 - [uv](https://docs.astral.sh/uv/) (Python依存関係・仮想環境の管理)
 - Node.js 20+
 - Rust(stable。[rustup](https://rustup.rs/) で導入。Tauri のビルドに必要)
-- (GPUオプション)NVIDIA GPU + CUDA 12.x → `uv sync --extra gpu`
+- (GPUオプション)NVIDIA GPU + CUDA 13.x ドライバ → `uv sync --extra dev --extra gpu`
+  (v2 エンジン `mesh.mode: "cartesian"` の GPU 実行に使う。CUDA カーネルは実行時に NVRTC で
+  コンパイルするので nvcc・MSVC は不要。Windows の Smart App Control 有効環境では公開直後の
+  CuPy/numba のバイナリがブロックされるため、`pyproject.toml` の `[tool.uv]` で動作確認済みの版に制限している)
 
 ## セットアップと起動
 
@@ -164,6 +167,22 @@ PIC-MCC統合ではTurnerベンチマーク(M. M. Turner et al., *Phys. Plasmas*
   5%以内)、圧力駆動チャネル流の質量収支(10%以内)
 - WebSocketライブ実行(`/ws/pic`: 進捗・φ・粒子・診断のストリーミング、停止可)
 
+### v2 エンジン(`mesh.mode: "cartesian"`、再構築中 — [prompts/119](prompts/119-v2-rebuild-plan.md))
+
+GUI のメッシュ設定で「直交格子+埋め込み境界 (v2・GPU)」を選ぶと、静電場と PIC を新エンジンで解く。
+
+- **埋め込み境界 (EB)**: 導体・誘電体の CAD 形状 (多角形・円) と格子線の交点を解析的に求める
+  カットセル離散化 (導体は Gibou の対称ゴーストフルイド法で 2 次精度、誘電体は直列/並列合成)。
+  同軸円筒の容量誤差は 512² で 1e-5 以下
+- **幾何マルチグリッド前処理 CG** (AMReX の MLMG と同じく各レベルを幾何から再離散化)。
+  CPU (Numba) / GPU (CuPy) 両対応、反復数は格子によらず 6〜7 回
+- **GPU PIC-MCC**: 1 ステップを CUDA Graph で再生するホスト同期ゼロの実装。v1 (8 スレッド) 比
+  18〜42 倍 (`backend/benchmarks/v2_bench.py`)。軸対称・一様 B・MCC・SEE・誘電体表面電荷・
+  IEDF コレクタ・EEDF 領域・位相分解に対応 (注入・FN 放出・粒子マージ・DSMC 連成は未対応)
+- **LXCat 完全対応** (`es_sim/xs/`、`POST /v2/xs/parse`): boltzpmp のパーサーの上位互換
+  (DATABASE・複数ガス・ROTATION・`<->` 統計重み・3 列目運動量移行・PARAM./COLUMNS 単位・
+  Phelps イオン形式)、EFFECTIVE→ELASTIC の厳密変換、混合ガスの boltzpmp 変換
+
 ## prompts/ について
 
 `prompts/` には開発時にサブエージェントへ与えた作業指示書(Markdown、番号順)を残している。
@@ -182,14 +201,15 @@ PIC-MCC統合ではTurnerベンチマーク(M. M. Turner et al., *Phys. Plasmas*
   PIC側のコレクタ機能で実装済み)
 - LXCat実データ(`backend/tests/data/Ar*.txt`)は再配布条件のため git 管理外。テストは同梱の
   合成フィクスチャで常時実行され、実データがあれば追加検証される
-- GPU(CuPy)化は未実装。現状は numpy/scipy のみで完結(CPU)
+- GPU (CuPy) は v2 エンジン (`mesh.mode: "cartesian"`) の静電場と PIC のみ。v2 の PIC は現状 GPU 専用
+  (CPU で PIC を回す場合は unstructured/structured の v1 エンジンを使う)。v2 は矩形 domain のみ対応
 - バッチ実行(`python -m es_sim.batch`)はプロセスごとに独立しているため、
   `pic.mcc.use_dsmc_gas`(直前のDSMC結果をサーバー保持状態から参照する機能)は未対応
 
 ## ロードマップ
 
-- Turnerベンチマーク ケース2〜4 の追加検証
-- CuPy によるGPU化(粒子プッシュ・電荷堆積のホットループが対象)
+- v2 再構築 (AMR・流体/DSMC の GPU 化・UI/CAD の作り直し) — [prompts/119](prompts/119-v2-rebuild-plan.md)
+- Turnerベンチマーク ケース1 の v2 GPU PIC での再検証、ケース2〜4 の追加検証
 - DXFインポート(既存CADジオメトリの取り込み)
 - 粒子軌道追跡の着地点分布ヒストグラム表示
 - バイナリ転送(大規模メッシュ時のJSON転送オーバーヘッド対策)

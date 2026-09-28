@@ -38,6 +38,9 @@ from .tl import TlSimulation
 from .mcc import GasField
 from .sweep import build_sweep_cases, resolve_sweep_module, run_sweep
 from .xs.api import XsParseRequest, XsParseResponse, parse_xs_text
+from .device import describe as describe_device
+from .field.compat import cartesian_mesh_result, cartesian_profile, cartesian_solve
+from .gpic import make_pic_simulation
 from .schema import (
     DsmcResultModel,
     ElectrodeCharge,
@@ -82,17 +85,23 @@ def _mesh_result(mesh) -> MeshResult:
 
 @app.get("/health")
 def health():
+    dev = describe_device()
     return {
         "status": "ok",
         "version": __version__,
-        "gpu": gpu_available(),
+        # "gpu" は v2 エンジン (mesh.mode="cartesian") が CUDA を使えるか (prompts/119)
+        "gpu": bool(dev["cuda"]) or gpu_available(),
         "numba": _numba_kernels.HAVE_NUMBA,
+        "v2": dev,
     }
 
 
 @app.post("/mesh", response_model=MeshResult)
 def mesh_endpoint(project: Project) -> MeshResult:
     try:
+        if project.mesh.mode == "cartesian":
+            # v2: 直交格子を三角形分割した表示用メッシュ (prompts/119)
+            return cartesian_mesh_result(project)
         return _mesh_result(generate_mesh(project))
     except Exception as exc:  # gmsh 由来の失敗をフロントへ伝える
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -100,6 +109,13 @@ def mesh_endpoint(project: Project) -> MeshResult:
 
 @app.post("/solve", response_model=SolveResult)
 def solve_endpoint(project: Project) -> SolveResult:
+    if project.mesh.mode == "cartesian":
+        # v2: 直交格子 + 埋め込み境界の GMG-PCG (GPU があれば GPU、prompts/119)
+        try:
+            res, _ = cartesian_solve(project)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return res
     try:
         mesh = generate_mesh(project)
         sol = solve(project, mesh)
@@ -123,9 +139,12 @@ def solve_endpoint(project: Project) -> SolveResult:
 @app.post("/profile", response_model=ProfileResult)
 def profile_endpoint(req: ProfileRequest) -> ProfileResult:
     try:
-        mesh = generate_mesh(req.project)
-        sol = solve(req.project, mesh)
-        s, v, e_abs = sample_line(mesh, sol, req.p1, req.p2, req.n)
+        if req.project.mesh.mode == "cartesian":
+            s, v, e_abs = cartesian_profile(req.project, req.p1, req.p2, req.n)
+        else:
+            mesh = generate_mesh(req.project)
+            sol = solve(req.project, mesh)
+            s, v, e_abs = sample_line(mesh, sol, req.p1, req.p2, req.n)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -535,8 +554,9 @@ async def _run_pic_session(ws: WebSocket, project_dict: dict) -> None:
                     "DSMC の実行結果がありません (先にガス流れ (DSMC) を実行してください)"
                 )
             gas_field = _last_dsmc["field"]
-        # メッシュ生成・行列組み立ても重いのでスレッドで実行
-        sim = await asyncio.to_thread(PicSimulation, project, gas_field)
+        # メッシュ生成・行列組み立ても重いのでスレッドで実行。
+        # mesh.mode="cartesian" は v2 GPU PIC (prompts/119)、それ以外は v1 FEM-PIC
+        sim = await asyncio.to_thread(make_pic_simulation, project, gas_field)
     except Exception as exc:
         await ws.send_json({"type": "error", "detail": str(exc)})
         return

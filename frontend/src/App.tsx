@@ -1899,8 +1899,8 @@ export default function App() {
     commitProject({ ...p, mesh: { ...p.mesh, size } });
   };
 
-  // メッシュモード (非構造 gmsh / 構造格子)。構造格子は矩形 domain のみ対応
-  const setMeshMode = (mode: "unstructured" | "structured") => {
+  // メッシュモード (非構造 gmsh / 構造格子 / v2 直交格子+EB)。構造格子・直交格子は矩形 domain のみ対応
+  const setMeshMode = (mode: "unstructured" | "structured" | "cartesian") => {
     const p = projectRef.current;
     commitProject({ ...p, mesh: { ...p.mesh, mode } });
   };

@@ -1336,7 +1336,8 @@ export interface Project {
     local_sizes?: { region: string; size: number }[];
     // 任意の線分近傍のローカルメッシュサイズ (prompts/90)。local_sizes と同じく structured では無視される
     local_edge_sizes?: EdgeMeshSize[];
-    mode?: "unstructured" | "structured";
+    // "cartesian" (prompts/119): v2 エンジン (直交格子 + 埋め込み境界)。静電場は GMG-PCG、PIC は GPU
+    mode?: "unstructured" | "structured" | "cartesian";
   };
   solver?: { backend: "numpy" | "cupy" | "auto" };
   particles?: ParticleSettings;

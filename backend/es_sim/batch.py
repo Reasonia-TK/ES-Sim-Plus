@@ -36,6 +36,7 @@ from typing import Any
 
 import numpy as np
 
+from .gpic import make_pic_simulation
 from .pic import PicSimulation
 from .pic1d import Pic1dSimulation, build_pic1d_result
 from .fluid1d import Fluid1dSimulation, build_fluid1d_result
@@ -260,7 +261,8 @@ def _worker(
                     "(DSMC結果はプロセス間で共有されないため)"
                 )
 
-            sim = PicSimulation(project, gas_field=None)
+            # mesh.mode="cartesian" は v2 GPU PIC (prompts/119)、それ以外は v1 FEM-PIC
+            sim = make_pic_simulation(project, gas_field=None)
             step_offset = sim.step_count  # 新規構築直後なので常に0
             n_steps = sim.pic.n_steps
 

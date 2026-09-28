@@ -235,7 +235,7 @@ interface Props {
   setEdgeVoltageWaveform: (edgeIndex: number, voltage_waveform: VoltageWaveform | undefined) => void;
   setEdgeSeeGamma: (edgeIndex: number, see_gamma: number) => void;
   setMeshSize: (size: number) => void;
-  setMeshMode: (mode: "unstructured" | "structured") => void;
+  setMeshMode: (mode: "unstructured" | "structured" | "cartesian") => void;
   setBField: (patch: Partial<BField>) => void;
   meshResult: MeshResult | null;
   selectedRegionId: string | null;
@@ -457,16 +457,26 @@ export default function FieldPanel({
             <span className="label">モード</span>
             <select
               value={project.mesh.mode ?? "unstructured"}
-              onChange={(e) => setMeshMode(e.target.value as "unstructured" | "structured")}
+              onChange={(e) => setMeshMode(e.target.value as "unstructured" | "structured" | "cartesian")}
             >
               <option value="unstructured">非構造 (三角形)</option>
               <option value="structured">構造格子</option>
+              <option value="cartesian">直交格子+埋め込み境界 (v2・GPU)</option>
             </select>
           </div>
           {(project.mesh.mode ?? "unstructured") === "structured" && (
             <div className="hint">
               構造格子は矩形domainのみ対応。等間隔格子を三角形2分割で切り、
               円・斜め境界は要素中心判定による階段近似になります(局所サイズは無効)。
+            </div>
+          )}
+          {project.mesh.mode === "cartesian" && (
+            <div className="hint">
+              v2 エンジン (矩形domainのみ)。導体・誘電体の境界は格子と厳密に交差させる埋め込み境界
+              (2次精度) で、静電場はマルチグリッド (CPU/GPU)、PIC は GPU (CUDA) で高速に解きます。
+              格子はマルチグリッド向けに指定サイズより最大 ~12% 細かくなります。表示は各セルを
+              三角形2分割したものです。粒子注入・FN放出・粒子マージ・DSMC連成は未対応
+              (軌道追跡・DSMC・流体2Dは同じ解像度の構造格子で実行されます)。
             </div>
           )}
 
@@ -507,9 +517,9 @@ export default function FieldPanel({
               </div>
             ))}
           </div>
-          {(project.mesh.mode ?? "unstructured") === "structured" &&
+          {(project.mesh.mode ?? "unstructured") !== "unstructured" &&
             (project.mesh.local_edge_sizes ?? []).length > 0 && (
-              <div className="hint">構造格子モードでは辺ローカルサイズは無視されます。</div>
+              <div className="hint">構造格子・直交格子モードでは辺ローカルサイズは無視されます。</div>
             )}
         </>
       )}
@@ -795,9 +805,9 @@ export default function FieldPanel({
                   onCommit={(v) => setRegionLocalSize(selected.id, v > 0 ? unitToM(v, lengthUnit) : null)}
                 />
               </label>
-              {(project.mesh.mode ?? "unstructured") === "structured" &&
+              {(project.mesh.mode ?? "unstructured") !== "unstructured" &&
                 project.mesh.local_sizes?.some((ls) => ls.region === selected.id) && (
-                  <div className="hint">構造格子モードではローカルメッシュサイズは無視されます。</div>
+                  <div className="hint">構造格子・直交格子モードではローカルメッシュサイズは無視されます。</div>
                 )}
               <button className="danger" onClick={() => deleteRegion(selected.id)}>
                 削除
