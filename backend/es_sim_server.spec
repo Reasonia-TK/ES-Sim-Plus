@@ -73,15 +73,18 @@ hiddenimports = [
     "es_sim.server",   # uvicorn.run("es_sim.server:app") の文字列参照
     "gmsh",
     "numba",           # _numba_kernels.py の try/except 内 import の保険 (prompts/76)
-    "boltzpm",         # boltz.py の try/except 内 import の保険 (numba と同じ理由、prompts/117)
+    "boltzpmp",        # boltz.py の try/except 内 import の保険 (numba と同じ理由、prompts/117/119)
+    "boltzpmp._core",  # boltzpmp の Rust 拡張 (.pyd)。静的解析で拾われない場合の保険
 ]
 # uvicorn のワーカ/ループ/プロトコル実装は動的インポートされる
 hiddenimports += collect_submodules("uvicorn")
 
-# boltzpm 同梱の LXCat 断面積データ (boltzpm/data/Ar.txt 等、load_argon() が参照する。
+# boltzpmp 同梱の LXCat 断面積データ (boltzpmp/data/Ar.txt 等、load_argon() が参照する。
 # 本体の LMEA テーブル生成 (xsprocess_to_mixture) 自体はこれらを使わないが、
-# boltzpm パッケージの一部として同梱しておく (prompts/117)
-datas = collect_data_files("boltzpm")
+# boltzpmp パッケージの一部として同梱しておく (prompts/117)
+datas = collect_data_files("boltzpmp")
+# v2 の CUDA カーネル (.cu) は実行時に NVRTC でコンパイルするためソースを同梱する (prompts/119)
+datas += collect_data_files("es_sim", includes=["kernels/*.cu", "kernels/*.cuh"])
 
 a = Analysis(
     ["run_server.py"],

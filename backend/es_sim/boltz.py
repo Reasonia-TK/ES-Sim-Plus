@@ -1,4 +1,18 @@
-"""boltzpm (https://github.com/Syb04/boltzpm) 連携 — LMEA 流体係数生成 (prompts/117)。
+"""boltzpmp (https://github.com/Reasonia-TK/boltzpmp) 連携 — LMEA 流体係数生成 (prompts/117, 119)。
+
+boltzpmp は旧 boltzpm (Python 版、リポジトリ消滅) の Rust 移植・後継で、本モジュールが
+使う API (CrossSection/Gas/Mixture/PMSolver/solve_dc/SwarmResult) は互換。旧版との
+挙動差 (prompts/119 で対応):
+
+- solve_dc の既定が陰的定常解法 (method="implicit") になり、tol はソース反復の残差
+  (既定 1e-8)。旧 boltzpm の陽的時間積分向けに絞っていた tol=3e-3/max_steps=1e5 は
+  渡さず、boltzpmp の既定を使う (陰解法なので低 E/N でも高速に収束する)。
+- 超弾性衝突 (superelastic) とガス熱運動による電子加熱 (gas_heating) が既定で有効。
+  BOLSIG+ と同じ物理で、opts から切替可能にした (旧 boltzpm 相当は両方 False)。
+- rate_coefficients に "gas:process (superelastic)" キーが増える (本モジュールは
+  プロセスごとのキーを明示して引くので影響なし)。
+
+以下の本文中の「boltzpm」は同 API を持つ boltzpmp を指す。
 
 ## 背景・LMEA (Local Mean Energy Approximation) とは
 
@@ -60,7 +74,7 @@ from .particles import ME, QE
 from .schema import XsProcess
 
 try:
-    import boltzpm as bp
+    import boltzpmp as bp
 
     _BOLTZPM_IMPORT_ERROR: Exception | None = None
 except Exception as _exc:  # pragma: no cover - このリポジトリの CI/サンドボックスは常にインストール済み
@@ -69,15 +83,15 @@ except Exception as _exc:  # pragma: no cover - このリポジトリの CI/サ�
 
 
 def boltzpm_available() -> bool:
-    """boltzpm が import 可能かどうか (server.py の /ws/boltz が使う)。"""
+    """boltzpmp が import 可能かどうか (server.py の /ws/boltz が使う)。"""
     return bp is not None
 
 
 def _require_boltzpm() -> None:
     if bp is None:
         raise RuntimeError(
-            "boltzpm がインストールされていません "
-            f"(pip install boltzpm、または pip install -e /path/to/boltzpm。詳細: {_BOLTZPM_IMPORT_ERROR})"
+            "boltzpmp がインストールされていません "
+            f"(pip install boltzpmp。詳細: {_BOLTZPM_IMPORT_ERROR})"
         )
 
 
@@ -147,6 +161,13 @@ DEFAULT_BOLTZ_OPTS: dict = {
     "eps_max_ev": None,   # None なら「電離/励起の最大閾値×8」と 40 eV の大きい方
     "d_eps_ev": 0.25,
     "n_theta": 16,
+    # boltzpmp の PMSolver 既定 (BOLSIG+ と同じ物理)。旧 boltzpm 相当は両方 False
+    "superelastic": True,
+    "gas_heating": True,
+    # 陰解法の反復上限 (boltzpmp 既定は 2e6)。収束点は通常 15〜40 反復で済むが、粗すぎる
+    # メッシュで収束しない点 (例: d_eps 0.5 eV・n_theta 8 の 1 Td) は既定だと ~170 s
+    # 空回りするため、5000 反復 (~0.4 s) で見切ってテーブルから除外する (prompts/119)
+    "max_steps": 5000,
 }
 
 
@@ -221,7 +242,14 @@ def run_boltz_sweep(
     n_points = int(resolved["n_points"])
     en_grid = np.geomspace(float(resolved["en_min_td"]), float(resolved["en_max_td"]), n_points)
 
-    solver = bp.PMSolver(mixture, eps_max_eV=eps_max_ev, d_eps_eV=d_eps_ev, n_theta=n_theta)
+    solver = bp.PMSolver(
+        mixture,
+        eps_max_eV=eps_max_ev,
+        d_eps_eV=d_eps_ev,
+        n_theta=n_theta,
+        superelastic=bool(resolved["superelastic"]),
+        gas_heating=bool(resolved["gas_heating"]),
+    )
 
     ion_keys: list[str] = []
     exc_keys: list[str] = []
@@ -244,15 +272,10 @@ def run_boltz_sweep(
             warnings_out.append(f"掃引が中断されました ({i - 1}/{n_points} 点で停止)")
             break
 
-        # tol/max_steps: LMEA テーブルは近似 (Maxwell 平均も近似) なので boltzpm 自身の
-        # examples/dc_argon.py の tol=1e-4 より少し緩め (3e-3) にして、低 E/N の点
-        # (収束がもともと遅い) でも現実的な時間で収束させる。実測 (粗メッシュ・
-        # eps_max~126eV): tol=1e-4 だと低 E/N 点が max_steps=300_000 を全消化して
-        # 約60秒/点かかる (収束しない/ぎりぎり) のに対し、tol=3e-3 なら数秒/点で
-        # 収束する。max_steps も examples の既定 (300_000) より絞り、それでも
-        # 収束しない点はどのみちテーブルから除外されるので「見切りを早くして
-        # 多点を掃く」方を優先する
-        result = solver.solve_dc(EN_Td=float(en), tol=3e-3, max_steps=100_000, check_every=200)
+        # boltzpmp の既定 (陰的定常解法 + Anderson 加速、tol=1e-8 のソース反復残差) を
+        # そのまま使う。旧 boltzpm の陽的時間積分では低 E/N で収束が遅く tol=3e-3 まで
+        # 緩めていたが、陰解法では 1 点あたり ~0.1 s で厳密に収束する (prompts/119)
+        result = solver.solve_dc(EN_Td=float(en), max_steps=int(resolved["max_steps"]))
 
         if not result.converged:
             warnings_out.append(f"E/N={float(en):.4g} Td: 収束しませんでした (この点はテーブルから除外)")
@@ -313,7 +336,9 @@ def run_boltz_sweep(
         )
 
     meta_opts = dict(resolved)
+    # キー名はフロント (BoltzSection.tsx) 互換のため boltzpm_version のまま。値は boltzpmp の版
     meta_opts["boltzpm_version"] = getattr(bp, "__version__", "unknown")
+    meta_opts["solver_package"] = "boltzpmp"
 
     return {
         "en_td": [r["en_td"] for r in rows],

@@ -14,15 +14,22 @@ dependencies = [
     # optional 依存として扱う (import 失敗時は numpy 実装へ自動フォールバックする、
     # es_sim/_numba_kernels.py 参照) が、配布版には常に同梱して既定で有効にする
     "numba>=0.59",
-    # 電子 Boltzmann ソルバー (伝播演算子法)。LMEA 流体係数テーブル生成 (prompts/117、
-    # es_sim/boltz.py) に使う。PyPI 未公開のためリポジトリを直接指定する
-    # (release.yml の `pip install -e .` が git 依存を解決する)
-    "boltzpm @ git+https://github.com/Syb04/boltzpm.git",
+    # 電子 Boltzmann ソルバー (伝播演算子法、Rust 製)。LMEA 流体係数テーブル生成
+    # (prompts/117、es_sim/boltz.py) と LXCat 断面積の Boltzmann 解析に使う。
+    # 旧 boltzpm (git 依存、リポジトリ消滅) の後継で API 互換 (prompts/119)
+    "boltzpmp>=0.5,<0.6",
 ]
 
 [project.optional-dependencies]
-gpu = ["cupy-cuda12x>=13.0"]  # NVIDIA CUDA 12.x / Windows ネイティブ動作
+# NVIDIA GPU (CUDA 13.x ドライバ) / Windows ネイティブ動作。カーネルは NVRTC で実行時コンパイル
+gpu = ["cupy-cuda13x>=13.6"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[tool.uv]
+# Windows の Smart App Control (SAC) は公開直後の PyPI バイナリ (.pyd) をブロックする。
+# SAC 有効環境で動作確認できた版に uv の解決だけを制限する (pip 利用者には影響しない)。
+# 新版へ上げる前に SAC 下で `import numba` / `import cupy` が通ることを確認すること (prompts/119)
+constraint-dependencies = ["numba<0.67", "cupy-cuda13x<14.1"]
 
 [build-system]
 requires = ["setuptools>=68"]
