@@ -182,7 +182,8 @@ GUI のメッシュ設定で「直交格子+埋め込み境界 (v2・GPU)」を�
   (対称正定値) を代数マルチグリッド CG で解く (GPU: pyamg の階層 + Chebyshev 平滑化を CUDA で)。
   粗細界面を含めて 2 次精度・電荷保存。細線の同軸では一様格子の 1/24 の未知数で同じ精度。
   **PIC も同じ細分化格子の上で GPU 実行**でき (電極近傍だけ細かい CCP が全体を細かくした一様格子と
-  一致)、静電場は解に基づく適応細分化 (`adaptive`) も使える
+  一致)、実行中に電子の密度・温度から求めたデバイ長に合わせて格子を作り直せる (`pic_regrid_every`、
+  [prompts/123](prompts/123-pic-regrid.md))。静電場は解に基づく適応細分化 (`adaptive`) も使える
 - **GPU PIC-MCC**: 1 ステップを CUDA Graph で再生するホスト同期ゼロの実装。v1 (8 スレッド) 比
   18〜42 倍 (`backend/benchmarks/v2_bench.py`)。軸対称・一様 B・MCC・SEE・誘電体表面電荷・
   IEDF コレクタ・EEDF 領域・位相分解に対応 (注入・FN 放出・粒子マージ・DSMC 連成は未対応)
@@ -210,15 +211,15 @@ GUI のメッシュ設定で「直交格子+埋め込み境界 (v2・GPU)」を�
   合成フィクスチャで常時実行され、実データがあれば追加検証される
 - GPU (CuPy) は v2 エンジン (`mesh.mode: "cartesian"`) の静電場と PIC のみ。v2 の PIC は現状 GPU 専用
   (CPU で PIC を回す場合は unstructured/structured の v1 エンジンを使う)。v2 は矩形 domain のみ対応
-- v2 の局所細分化 (AMR) は静電場と PIC に対応 (流体・DSMC・軌道追跡は基本格子)。PIC の細分化は
-  実行中に変わらない (静的)。粗細界面には粒子の自己力が残る (大きさは PIC の粒子ノイズと同程度、
-  [prompts/122](prompts/122-amr-gpu-pic.md))。解に基づく適応細分化は静電場のみ
+- v2 の局所細分化 (AMR) は静電場と PIC に対応 (流体・DSMC・軌道追跡は基本格子)。PIC の動的再格子化は
+  時間平均区間の前だけ。粗細界面には粒子の自己力が残る (大きさは PIC の粒子ノイズや壁際の鏡像力と
+  同程度、[prompts/122](prompts/122-amr-gpu-pic.md))。解に基づく適応細分化 (`adaptive`) は静電場のみ
 - バッチ実行(`python -m es_sim.batch`)はプロセスごとに独立しているため、
   `pic.mcc.use_dsmc_gas`(直前のDSMC結果をサーバー保持状態から参照する機能)は未対応
 
 ## ロードマップ
 
-- v2 再構築 (PIC の動的再格子化・流体/DSMC の GPU 化・UI/CAD の作り直し) — [prompts/119](prompts/119-v2-rebuild-plan.md)
+- v2 再構築 (流体/DSMC の GPU 化・UI/CAD の作り直し) — [prompts/119](prompts/119-v2-rebuild-plan.md)
 - Turnerベンチマーク ケース1 の v2 GPU PIC での再検証、ケース2〜4 の追加検証
 - DXFインポート(既存CADジオメトリの取り込み)
 - 粒子軌道追跡の着地点分布ヒストグラム表示

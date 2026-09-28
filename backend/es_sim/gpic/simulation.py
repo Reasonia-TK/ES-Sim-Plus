@@ -71,7 +71,14 @@ from ..geom.model import EPS0, GeometryModel
 from ..mcc import MccModel
 from ..particles import ME, MP, QE, _boris_matrix, b_vector
 from ..schema import Project
-from .geometry import HIT_CONDUCTOR, HIT_DIELECTRIC, DisplayMesh, ParticleGeometry, triangle_gradients
+from .geometry import (
+    HIT_CONDUCTOR,
+    HIT_DIELECTRIC,
+    DisplayMesh,
+    ParticleGeometry,
+    cell_gas_volume,
+    triangle_gradients,
+)
 
 MAX_FRAME_PARTICLES = 2000
 COLLECTOR_MAX_SAMPLES = 50000
@@ -91,6 +98,8 @@ PCG_ITERS_INIT = 3
 PCG_ITERS_MAX = 30
 PCG_TOL = 1e-8
 MONITOR_EVERY = 64
+#: 動的再格子化のタグ用に電子の密度・温度を積算する間隔 [ステップ]
+TAG_EVERY = 8
 
 _BLOCK = 256
 _HIST_COLS = (
@@ -249,6 +258,17 @@ class GpuPicSimulation:
         self._last_frame_wall = -math.inf
         self._reset_accumulators()
 
+        # ---- 動的再格子化 (prompts/123) ------------------------------------------------------
+        self.mesh_version = 0            # 再格子化のたびに増える (フレーム・done に新しい格子を添える)
+        self._frame_mesh_version = 0
+        self.regrid_log: list[dict] = []
+        self._regrid_every = self.amr.hier.spec.pic_regrid_every if self.amr is not None else 0
+        self._tag_count = 0
+        if self._regrid_every:
+            self._tag_w = self.cp.zeros(self._shape)
+            self._tag_ke = self.cp.zeros(self._shape)
+        self._self_force_warning()
+
         # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ) -----------------------
         with self._stream:
             self._kick_backward_half()
@@ -279,15 +299,16 @@ class GpuPicSimulation:
 
     @staticmethod
     def _build_amr_layout(project: Project, model: GeometryModel, grid):
-        """mesh.amr が細分化を起こすなら AMR PIC の表 (amr.pic_layout)、それ以外は None。"""
+        """mesh.amr が細分化を起こす (または動的再格子化が有効) なら AMR PIC の表、それ以外は None。"""
         amr = project.mesh.amr
         if amr is None or (amr.max_level <= 0 and not amr.regions):
             return None
         from ..amr import AmrHierarchy, AmrSpec
         from ..amr.pic_layout import build_pic_layout
 
-        hier = AmrHierarchy(model, grid, AmrSpec.from_settings(amr))
-        if hier.max_level == 0:
+        spec = AmrSpec.from_settings(amr)
+        hier = AmrHierarchy(model, grid, spec)
+        if hier.max_level == 0 and spec.pic_regrid_every <= 0:
             return None
         return build_pic_layout(model, hier)
 
@@ -351,28 +372,7 @@ class GpuPicSimulation:
 
     def _cell_gas_volume(self) -> np.ndarray:
         """セルごとの気体体積 (物理単位、軸対称は 2π 込み) — フレームの要素密度用。"""
-        g = self.grid
-        n_sub = 6
-        xs, ys = g.xs, g.ys
-        s = (np.arange(n_sub) + 0.5) / n_sub
-        vol = np.zeros((g.ny, g.nx))
-        state = self.pgeo.cell_state
-        if self.ridx is None:
-            full = np.full((g.ny, g.nx), g.dx * g.dy)
-        elif self.ridx == 1:
-            full = g.dx * 0.5 * (ys[1:, None] ** 2 - ys[:-1, None] ** 2) * np.ones((1, g.nx))
-        else:
-            full = g.dy * 0.5 * (xs[None, 1:] ** 2 - xs[None, :-1] ** 2) * np.ones((g.ny, 1))
-        vol[state == 0] = full[state == 0]
-        jc, ic = np.nonzero(state == 2)
-        if jc.size:
-            sx = xs[ic][:, None, None] + g.dx * s[None, None, :]
-            sy = ys[jc][:, None, None] + g.dy * s[None, :, None]
-            sx, sy = np.broadcast_arrays(sx, sy)
-            gas = self.model.gas_at(sx, sy).astype(np.float64)
-            wgt = np.ones_like(sx) if self.ridx is None else (sy if self.ridx == 1 else sx)
-            vol[jc, ic] = np.sum(gas * wgt, axis=(1, 2)) * g.dx * g.dy / n_sub**2
-        return self._two_pi * vol
+        return cell_gas_volume(self.model, self.grid, self.pgeo.cell_state)
 
     # ======================================================================================
     # デバイス状態の構築
@@ -413,29 +413,11 @@ class GpuPicSimulation:
             nyv = vol_gas.shape[0] - (1 if op.periodic_y else 0)
             nxv = vol_gas.shape[1] - (1 if op.periodic_x else 0)
             self._total_gas_volume = float(self._two_pi * vol_gas[:nyv, :nxv].sum())
+            vol_phys = self._two_pi * vol_gas
+            self._inv_vol_phys = cp.asarray(np.where(vol_phys > 0.0, 1.0 / np.where(vol_phys > 0, vol_phys, 1.0), 0.0))
+            self._vol_gas = vol_gas
         else:
-            lay = self.amr
-            i32 = lambda a: cp.asarray(np.ascontiguousarray(a, dtype=np.int32))  # noqa: E731
-
-            def dev_csr(m):
-                m = m.tocsr()
-                m.sort_indices()
-                return (i32(m.indptr), i32(m.indices), cp.asarray(m.data.astype(np.float64)))
-
-            self._q_static = cp.asarray(lay.q_static)
-            self._b = cp.zeros(max(lay.n_c, 1))
-            self._x = cp.zeros(max(lay.n_c, 1))
-            self._csr = {name: dev_csr(getattr(lay, name)) for name in ("PTq", "PC", "Gx", "Gy")}
-            self._e_lists = (i32(lay.edge_u), i32(lay.edge_v), cp.asarray(lay.edge_g, dtype=np.float64),
-                             np.int64(lay.edge_u.size), i32(lay.coup_u), i32(lay.coup_grp),
-                             cp.asarray(lay.coup_g, dtype=np.float64), np.int64(lay.coup_u.size))
-            self._gx = (cp.asarray(lay.dd), cp.asarray(lay.di), cp.asarray(lay.refined), i32(lay.blockid),
-                        i32(lay.tab))
-            vol_gas = lay.node_vol_gas / self._two_pi
-            self._total_gas_volume = float(lay.total_gas_volume)
-        vol_phys = self._two_pi * vol_gas
-        self._inv_vol_phys = cp.asarray(np.where(vol_phys > 0.0, 1.0 / np.where(vol_phys > 0, vol_phys, 1.0), 0.0))
-        self._vol_gas = vol_gas
+            self._setup_amr_fields(self.amr)
 
         # ---- Dirichlet グループの電位波形 ----
         groups = model.groups
@@ -512,14 +494,10 @@ class GpuPicSimulation:
             dm = pg.display_mesh()
             self._cell_vol_gas = self._cell_gas_volume()
             self._n_cells = self.grid.nx * self.grid.ny
+            self._dmesh = dm
+            self.mesh = _DisplayMeshView(nodes=dm.nodes, triangles=dm.triangles, tri_region=dm.tri_region)
         else:
-            lay = self.amr
-            dm = DisplayMesh(nodes=lay.disp_nodes, triangles=lay.disp_tris, tri_region=lay.disp_tri_region,
-                             tri_cell=lay.tri_cell)
-            self._cell_vol_gas = lay.cell_vol_gas
-            self._n_cells = lay.n_cells
-        self._dmesh = dm
-        self.mesh = _DisplayMeshView(nodes=dm.nodes, triangles=dm.triangles, tri_region=dm.tri_region)
+            self._set_amr_display(self.amr)
 
         # ---- 一様磁場 (xy のみ) ----
         self._bvec = b_vector(self.project)
@@ -585,6 +563,39 @@ class GpuPicSimulation:
         # ---- コレクタ・EEDF ----
         self._init_collectors()
         self._init_eedf()
+
+    def _setup_amr_fields(self, lay) -> None:
+        """AMR の場の表・行列・体積を GPU へ (初期化と再格子化で共通)。"""
+        cp = self.cp
+        i32 = lambda a: cp.asarray(np.ascontiguousarray(a, dtype=np.int32))  # noqa: E731
+
+        def dev_csr(m):
+            m = m.tocsr()
+            m.sort_indices()
+            return (i32(m.indptr), i32(m.indices), cp.asarray(m.data.astype(np.float64)))
+
+        self._q_static = cp.asarray(lay.q_static)
+        self._b = cp.zeros(max(lay.n_c, 1))
+        self._x = cp.zeros(max(lay.n_c, 1))
+        self._csr = {name: dev_csr(getattr(lay, name)) for name in ("PTq", "PC", "Gx", "Gy")}
+        self._e_lists = (i32(lay.edge_u), i32(lay.edge_v), cp.asarray(lay.edge_g, dtype=np.float64),
+                         np.int64(lay.edge_u.size), i32(lay.coup_u), i32(lay.coup_grp),
+                         cp.asarray(lay.coup_g, dtype=np.float64), np.int64(lay.coup_u.size))
+        self._gx = (cp.asarray(lay.dd), cp.asarray(lay.di), cp.asarray(lay.refined), i32(lay.blockid),
+                    i32(lay.tab))
+        self._total_gas_volume = float(lay.total_gas_volume)
+        vol_phys = lay.node_vol_gas
+        self._inv_vol_phys = cp.asarray(np.where(vol_phys > 0.0, 1.0 / np.where(vol_phys > 0, vol_phys, 1.0), 0.0))
+        self._vol_gas = vol_phys / self._two_pi
+
+    def _set_amr_display(self, lay) -> None:
+        """AMR の表示用メッシュ (v1 UI 互換) と葉セルの気体体積。"""
+        dm = DisplayMesh(nodes=lay.disp_nodes, triangles=lay.disp_tris, tri_region=lay.disp_tri_region,
+                         tri_cell=lay.tri_cell)
+        self._cell_vol_gas = lay.cell_vol_gas
+        self._n_cells = lay.n_cells
+        self._dmesh = dm
+        self.mesh = _DisplayMeshView(nodes=dm.nodes, triangles=dm.triangles, tri_region=dm.tri_region)
 
     def _scan_buffers(self, cap: int) -> None:
         cp = self.cp
@@ -962,6 +973,121 @@ class GpuPicSimulation:
             sp.vx[:n] -= qm * interp(exf) * 0.5 * dt_s
             sp.vy[:n] -= qm * interp(eyf) * 0.5 * dt_s
 
+    # ======================================================================================
+    # 動的再格子化 (prompts/123)
+    # ======================================================================================
+
+    def _self_force_warning(self) -> None:
+        """AMR の粗細界面の自己力 (prompts/122) の目安が冷たい種の熱エネルギーに比べて大きければ警告。
+
+        自己力による電位は 1 粒子あたり ~0.1·λ/(2πε0) (λ = マクロ粒子の線電荷密度 w·e。軸対称は
+        リングなので w·e/(2πr))。導体壁の近くでマクロ粒子が受ける自分の鏡像力と同程度の大きさ。
+        """
+        if self.amr is None or self._w0 is None or (self.amr.hier.max_level == 0 and not self._regrid_every):
+            return
+        ip = self.pic.initial_plasma
+        lam = self._w0 * QE
+        if self.rz:
+            d = self.model.domain
+            r_mid = 0.5 * ((d.y0 + d.y1) if self.ridx == 1 else (d.x0 + d.x1))
+            lam /= 2.0 * math.pi * max(r_mid, 1e-30)
+        u_self = 0.1 * lam / (2.0 * math.pi * EPS0)
+        cold = [(t, name) for t, name, mobile in ((ip.te_ev, "電子", True), (ip.ti_ev, "イオン", not ip.immobile_ions))
+                if mobile and t > 0.0]
+        for t, name in cold:
+            if u_self > 0.2 * t:
+                self.warnings.append(
+                    f"粗細界面の自己力の目安 {u_self:.3g} V (1 粒子あたり) が{name}温度 {t:.3g} eV に比べて大きい: "
+                    "界面付近の密度に偽の構造が出る恐れがあります。粒子数 (n_macro) を増やしてください"
+                )
+                break
+
+    def _launch_tag_deposit(self) -> None:
+        """再格子化のタグ用に電子の重みと運動エネルギーを節点へ積算する (グラフ外、同期なし)。"""
+        el = self.species["electron"]
+        n = self.n_nodes
+        for out, mode, scale in ((self._tag_w, 0, 1.0), (self._tag_ke, 1, 0.5 * ME)):
+            self._k["deposit"](self._grid1(el.cap), (_BLOCK,),
+                               (el.x, el.y, el.vx, el.vy, el.vz, el.w, self._cnt, np.int32(0), np.int32(mode),
+                                np.float64(scale), out, out, np.int32(0), np.int64(n), np.int32(0), self._prm,
+                                *self._grid_args, np.int32(self._px), np.int32(self._py), *self._gx))
+        self._tag_count += 1
+
+    def _regrid(self) -> bool:
+        """区間平均の λ_D で AMR 階層を作り直し、場の状態を新しい格子へ移す (ここで同期)。
+
+        粒子は座標のまま、誘電体の表面電荷は旧節点の電荷を新しい格子へ CIC で配り直し (総電荷保存)、
+        前ステップ解 (warm start) は旧格子の電位を新しい節点で補間する。時間平均区間の前だけ呼ぶ
+        (平均用の節点配列は 0 のまま作り直す)。戻り値: 格子が変わったか。
+        """
+        from ..amr import AmrHierarchy
+        from ..amr.gpu_solver import AmgGpuSolver
+        from ..amr.pic_layout import build_pic_layout, debye_kappa, debye_tags, deposit_points, sample_nodes
+
+        def same(h1, h2) -> bool:
+            return h1.max_level == h2.max_level and all(np.array_equal(a, b) for a, b in zip(h1.refined, h2.refined))
+
+        cp = self.cp
+        lay = self.amr
+        spec = lay.hier.spec
+        self._stream.synchronize()
+        if self._tag_count == 0:
+            return False
+        kappa = debye_kappa(lay, self._tag_w.get(), self._tag_ke.get(), self._tag_count)
+        self._tag_w.fill(0.0)
+        self._tag_ke.fill(0.0)
+        self._tag_count = 0
+        # 候補の階層で判定し直すことを繰り返し、新しい領域の中も一度で必要なレベルまで細分化する
+        cand = lay.hier
+        for _ in range(spec.max_level + 1):
+            nxt = AmrHierarchy(self.model, self.grid, spec,
+                               extra_tags=debye_tags(lay, kappa, cand, spec.pic_h_over_debye, keep=lay.hier))
+            if same(nxt, cand):
+                break
+            cand = nxt
+        new_hier = cand
+        if same(new_hier, lay.hier):
+            return False
+        t0 = time.perf_counter()
+        new = build_pic_layout(self.model, new_hier)
+        phi_new = sample_nodes(lay, self._phi.get(), new.xy[:, 0], new.xy[:, 1])
+        q_surf_old = self._q_surf.get()
+        q_surf_new = (deposit_points(new, lay.xy[:, 0], lay.xy[:, 1], q_surf_old) if np.any(q_surf_old)
+                      else np.zeros(new.n_nodes))
+        with self._stream:
+            self.solver = AmgGpuSolver(new.op.A_c, self.device, singular=new.op.singular)
+            self.amr = new
+            self.op = new.op
+            self.n_nodes = new.n_nodes
+            self._shape = (new.n_nodes,)
+            self._setup_amr_fields(new)
+            self._q_surf = cp.asarray(q_surf_new)
+            self._rho = cp.zeros(self._shape)
+            self._phi = cp.asarray(phi_new)
+            self._ex = cp.zeros(self._shape)
+            self._ey = cp.zeros(self._shape)
+            if new.n_c:
+                self._x[: new.n_c] = cp.asarray(phi_new[new.node_of_c])
+            self._set_amr_display(new)
+            self._see_delta = 1e-3 * new.h_min
+            # 平均用の節点配列 (平均区間の前なので 0 のまま大きさだけ変える)
+            self._acc_phi = cp.zeros(self._shape)
+            self._acc_n = {"electron": cp.zeros(self._shape), "ion": cp.zeros(self._shape)}
+            self._acc_ke = cp.zeros(self._shape)
+            self._acc_ion = cp.zeros(self._shape)
+            self._tag_w = cp.zeros(self._shape)
+            self._tag_ke = cp.zeros(self._shape)
+        if self._cycle_enabled and self._cycle_bins * self.n_nodes > CYCLE_MAX_VALUES:
+            nb = max(1, CYCLE_MAX_VALUES // self.n_nodes)
+            self.warnings.append(f"再格子化で節点数が増えたため位相ビン数を {self._cycle_bins} → {nb} に減らしました")
+            self._cycle_bins = nb
+            self._prm[P_NBINS] = float(nb)
+        self._graph = None
+        self.mesh_version += 1
+        self.regrid_log.append({"step": self.step_count, "n_nodes": new.n_nodes, "levels": new.hier.n_levels,
+                                "leaf_cells": new.hier.n_leaf_cells(), "setup_s": time.perf_counter() - t0})
+        return True
+
     def _compact(self) -> None:
         """吸収粒子 (w = 0) を詰める (順序保存)。容量不足・溢れも検査する (ここで同期)。"""
         k = self._k
@@ -978,6 +1104,7 @@ class GpuPicSimulation:
                                       t["x"], t["y"], t["vx"], t["vy"], t["vz"], t["w"]))
                 for f in _Species.FIELDS:
                     self._k_copy(self._grid1(sp.cap), (_BLOCK,), (sp.arrays[f], t[f], np.int64(sp.cap)))
+        self._stream.synchronize()
         cnt = self._cnt.get()
         if int(cnt[C_OVERFLOW]):
             raise RuntimeError(
@@ -1036,6 +1163,7 @@ class GpuPicSimulation:
         if not any(self._eedf_auto):
             return
         cp = self.cp
+        self._stream.synchronize()
         el = self.species["electron"]
         n = int(self._cnt[0].get())
         x, y = el.x[:n], el.y[:n]
@@ -1191,6 +1319,9 @@ class GpuPicSimulation:
         m = self._hist_pending
         if m == 0:
             return
+        # 計算は非ブロッキングのストリームに積んでいるので、読む前に完了を待つ (待たないと
+        # 直近のステップの行がまだ書かれておらず 0 や前周の値を読んでしまう)
+        self._stream.synchronize()
         rows = self._hist.get()
         start = (self.step_count - m) % HISTORY_ROWS
         idx = (start + np.arange(m)) % HISTORY_ROWS
@@ -1211,6 +1342,7 @@ class GpuPicSimulation:
         """PCG の残差を監視して反復数を自動調整する (ここで同期)。"""
         if self.solver.direct:
             return
+        self._stream.synchronize()
         rn, bn = self.solver.monitor()
         rel = rn / bn if bn > 0.0 else 0.0
         if rel > PCG_TOL and self._pcg_iters < PCG_ITERS_MAX:
@@ -1244,7 +1376,7 @@ class GpuPicSimulation:
             c = cells.get()
             vol = self._cell_vol_gas.ravel()
             dens[name] = np.where(vol > 0, c / np.where(vol > 0, vol, 1.0), 0.0)[self._dmesh.tri_cell]
-        return {
+        frame = {
             "type": "frame",
             "step": self.step_count,
             "t": self.t,
@@ -1254,6 +1386,17 @@ class GpuPicSimulation:
             "particles": particles,
             "diag": diag,
         }
+        # 再格子化で表示用メッシュが変わったら、その後の最初のフレームに新しい格子を添える
+        # (server は古いフレームを捨てるとき、この mesh を新しいフレームへ引き継ぐ)
+        if self.mesh_version != self._frame_mesh_version:
+            frame["mesh"] = self.mesh_payload()
+            frame["mesh_version"] = self.mesh_version
+            self._frame_mesh_version = self.mesh_version
+        return frame
+
+    def mesh_payload(self) -> dict:
+        """表示用メッシュ (started・再格子化後の frame/done に載せる形)。"""
+        return {"nodes": self.mesh.nodes.tolist(), "triangles": self.mesh.triangles.tolist()}
 
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
         """n_steps 回実行して (診断履歴, フレーム列) を返す (v1 PicSimulation.run_batch と同じ契約)。"""
@@ -1282,6 +1425,15 @@ class GpuPicSimulation:
                 if self._n_eedf:
                     self._eedf_samples += 1
             last = step_i == n_total - 1
+            # 動的再格子化 (prompts/123): 時間平均区間の前だけ。タグ用の電子の密度・温度を
+            # TAG_EVERY ステップごとに積算し、regrid_every ステップごとに階層を作り直す
+            if (self._regrid_every and self._accum_start is not None
+                    and self.step_count + 1 < self._accum_start and not last):
+                if self.step_count % TAG_EVERY == 0:
+                    with self._stream:
+                        self._launch_tag_deposit()
+                if self.step_count % self._regrid_every == 0:
+                    self._regrid()
             if self.step_count % COMPACT_EVERY == 0:
                 self._compact()
             if self.step_count % MONITOR_EVERY == 0:

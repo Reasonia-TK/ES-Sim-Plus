@@ -329,11 +329,42 @@ function AmrEditor({
           </div>
         </>
       )}
+      <div className="field">
+        <Toggle
+          label="PIC の動的再格子化 (デバイ長)"
+          checked={(cur.pic_regrid_every ?? 0) > 0}
+          onChange={(v) => update({ pic_regrid_every: v ? 500 : 0 })}
+        />
+      </div>
+      {(cur.pic_regrid_every ?? 0) > 0 && (
+        <>
+          <div className="field">
+            <span className="label">再格子化の間隔 [step]</span>
+            <CommitNumberInput
+              value={cur.pic_regrid_every ?? 500}
+              onCommit={(v) => {
+                if (Number.isInteger(v) && v >= 1) update({ pic_regrid_every: v });
+              }}
+            />
+          </div>
+          <div className="field">
+            <span className="label">格子幅/λ_D の上限</span>
+            <CommitNumberInput
+              value={cur.pic_h_over_debye ?? 1.0}
+              onCommit={(v) => {
+                if (v > 0 && v <= 100) update({ pic_h_over_debye: v });
+              }}
+            />
+          </div>
+        </>
+      )}
       <div className="hint">
         境界近傍は最大レベルまで、下の矩形は指定レベルまで格子幅を 1/2 ずつ細かくします
         (隣り合うセルのレベル差は 1 以下)。静電場は代数マルチグリッド (GPU があれば GPU) で、
         PIC も同じ細分化格子の上で解きます。適応細分化は Solve 時に誤差の大きい所を最大レベルまで
-        自動で細かくします (静電場のみ。Mesh ボタンの表示は適応前の格子です)。
+        自動で細かくします (静電場のみ。Mesh ボタンの表示は適応前の格子です)。PIC の動的再格子化は
+        実行中に電子の密度・温度から求めたデバイ長 λ_D に合わせて格子を作り直します (時間平均区間の
+        前だけ。ライブ表示の格子も更新されます)。
       </div>
       <div className="collector-list">
         {regions.length === 0 && <div className="muted">(細分化矩形なし)</div>}

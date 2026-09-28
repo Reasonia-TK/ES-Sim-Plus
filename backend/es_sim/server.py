@@ -618,7 +618,12 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
         def offer_latest() -> None:
             if queue.full():
                 try:
-                    queue.get_nowait()
+                    old = queue.get_nowait()
+                    # v2 PIC の動的再格子化 (prompts/123): 捨てるフレームが新しい格子を運んでいたら
+                    # 引き継ぐ (フロントは mesh 付きフレームで表示格子を差し替える)
+                    if "mesh" in old and "mesh" not in frame:
+                        frame["mesh"] = old["mesh"]
+                        frame["mesh_version"] = old.get("mesh_version")
                 except asyncio.QueueEmpty:
                     pass
             queue.put_nowait(frame)
@@ -662,6 +667,10 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
             # timing.total (位相別プロファイル計測、prompts/75) との差分で見える
             "elapsed_s": time.perf_counter() - t_run0,
         }
+        # v2 PIC の動的再格子化 (prompts/123): fields・cycle は最終の格子の上の値なので格子も添える
+        if getattr(sim, "mesh_version", 0) > 0:
+            done_msg["mesh"] = sim.mesh_payload()
+            done_msg["regrids"] = sim.regrid_log
         # 位相別プロファイル計測 (prompts/75)。total は表示用に別途加算しておく
         # (continue では sim.timing が区間分のみを持つので、total もその区間分になる)。
         # walk コスト診断 (prompts/88、WALK_DIAG_KEYS) は秒数ではないため合計から除外する

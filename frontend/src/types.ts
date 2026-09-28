@@ -34,6 +34,10 @@ export interface AmrSettings {
   adaptive?: boolean;
   adapt_tol?: number; // 電位の範囲に対する許容誤差 (既定 1e-3)
   adapt_iters?: number; // 最大反復回数 (既定 3)
+  // PIC の動的再格子化 (prompts/123): この間隔 [ステップ] ごとに 格子幅/λ_D > pic_h_over_debye の
+  // セルを細かくする (時間平均区間の前だけ、max_level まで)。0/未指定 = 静的
+  pic_regrid_every?: number;
+  pic_h_over_debye?: number;
 }
 
 // 円領域のパラメトリック形状 (中心+半径)。メッシュ生成時にバックエンド側で多角形化する
@@ -1236,6 +1240,10 @@ export interface PicFrameMsg {
   n_i?: number[];
   particles: { electron: Point[]; ion: Point[] }; // 種ごと最大2000点に間引き済み
   diag: PicDiag;
+  // v2 PIC の動的再格子化 (prompts/123): 格子が変わった直後のフレームだけ新しい表示用メッシュを持つ。
+  // 以後のフレームの phi (節点値)・n_e/n_i (要素値) はこの格子の上の値
+  mesh?: MeshResult;
+  mesh_version?: number;
 }
 
 // PIC完了時の時間平均2Dフィールド一式 (done メッセージの fields)
@@ -1302,6 +1310,10 @@ export interface PicDoneMsg {
   timing?: Record<string, number>;
   // run_batch の壁時計秒 (prompts/86)。continue では区間分のみ。未対応バックエンドでは省略
   elapsed_s?: number;
+  // v2 PIC の動的再格子化 (prompts/123) があった場合の最終の表示用メッシュ (fields・cycle はこの上の値)
+  // と再格子化の記録
+  mesh?: MeshResult;
+  regrids?: { step: number; n_nodes: number; levels: number; leaf_cells: number[]; setup_s: number }[];
 }
 
 export interface PicErrorMsg {

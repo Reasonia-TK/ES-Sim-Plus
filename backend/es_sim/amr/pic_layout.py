@@ -25,6 +25,7 @@ from .composite import CompositeOperator, _canon_key, assemble_composite, cell_i
 from .electrostatic import display_mesh
 from .fieldops import build_efield_stencil
 from .hierarchy import AmrHierarchy
+from .locate import locate_fine, to_fine_index
 
 
 @dataclass
@@ -46,6 +47,7 @@ class AmrPicLayout:
     coup_g: np.ndarray
     q_static: np.ndarray          # (N,) 静電荷 (固定節点は 0)
     xy: np.ndarray                # (N, 2)
+    node_of_c: np.ndarray         # (n_c,) 合成格子の未知 → 全節点番号 (再格子化の warm start 移し替え用)
     # es_locate の表
     dd: np.ndarray                # float64[4]
     di: np.ndarray                # int64[4 + 2 (L+1)]
@@ -69,6 +71,86 @@ class AmrPicLayout:
     @property
     def n_cells(self) -> int:
         return self.n_blocks * self.bf * self.bf
+
+
+def _cic(lay: "AmrPicLayout", x: np.ndarray, y: np.ndarray):
+    """点 (x, y) の葉セルの 4 隅の節点番号 (n, 4) と双一次重み (n, 4) (CPU)。"""
+    hier = lay.hier
+    I, J = to_fine_index(hier, x, y)
+    lvl, i, j, wx, wy = locate_fine(hier, I, J)
+    s = (hier.max_level - lvl).astype(np.int64)
+    nodes = np.empty((np.size(x), 4), dtype=np.int64)
+    w = np.empty((np.size(x), 4))
+    for c, (a, b, wt) in enumerate(((0, 0, (1 - wx) * (1 - wy)), (1, 0, wx * (1 - wy)),
+                                    (0, 1, (1 - wx) * wy), (1, 1, wx * wy))):
+        nodes[:, c] = lay.op.node_index(_canon_key(hier, (i + a) << s, (j + b) << s))
+        w[:, c] = wt
+    return nodes, w
+
+
+def sample_nodes(lay: "AmrPicLayout", values: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """全節点の値を任意点へ葉セルの双一次補間で移す (再格子化の電位の移し替え)。"""
+    nodes, w = _cic(lay, x, y)
+    return np.sum(np.asarray(values)[nodes] * w, axis=1)
+
+
+def deposit_points(lay: "AmrPicLayout", x: np.ndarray, y: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """点の量 q を葉セルの 4 隅へ CIC で配る (総和を保存。再格子化の表面電荷の移し替え)。"""
+    nodes, w = _cic(lay, x, y)
+    out = np.zeros(lay.n_nodes)
+    np.add.at(out, nodes.ravel(), (np.asarray(q)[:, None] * w).ravel())
+    return out
+
+
+#: 再格子化のヒステリシス: 既に細分化されている所は 格子幅/λ_D がこの倍率 × 閾値を超える限り保つ
+REGRID_KEEP = 0.7
+
+
+def debye_kappa(lay: "AmrPicLayout", w_acc: np.ndarray, ke_acc: np.ndarray, count: int) -> np.ndarray:
+    """節点の逆デバイ長 κ = 1/λ_D [1/m] (電子の居ない節点は 0)。
+
+    w_acc・ke_acc: 区間中に count 回積算した電子の重み Σw·S と運動エネルギー Σ½mv²w·S (全節点)。
+    n_e = w_acc / (count·V_dual)、Te = (2/3)·(ke_acc/w_acc)/e、λ_D = √(ε0 Te / (e n_e))。
+    """
+    from ..geom.model import EPS0
+
+    qe = 1.602176634e-19
+    vol = np.where(lay.node_vol_gas > 0.0, lay.node_vol_gas, np.inf)
+    n_e = w_acc / (max(count, 1) * vol)
+    te = np.where(w_acc > 0.0, (2.0 / 3.0) * ke_acc / np.where(w_acc > 0.0, w_acc, 1.0) / qe, 0.0)
+    ok = (n_e > 0.0) & (te > 0.0)
+    kappa = np.zeros(n_e.shape)
+    kappa[ok] = np.sqrt(qe * n_e[ok] / (EPS0 * te[ok]))
+    return kappa
+
+
+def debye_tags(lay: "AmrPicLayout", kappa: np.ndarray, hier: AmrHierarchy, h_over_debye: float,
+               keep: AmrHierarchy | None = None) -> list[np.ndarray]:
+    """PIC の動的再格子化のタグ (prompts/123): 格子幅 × κ (= 格子幅/λ_D) が閾値を超えるセル。
+
+    hier (候補の階層) のレベル l の領域のセル (葉でなくてもよい) ごとに、角の点での κ (旧格子 lay の
+    節点値 kappa の双一次補間) の最大で判定する。keep (現在の階層) で細分化されているセルは
+    閾値 × REGRID_KEEP まで保つ (密度の揺らぎで細分化と粗視化を繰り返さない)。上限は spec.max_level。
+    """
+    cap = hier.spec.max_level
+    b = hier.base
+    tags = [np.zeros((b.ny << lvl, b.nx << lvl), dtype=bool) for lvl in range(cap)]
+    for lvl in range(min(hier.n_levels, cap)):
+        cj, ci = np.nonzero(hier.region_cells(lvl))
+        if ci.size == 0:
+            continue
+        g = hier.level_grid(lvl)
+        k_c = np.zeros(ci.size)
+        for a in (0, 1):
+            for bb in (0, 1):
+                k_c = np.maximum(k_c, sample_nodes(lay, kappa, g.x0 + (ci + a) * g.dx, g.y0 + (cj + bb) * g.dy))
+        ratio = max(g.dx, g.dy) * k_c
+        hot = ratio > h_over_debye
+        if keep is not None and lvl < keep.max_level:
+            ref = np.repeat(np.repeat(keep.refined[lvl], keep.bf, axis=0), keep.bf, axis=1)[cj, ci]
+            hot |= ref & (ratio > REGRID_KEEP * h_over_debye)
+        tags[lvl][cj[hot], ci[hot]] = True
+    return tags
 
 
 def _block_tables(hier: AmrHierarchy, op: CompositeOperator):
@@ -167,7 +249,7 @@ def build_pic_layout(model: GeometryModel, hier: AmrHierarchy, op: CompositeOper
         hier=hier, op=op, n_nodes=N, n_c=n_c, n_groups=K, PTq=PTq, PC=PC, Gx=Gx, Gy=Gy,
         edge_u=node_of_u[op.edge_u], edge_v=node_of_u[op.edge_v], edge_g=op.edge_g,
         coup_u=node_of_u[op.coup_u], coup_grp=op.coup_grp, coup_g=op.coup_g,
-        q_static=q_static, xy=op.xy,
+        q_static=q_static, xy=op.xy, node_of_c=node_of_u[np.nonzero(~op.hanging)[0]],
         dd=dd, di=di, refined=refined, blockid=blockid, tab=tab, n_blocks=n_blocks, bf=bf,
         node_vol_gas=node_vol_gas, cell_vol_gas=cell_vol_gas, total_gas_volume=float(node_vol_gas.sum()),
         disp_nodes=nodes, disp_tris=tris, disp_tri_region=tri_region, disp_idx=disp_idx, tri_cell=tri_cell,

@@ -187,6 +187,33 @@ class ParticleGeometry:
         return DisplayMesh(nodes=nodes, triangles=tris, tri_region=tri_region, tri_cell=cell)
 
 
+def cell_gas_volume(model: GeometryModel, grid: CartesianGrid, cell_state: np.ndarray, n_sub: int = 6) -> np.ndarray:
+    """セルごとの気体体積 (ny, nx) [m³] (xy は奥行き 1 m、軸対称は 2π r 重み込み)。
+
+    純粋な気体セルは全体積、固体セルは 0、境界が通るセルは n_sub² 点の中点則で気体の割合を積分する。
+    """
+    ridx = model.radial_axis()
+    xs, ys = grid.xs, grid.ys
+    s = (np.arange(n_sub) + 0.5) / n_sub
+    vol = np.zeros((grid.ny, grid.nx))
+    if ridx is None:
+        full = np.full((grid.ny, grid.nx), grid.dx * grid.dy)
+    elif ridx == 1:
+        full = grid.dx * 0.5 * (ys[1:, None] ** 2 - ys[:-1, None] ** 2) * np.ones((1, grid.nx))
+    else:
+        full = grid.dy * 0.5 * (xs[None, 1:] ** 2 - xs[None, :-1] ** 2) * np.ones((grid.ny, 1))
+    vol[cell_state == 0] = full[cell_state == 0]
+    jc, ic = np.nonzero(cell_state == 2)
+    if jc.size:
+        sx = xs[ic][:, None, None] + grid.dx * s[None, None, :]
+        sy = ys[jc][:, None, None] + grid.dy * s[None, :, None]
+        sx, sy = np.broadcast_arrays(sx, sy)
+        gas = model.gas_at(sx, sy).astype(np.float64)
+        wgt = np.ones_like(sx) if ridx is None else (sy if ridx == 1 else sx)
+        vol[jc, ic] = np.sum(gas * wgt, axis=(1, 2)) * grid.dx * grid.dy / n_sub**2
+    return (2.0 * np.pi if ridx is not None else 1.0) * vol
+
+
 def triangle_gradients(nodes: np.ndarray, tris: np.ndarray, phi: np.ndarray) -> np.ndarray:
     """三角形ごとの線形補間の勾配 ∇φ (M, 2)。phi は (N,) または (B, N)。"""
     p = nodes[tris]

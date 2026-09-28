@@ -227,6 +227,11 @@ class AmrSettings(BaseModel):
     adaptive: bool = False
     adapt_tol: float = Field(1e-3, gt=0.0, le=0.5)
     adapt_iters: int = Field(3, ge=1, le=8)
+    # PIC の動的再格子化 (prompts/123)。pic_regrid_every ステップごとに、その区間で平均した
+    # 電子密度・温度のデバイ長 λ_D に対し 格子幅/λ_D > pic_h_over_debye のセルを細かくする
+    # (max_level まで。時間平均区間の前だけ。0 = 静的)
+    pic_regrid_every: int = Field(0, ge=0)
+    pic_h_over_debye: float = Field(1.0, gt=0.0, le=100.0)
 
 
 class MeshSettings(BaseModel):

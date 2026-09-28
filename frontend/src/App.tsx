@@ -1183,10 +1183,16 @@ export default function App() {
       setPicFrame(null); // ライブ表示を新しい実行区間の内容に自然に切り替える
     },
     onFrame: (msg) => {
+      // v2 PIC の動的再格子化 (prompts/123): 新しい格子が届いたら表示用メッシュを差し替える
+      // (以後のフレーム値はその格子の上の値)
+      const mesh = msg.mesh;
+      if (mesh) setPicStarted((s) => (s ? { ...s, mesh } : s));
       setPicFrame(msg);
       setPicHistory((h) => [...h, msg.diag]);
     },
     onDone: (msg) => {
+      const mesh = msg.mesh;
+      if (mesh) setPicStarted((s) => (s ? { ...s, mesh } : s)); // 最終の格子 (fields はこの上の値)
       // バックエンドの history は列ごとの辞書形式なので行ごとの PicDiag[] に変換する
       // (形式不一致のまま描画するとチャートが例外を投げて画面全体が落ちるため必ず変換を通す)
       const added = toDiagArray(msg.history);

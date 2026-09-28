@@ -92,6 +92,9 @@ class AmrSpec:
     adaptive: bool = False
     adapt_tol: float = 1e-3
     adapt_iters: int = 3
+    # PIC の動的再格子化 (prompts/123): 間隔 [ステップ] (0 = 静的) と 格子幅/λ_D の上限
+    pic_regrid_every: int = 0
+    pic_h_over_debye: float = 1.0
 
     @classmethod
     def from_settings(cls, amr) -> "AmrSpec":
@@ -111,6 +114,8 @@ class AmrSpec:
             adaptive=bool(getattr(amr, "adaptive", False)),
             adapt_tol=float(getattr(amr, "adapt_tol", 1e-3)),
             adapt_iters=int(getattr(amr, "adapt_iters", 3)),
+            pic_regrid_every=int(getattr(amr, "pic_regrid_every", 0)),
+            pic_h_over_debye=float(getattr(amr, "pic_h_over_debye", 1.0)),
         )
 
 
