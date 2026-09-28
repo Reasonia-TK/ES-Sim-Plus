@@ -1,0 +1,258 @@
+SYNTHETIC LXCAT-FORMAT CROSS SECTION DATA (ES-Sim test fixture, prompts/120)
+All numbers in this file are SYNTHETIC. They were made up for parser/converter tests
+and are NOT real cross sections from LXCat or any other database. Do not use them for physics.
+This header text must be skipped by the parser.
+
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DATABASE:         SynthA (synthetic electron database A)
+PERMLINK:         www.example.invalid/SynthA
+DESCRIPTION:      Synthetic Ar set: ELASTIC with a 3-column table (integral + momentum
+                  transfer), EXCITATION with a step and a '!' comment, IONIZATION.
+CONTACT:          ES-Sim developers (synthetic)
+HOW TO REFERENCE: not applicable (synthetic data)
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+************************************************************************
+
+COMMENT: Synthetic Ar group comment (database level).
+
+********************************** Ar **********************************
+
+ELASTIC
+Ar
+ 1.360000e-5
+SPECIES: e / Ar
+PROCESS: E + Ar -> E + Ar, Elastic
+PARAM.:  m/M = 0.0000136, complete set
+COMMENT: synthetic elastic; column 2 = integral, column 3 = momentum transfer.
+Free text line without a key (goes to the comment).
+SOURCE: synthetic generator
+UPDATED: 2026-09-28 12:00:00
+COLUMNS: Energy (eV) | Cross section (m2) | Momentum transfer cross section (m2)
+-----------------------------
+ 0.000000e+0   7.500000e-20   7.500000e-20
+ 1.000000e-2   5.000000e-20   5.000000e-20
+ 5.000000e-2   2.200000e-20   2.200000e-20
+ 1.000000e-1   1.100000e-20   1.100000e-20
+ 2.300000e-1   2.000000e-21   2.000000e-21
+ 5.000000e-1   4.000000e-21   4.000000e-21
+ 1.000000e+0   1.500000e-20   1.500000e-20
+ 2.000000e+0   4.600000e-20   4.500000e-20
+ 5.000000e+0   1.200000e-19   1.150000e-19
+ 1.000000e+1   1.700000e-19   1.500000e-19
+ 1.500000e+1   1.750000e-19   1.350000e-19
+ 2.000000e+1   1.600000e-19   1.050000e-19
+ 3.000000e+1   1.400000e-19   7.800000e-20
+ 5.000000e+1   1.100000e-19   5.000000e-20
+ 1.000000e+2   8.000000e-20   3.000000e-20
+ 2.000000e+2   6.000000e-20   1.800000e-20
+ 1.000000e+3   4.000000e-20   9.000000e-21
+-----------------------------
+
+EXCITATION
+Ar -> Ar*(11.55eV)
+ 1.155000e+1   ! lumped 4s levels (synthetic)
+SPECIES: e / Ar
+PROCESS: E + Ar -> E + Ar*(11.55eV), Excitation
+PARAM.:  E = 11.55 eV, complete set
+COMMENT: synthetic excitation with a step at 20 eV (duplicated energy).
+UPDATED: 2026-09-28 12:00:00
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 1.155000e+1   0.000000e+0
+ 1.200000e+1   5.000000e-22
+ 1.300000e+1   1.500000e-21
+ 1.500000e+1   3.000000e-21
+ 2.000000e+1   5.500000e-21
+ 2.000000e+1   6.000000e-21
+ 3.000000e+1   6.500000e-21
+ 5.000000e+1   5.500000e-21
+ 1.000000e+2   4.000000e-21
+ 1.000000e+3   1.000000e-21
+-----------------------------
+
+IONIZATION
+Ar -> Ar^+
+ 1.576000e+1
+SPECIES: e / Ar
+PROCESS: E + Ar -> E + E + Ar+, Ionization
+PARAM.:  E = 15.76 eV, complete set
+COMMENT: synthetic ionization.
+UPDATED: 2026-09-28 12:00:00
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 1.576000e+1   0.000000e+0
+ 1.700000e+1   8.000000e-22
+ 2.000000e+1   3.000000e-21
+ 2.500000e+1   9.500000e-21
+ 3.000000e+1   1.500000e-20
+ 4.000000e+1   2.200000e-20
+ 5.000000e+1   2.600000e-20
+ 7.000000e+1   2.800000e-20
+ 1.000000e+2   2.900000e-20
+ 2.000000e+2   2.400000e-20
+ 1.000000e+3   1.200000e-20
+-----------------------------
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DATABASE:         SynthB (synthetic database B)
+PERMLINK:         www.example.invalid/SynthB
+DESCRIPTION:      Synthetic N2 set (EFFECTIVE, ROTATION, reversible excitation, threshold
+                  only in PARAM., ionization in cm2, attachment), an old-style MOMENTUM
+                  block for Ar and typeless Ar+ / Ar ion blocks.
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+********************************** Ar **********************************
+
+MOMENTUM
+Ar
+ 1.360000e-5
+SPECIES: e / Ar
+PROCESS: E + Ar -> E + Ar, Momentum transfer (old BOLSIG keyword)
+COMMENT: synthetic; must be dropped because Ar already has ELASTIC in SynthA.
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 0.000000e+0   8.000000e-20
+ 1.000000e+1   1.600000e-19
+ 1.000000e+2   3.500000e-20
+-----------------------------
+
+********************************** N2 **********************************
+
+EFFECTIVE
+N2
+ 1.960000e-5
+SPECIES: e / N2
+PROCESS: E + N2 -> E + N2, Effective
+PARAM.:  m/M = 0.0000196, complete set
+COMMENT: synthetic total momentum transfer (elastic + all inelastic).
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 0.000000e+0   1.500000e-20
+ 1.000000e-2   2.000000e-20
+ 1.000000e-1   4.500000e-20
+ 5.000000e-1   7.500000e-20
+ 1.000000e+0   1.000000e-19
+ 2.000000e+0   1.800000e-19
+ 3.000000e+0   1.500000e-19
+ 5.000000e+0   1.100000e-19
+ 1.000000e+1   1.150000e-19
+ 2.000000e+1   1.100000e-19
+ 5.000000e+1   1.000000e-19
+ 1.000000e+2   8.500000e-20
+ 1.000000e+3   3.000000e-20
+-----------------------------
+
+ROTATION
+N2
+ 0.000000e+0   1.0
+ 1.488000e-3   5.0
+SPECIES: e / N2
+PROCESS: E + N2(J=0) -> E + N2(J=2), Rotation
+COMMENT: synthetic rotational excitation J=0 -> J=2 (lower and upper state lines).
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 1.488000e-3   0.000000e+0
+ 1.000000e-2   2.000000e-21
+ 1.000000e-1   5.000000e-21
+ 1.000000e+0   8.000000e-21
+ 1.000000e+1   5.000000e-21
+ 1.000000e+2   1.000000e-21
+ 1.000000e+3   1.000000e-22
+-----------------------------
+
+EXCITATION
+N2 <-> N2(A3)
+ 6.170000e+0   3.0
+SPECIES: e / N2
+PROCESS: E + N2 <-> E + N2(A3), Excitation
+PARAM.:  E = 6.17 eV, complete set
+COMMENT: synthetic electronic excitation, reversible with g(A3)/g(X) = 3.
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 6.170000e+0   0.000000e+0
+ 8.000000e+0   3.000000e-22
+ 1.000000e+1   8.000000e-22
+ 1.500000e+1   1.000000e-21
+ 3.000000e+1   6.000000e-22
+ 1.000000e+2   2.000000e-22
+ 1.000000e+3   2.000000e-23
+-----------------------------
+
+EXCITATION
+N2 -> N2(v1)
+SPECIES: e / N2
+PROCESS: E + N2 -> E + N2(v1), Excitation
+PARAM.:  E = 0.29 eV, complete set
+COMMENT: synthetic vibrational excitation; the threshold line is missing on purpose
+COMMENT: (the parser takes E from PARAM. and warns).
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 2.900000e-1   0.000000e+0
+ 1.000000e+0   5.000000e-22
+ 1.800000e+0   1.000000e-20
+ 2.200000e+0   3.000000e-20
+ 2.600000e+0   1.500000e-20
+ 3.500000e+0   2.000000e-21
+ 5.000000e+0   5.000000e-22
+ 1.000000e+1   1.000000e-22
+ 1.000000e+3   0.000000e+0
+-----------------------------
+
+IONIZATION
+N2 -> N2^+
+ 1.560000e+1
+SPECIES: e / N2
+PROCESS: E + N2 -> E + E + N2+, Ionization
+PARAM.:  E = 15.6 eV, complete set
+COMMENT: synthetic ionization given in cm2 (converted to m2 by the parser).
+COLUMNS: Energy (eV) | Cross section (cm2)
+-----------------------------
+ 1.560000e+1   0.000000e+0
+ 2.000000e+1   3.000000e-17
+ 3.000000e+1   1.000000e-16
+ 5.000000e+1   1.900000e-16
+ 1.000000e+2   2.500000e-16
+ 2.000000e+2   2.200000e-16
+ 1.000000e+3   1.000000e-16
+-----------------------------
+
+ATTACHMENT
+N2 -> N2^-
+SPECIES: e / N2
+PROCESS: E + N2 -> N2^-, Attachment
+COMMENT: synthetic attachment (no parameter line, as in the LXCat format).
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 0.000000e+0   0.000000e+0
+ 5.000000e+0   0.000000e+0
+ 8.000000e+0   1.000000e-23
+ 1.200000e+1   0.000000e+0
+ 1.000000e+3   0.000000e+0
+-----------------------------
+
+******************************* Ar^+ / Ar ******************************
+
+SPECIES: Ar^+ / Ar
+PROCESS: Ar+ + Ar -> Ar+ + Ar, Isotropic
+PARAM.:  Mi = 39.948, Mi/M = 1, complete set
+COMMENT: synthetic isotropic ion-neutral scattering (typeless Phelps-like block).
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 0.000000e+0   3.000000e-19
+ 1.000000e+0   3.000000e-19
+ 1.000000e+2   2.000000e-19
+-----------------------------
+
+SPECIES: Ar^+ / Ar
+PROCESS: Ar+ + Ar -> Ar + Ar+, Backscat
+PARAM.:  Mi = 39.948, Mi/M = 1, complete set
+COMMENT: synthetic charge exchange (backward scattering).
+COLUMNS: Energy (eV) | Cross section (m2)
+-----------------------------
+ 0.000000e+0   5.000000e-19
+ 1.000000e+0   5.000000e-19
+ 1.000000e+2   4.000000e-19
+-----------------------------
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

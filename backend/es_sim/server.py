@@ -37,6 +37,7 @@ from .dsmc import DsmcSimulation
 from .tl import TlSimulation
 from .mcc import GasField
 from .sweep import build_sweep_cases, resolve_sweep_module, run_sweep
+from .xs.api import XsParseRequest, XsParseResponse, parse_xs_text
 from .schema import (
     DsmcResultModel,
     ElectrodeCharge,
@@ -493,6 +494,19 @@ def lxcat_parse_endpoint(req: LxcatParseRequest) -> LxcatParseResult:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return LxcatParseResult(processes=processes, warnings=warnings)
+
+
+@app.post("/v2/xs/parse", response_model=XsParseResponse)
+def xs_parse_v2_endpoint(req: XsParseRequest) -> XsParseResponse:
+    """LXCat 形式テキストを v2 断面積モデル (es_sim.xs) でパースする (prompts/120)。
+
+    DATABASE ごとの全ブロック (CrossSection.to_dict() の形、SI 単位)・(入射粒子, 標的) ごとの
+    要約・パース警告を返す。パース失敗は /lxcat/parse と同じく 422。
+    """
+    try:
+        return parse_xs_text(req.text)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ---- PIC WebSocket ストリーミング (フェーズ3、仕様書 §9) ----------------------

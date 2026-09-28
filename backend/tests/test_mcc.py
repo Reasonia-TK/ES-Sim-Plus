@@ -39,13 +39,16 @@ REAL_I = DATA / "Arイオン衝突断面積.txt"
 def test_parse_synthetic_electron():
     """標準ブロック形式: ELASTIC/EFFECTIVE/EXCITATION/IONIZATION/ATTACHMENT。"""
     procs, warnings = parse_lxcat(SYN_E.read_text(encoding="utf-8"), "electron")
-    # EFFECTIVE は elastic として取り込み、ATTACHMENT はスキップ → 4 プロセス
-    assert [p.kind for p in procs] == ["elastic", "elastic", "excitation", "ionization"]
+    # prompts/120 で意図的に変更 (物理の修正): Ar は ELASTIC と EFFECTIVE の両方を持つ。
+    # 旧実装は両方を elastic として取り込み運動量移行断面積を二重計上していた
+    # (4 プロセス)。新実装は ELASTIC を採用し EFFECTIVE を警告付きで除外、ATTACHMENT は
+    # 従来どおり警告付きでスキップ → 3 プロセス + 警告 2 件
+    assert [p.kind for p in procs] == ["elastic", "excitation", "ionization"]
     assert len(warnings) == 2
     assert any("EFFECTIVE" in w for w in warnings)
     assert any("ATTACHMENT" in w for w in warnings)
 
-    elastic, effective, excitation, ionization = procs
+    elastic, excitation, ionization = procs
     assert abs(elastic.mass_ratio - 1.36e-5) < 1e-12
     assert elastic.threshold_ev == 0.0
     assert len(elastic.energy_ev) == 4 and len(elastic.sigma_m2) == 4
@@ -90,7 +93,8 @@ def test_lxcat_endpoint():
     )
     assert r.status_code == 200
     body = r.json()
-    assert len(body["processes"]) == 4
+    # prompts/120 の意図的な変更: EFFECTIVE (ELASTIC と二重計上) を除外 → 4 → 3 プロセス
+    assert len(body["processes"]) == 3
     assert len(body["warnings"]) == 2
 
     r = client.post("/lxcat/parse", json={"text": "no blocks here", "species": "electron"})
