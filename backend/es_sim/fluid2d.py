@@ -197,55 +197,11 @@ class Fluid2dSimulation:
         self.s: Fluid2dSettings = project.fluid2d
         self.explicit = bool(explicit)
         s = self.s
-
-        self.ridx = _radial_index(project.coord)
-        self.rz = self.ridx is not None
-
-        mesh = generate_mesh(project)
-        self.mesh = mesh
-        self.n_nodes = len(mesh.nodes)
-        self.tris = mesh.triangles
-
-        # E ベクトル計算用の重心座標係数 (pic.py と同じ流儀。メッシュ固定なので
-        # 初期化時に1回だけ計算する)
-        _, self._bc_b, self._bc_c, self._bc_det = _barycentric_coeffs(mesh.nodes, self.tris)
-
-        solid = _solid_elements(project, mesh)
-        self.fluid_mask = np.ones(len(self.tris), dtype=bool) if solid is None else ~solid
-
-        # ---- EAFE エッジ重み・節点体積 (fem.py の一様係数ラプラシアン、固体要素を除く) --
-        k_uniform, node_vol_full = assemble_transport_operator(
-            mesh, project.coord, elem_mask=self.fluid_mask
-        )
-        self.node_vol_full = node_vol_full
-        active = node_vol_full > 0.0
-        self.active_idx = np.nonzero(active)[0]
-        self.n_active = len(self.active_idx)
-        if self.n_active == 0:
-            raise ValueError("流体輸送領域が空です (全要素が固体、または要素がありません)")
-        glob_to_loc = np.full(self.n_nodes, -1, dtype=np.int64)
-        glob_to_loc[self.active_idx] = np.arange(self.n_active)
-        self._glob_to_loc = glob_to_loc
-        self.node_vol = node_vol_full[self.active_idx]
-
-        k_active = k_uniform[self.active_idx][:, self.active_idx].tocsr()
-        k_upper = sp.triu(k_active, k=1).tocoo()
-        self.i_idx = k_upper.row.astype(np.int64)
-        self.j_idx = k_upper.col.astype(np.int64)
-        self.w_ij = -k_upper.data
-
         self.warnings: list[str] = []
-        n_neg = int(np.sum(self.w_ij < 0.0))
-        if n_neg > 0:
-            self.warnings.append(
-                f"EAFE エッジ重み負: {n_neg}/{len(self.w_ij)} 本 (メッシュが局所的に "
-                "Delaunay 的でない可能性があります。フラックス計算はそのまま継続しますが、"
-                "非単調性 (数値振動) の原因になり得ます — 該当箇所のメッシュを細かくする、"
-                "または三角形の内角が鈍角にならないよう再分割することを検討してください)"
-            )
 
-        self._build_sparse_pattern()
-        self._build_wall_geometry(project, mesh)
+        # 輸送グラフ (節点体積・エッジ重み・壁) と Poisson の組み立ては派生クラス
+        # (v2 直交格子版 es_sim.gfluid) が差し替えられるようにメソッドへ分けている
+        self._init_geometry(project)
 
         # ---- 陰的反復ソルバー (prompts/115) --------------------------------------
         self.linear_solver = s.linear_solver
@@ -262,44 +218,7 @@ class Fluid2dSimulation:
         self.solver_fallback_count = 0
         self._solver_fallback_warned = False
 
-        # ---- Poisson (fem.assemble を再利用。free/fixed/splu は pic.py と同型の
-        #      再実装 — モジュール docstring の設計判断参照) --------------------------
-        k_poisson, self.f_static = assemble(project, mesh)
-        items = sorted(mesh.dirichlet.items())
-        self.fixed = np.array([i for i, _ in items], dtype=np.int64)
-        self.v_dc = np.array([v for _, v in items], dtype=np.float64)
-        rf = mesh.dirichlet_rf
-        kmax = max((len(c) for c in rf.values()), default=1)
-        kmax = max(kmax, 1)
-        n_fixed = len(items)
-        self.rf_amp = np.zeros((n_fixed, kmax))
-        self.rf_omega = np.zeros((n_fixed, kmax))
-        self.rf_phase = np.zeros((n_fixed, kmax))
-        for row, (i, _) in enumerate(items):
-            for kc, (amp, freq, ph) in enumerate(rf.get(i, ())):
-                self.rf_amp[row, kc] = amp
-                self.rf_omega[row, kc] = 2.0 * math.pi * freq
-                self.rf_phase[row, kc] = math.radians(ph)
-        wf_map = mesh.dirichlet_waveform
-        self._waveforms: list[VoltageWaveform] = []
-        self._wf_index = np.full(n_fixed, -1, dtype=np.int64)
-        wf_id_to_idx: dict[int, int] = {}
-        for row, (i, _) in enumerate(items):
-            wf = wf_map.get(i)
-            if wf is None:
-                continue
-            key = id(wf)
-            idx = wf_id_to_idx.get(key)
-            if idx is None:
-                idx = len(self._waveforms)
-                wf_id_to_idx[key] = idx
-                self._waveforms.append(wf)
-            self._wf_index[row] = idx
-        self.free = np.setdiff1d(np.arange(self.n_nodes), self.fixed)
-        if len(self.free) == 0:
-            raise ValueError("自由節点がありません (全節点が Dirichlet)")
-        self.k_fd = k_poisson[self.free][:, self.fixed].tocsr()
-        self.lu = spla.splu(k_poisson[self.free][:, self.free].tocsc())
+        self._init_poisson(project)
 
         # ---- ガス・イオン輸送係数 (fluid1d.py と同じ規約。mu_i は低電界値 μ_L) -------
         self.n_g = s.gas_pressure_pa / (KB * s.gas_temperature_k)
@@ -309,14 +228,6 @@ class Fluid2dSimulation:
         self.d_i = self.mu_i * self.t_i_ev  # Frost 補正なし (frost_mobility の docstring 参照)
         self.ion_mobility_model = s.ion_mobility_model
         self.frost_c_td = float(s.frost_c_td)
-        # 修正 Frost 用: エッジ (i,j) の Δφ→|E| 換算に使う概算エッジ長 (1D の dx に
-        # 相当する量)。EAFE の z=Δφ/T_i 自体はエッジ長を必要としない (w_ij に
-        # 幾何因子が既に吸収されている) が、Frost の E/N 評価には |E| を dphi から
-        # 復元する必要があるため、この換算専用にノード間ユークリッド距離を使う
-        # (mesh は不変なので初期化時に1回だけ計算する)
-        p_i = mesh.nodes[self.active_idx[self.i_idx]]
-        p_j = mesh.nodes[self.active_idx[self.j_idx]]
-        self._edge_len = np.linalg.norm(p_i - p_j, axis=1)
 
         electron_processes = s.electron_processes if s.electron_processes else edupic_ar_processes()[0]
         self.reactions: FluidReactions = build_fluid_reactions(electron_processes)
@@ -406,6 +317,113 @@ class Fluid2dSimulation:
         self._run_t0 = 0.0
 
     # ---- 幾何前処理 --------------------------------------------------------------
+
+    def _init_geometry(self, project: Project) -> None:
+        """メッシュ・EAFE 輸送グラフ・壁の幾何を組む (v2 直交格子版は es_sim.gfluid が差し替える)。
+
+        設定する属性: ridx/rz、mesh・n_nodes・tris・_bc_b/_bc_c/_bc_det (表示用の要素 E)、
+        node_vol_full・active_idx・n_active・_glob_to_loc・node_vol、i_idx/j_idx
+        (アクティブ節点の局所番号)・w_ij・_edge_len、疎行列パターン、壁
+        (wall_n1/wall_n2/wall_w1/wall_w2/wall_nout/wall_tri・gamma_see)、h_min。
+        """
+        self.ridx = _radial_index(project.coord)
+        self.rz = self.ridx is not None
+
+        mesh = generate_mesh(project)
+        self.mesh = mesh
+        self.n_nodes = len(mesh.nodes)
+        self.tris = mesh.triangles
+
+        # E ベクトル計算用の重心座標係数 (pic.py と同じ流儀。メッシュ固定なので
+        # 初期化時に1回だけ計算する)
+        _, self._bc_b, self._bc_c, self._bc_det = _barycentric_coeffs(mesh.nodes, self.tris)
+
+        solid = _solid_elements(project, mesh)
+        self.fluid_mask = np.ones(len(self.tris), dtype=bool) if solid is None else ~solid
+
+        # ---- EAFE エッジ重み・節点体積 (fem.py の一様係数ラプラシアン、固体要素を除く) --
+        k_uniform, node_vol_full = assemble_transport_operator(
+            mesh, project.coord, elem_mask=self.fluid_mask
+        )
+        self.node_vol_full = node_vol_full
+        active = node_vol_full > 0.0
+        self.active_idx = np.nonzero(active)[0]
+        self.n_active = len(self.active_idx)
+        if self.n_active == 0:
+            raise ValueError("流体輸送領域が空です (全要素が固体、または要素がありません)")
+        glob_to_loc = np.full(self.n_nodes, -1, dtype=np.int64)
+        glob_to_loc[self.active_idx] = np.arange(self.n_active)
+        self._glob_to_loc = glob_to_loc
+        self.node_vol = node_vol_full[self.active_idx]
+
+        k_active = k_uniform[self.active_idx][:, self.active_idx].tocsr()
+        k_upper = sp.triu(k_active, k=1).tocoo()
+        self.i_idx = k_upper.row.astype(np.int64)
+        self.j_idx = k_upper.col.astype(np.int64)
+        self.w_ij = -k_upper.data
+
+        n_neg = int(np.sum(self.w_ij < 0.0))
+        if n_neg > 0:
+            self.warnings.append(
+                f"EAFE エッジ重み負: {n_neg}/{len(self.w_ij)} 本 (メッシュが局所的に "
+                "Delaunay 的でない可能性があります。フラックス計算はそのまま継続しますが、"
+                "非単調性 (数値振動) の原因になり得ます — 該当箇所のメッシュを細かくする、"
+                "または三角形の内角が鈍角にならないよう再分割することを検討してください)"
+            )
+
+        self._build_sparse_pattern()
+        self._build_wall_geometry(project, mesh)
+
+        # 修正 Frost 用: エッジ (i,j) の Δφ→|E| 換算に使う概算エッジ長 (1D の dx に
+        # 相当する量)。EAFE の z=Δφ/T_i 自体はエッジ長を必要としない (w_ij に
+        # 幾何因子が既に吸収されている) が、Frost の E/N 評価には |E| を dphi から
+        # 復元する必要があるため、この換算専用にノード間ユークリッド距離を使う
+        # (mesh は不変なので初期化時に1回だけ計算する)
+        p_i = mesh.nodes[self.active_idx[self.i_idx]]
+        p_j = mesh.nodes[self.active_idx[self.j_idx]]
+        self._edge_len = np.linalg.norm(p_i - p_j, axis=1)
+
+    def _init_poisson(self, project: Project) -> None:
+        """Poisson の fixed/free 分解・splu 事前分解・電圧波形表 (v2 版は GMG に差し替える)。"""
+        mesh = self.mesh
+        # ---- Poisson (fem.assemble を再利用。free/fixed/splu は pic.py と同型の
+        #      再実装 — モジュール docstring の設計判断参照) --------------------------
+        k_poisson, self.f_static = assemble(project, mesh)
+        items = sorted(mesh.dirichlet.items())
+        self.fixed = np.array([i for i, _ in items], dtype=np.int64)
+        self.v_dc = np.array([v for _, v in items], dtype=np.float64)
+        rf = mesh.dirichlet_rf
+        kmax = max((len(c) for c in rf.values()), default=1)
+        kmax = max(kmax, 1)
+        n_fixed = len(items)
+        self.rf_amp = np.zeros((n_fixed, kmax))
+        self.rf_omega = np.zeros((n_fixed, kmax))
+        self.rf_phase = np.zeros((n_fixed, kmax))
+        for row, (i, _) in enumerate(items):
+            for kc, (amp, freq, ph) in enumerate(rf.get(i, ())):
+                self.rf_amp[row, kc] = amp
+                self.rf_omega[row, kc] = 2.0 * math.pi * freq
+                self.rf_phase[row, kc] = math.radians(ph)
+        wf_map = mesh.dirichlet_waveform
+        self._waveforms: list[VoltageWaveform] = []
+        self._wf_index = np.full(n_fixed, -1, dtype=np.int64)
+        wf_id_to_idx: dict[int, int] = {}
+        for row, (i, _) in enumerate(items):
+            wf = wf_map.get(i)
+            if wf is None:
+                continue
+            key = id(wf)
+            idx = wf_id_to_idx.get(key)
+            if idx is None:
+                idx = len(self._waveforms)
+                wf_id_to_idx[key] = idx
+                self._waveforms.append(wf)
+            self._wf_index[row] = idx
+        self.free = np.setdiff1d(np.arange(self.n_nodes), self.fixed)
+        if len(self.free) == 0:
+            raise ValueError("自由節点がありません (全節点が Dirichlet)")
+        self.k_fd = k_poisson[self.free][:, self.fixed].tocsr()
+        self.lu = spla.splu(k_poisson[self.free][:, self.free].tocsc())
 
     def _build_wall_geometry(self, project: Project, mesh) -> None:
         """壁 (吸収境界) エッジの幾何 (法線・境界質量重み・SEE γ) を前計算する。
@@ -607,6 +625,11 @@ class Fluid2dSimulation:
         ey = -np.sum(vt * self._bc_c, axis=1) / self._bc_det
         return ex, ey
 
+    def _wall_en(self, phi: np.ndarray) -> np.ndarray:
+        """壁エッジごとの E·n_out (壁に隣接する流体要素の E、外向き法線)。"""
+        ex_e, ey_e = self._e_field_elements(phi)
+        return ex_e[self.wall_tri] * self.wall_nout[:, 0] + ey_e[self.wall_tri] * self.wall_nout[:, 1]
+
     def _dirichlet_values(self, t: float) -> np.ndarray:
         """時刻 t の Dirichlet 値 (pic.py._dirichlet_values と同じ式)。"""
         v = self.v_dc + np.sum(self.rf_amp * np.sin(self.rf_omega * t + self.rf_phase), axis=1)
@@ -769,7 +792,7 @@ class Fluid2dSimulation:
         t0 = time.perf_counter()
         phi = self._solve_phi(t)
         self.phi = phi
-        ex_e, ey_e = self._e_field_elements(phi)
+        en_wall = self._wall_en(phi)
 
         n_e_a = self.n_e[self.active_idx]
         n_i_a = self.n_i[self.active_idx]
@@ -804,7 +827,6 @@ class Fluid2dSimulation:
         self.timing["poisson"] += t1 - t0
 
         # ---- 壁 BC 係数 (現在の場・Te で評価、fluid1d._wall_side_coeffs の2D 一般化) --
-        en_wall = ex_e[self.wall_tri] * self.wall_nout[:, 0] + ey_e[self.wall_tri] * self.wall_nout[:, 1]
         v_th_i = math.sqrt(8.0 * self.t_i_ev * QE / (math.pi * self.m_ion))
         # 壁向きドリフト流束の μ_i も SG 係数と同じ修正 Frost 補正を使う (prompts/116)
         c_i_edge = np.maximum(self._mu_i_at(en_wall) * en_wall, 0.0) + 0.25 * v_th_i

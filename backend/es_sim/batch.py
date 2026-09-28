@@ -40,7 +40,8 @@ from .gpic import make_pic_simulation
 from .pic import PicSimulation
 from .pic1d import Pic1dSimulation, build_pic1d_result
 from .fluid1d import Fluid1dSimulation, build_fluid1d_result
-from .fluid2d import Fluid2dSimulation, build_fluid2d_result
+from .fluid2d import build_fluid2d_result
+from .gfluid import make_fluid2d_simulation
 from .schema import Project
 
 # frontend/src/types.ts の PicDiag と同じキー順 (toDiagArray が組み立てる行の形に合わせる)。
@@ -315,10 +316,10 @@ def _worker(
                     "fluid2d 設定がありません (module=fluid2d を指定するには project.fluid2d が必要です)"
                 )
             # fluid1d と同様、粒子もMCCも無い (use_dsmc_gas 相当の制約が存在しない) ので
-            # 追加チェックは不要。Fluid2dSimulation のコンストラクタが project から
-            # メッシュ・EAFE エッジ重み・Poisson の splu 事前分解を組み立てる
-            # (server.py の _run_fluid2d_session と同じ構築経路)
-            simf2 = Fluid2dSimulation(project)
+            # 追加チェックは不要。コンストラクタが project から メッシュ・輸送グラフ・
+            # Poisson の前処理を組み立てる (mesh.mode="cartesian" は v2 直交格子版、prompts/125。
+            # server.py の _run_fluid2d_session と同じ構築経路)
+            simf2 = make_fluid2d_simulation(project)
             n_steps_f2 = simf2.s.n_steps
             last_sent_f2 = 0.0
 
@@ -336,6 +337,10 @@ def _worker(
             elapsed_s = time.perf_counter() - t_run0
             # server.py の _stream_run_fluid2d (build_fluid2d_result) と同一の形にする
             bundle = {"version": 1, "fluid2d": build_fluid2d_result(simf2, elapsed_s)}
+            if hasattr(simf2, "mesh_payload"):
+                # v2 直交格子版は結果の節点番号が表示用メッシュ (ResultsBundle.mesh) に対応する
+                # (mesh.amr があっても流体は基準格子で解くため、/mesh の結果と食い違わないよう同梱する)
+                bundle["mesh"] = simf2.mesh_payload()
         else:
             raise ValueError(
                 f"不明な module です: {module!r} "

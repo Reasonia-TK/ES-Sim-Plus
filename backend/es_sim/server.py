@@ -32,8 +32,10 @@ from .pic1d_presets import edupic_ar_processes
 from .pic1d_presets import get_presets as get_pic1d_presets
 from .fluid1d import Fluid1dSimulation, build_fluid1d_result
 from .fluid2d import Fluid2dSimulation, build_fluid2d_result
+from .gfluid import make_fluid2d_simulation
 from .postprocess import sample_line
 from .dsmc import DsmcSimulation
+from .gdsmc import make_dsmc_simulation
 from .tl import TlSimulation
 from .mcc import GasField
 from .sweep import build_sweep_cases, resolve_sweep_module, run_sweep
@@ -235,7 +237,7 @@ def dsmc_endpoint(project: Project) -> DsmcResultModel:
     if project.dsmc is None:
         raise HTTPException(status_code=422, detail="project.dsmc が指定されていません")
     try:
-        sim = DsmcSimulation(project)
+        sim = make_dsmc_simulation(project)  # mesh.mode="cartesian" は v2 GPU DSMC (prompts/124)
         res = sim.run()
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -258,7 +260,7 @@ async def _run_dsmc_session(ws: WebSocket, project_dict: dict) -> None:
         if project.dsmc is None:
             raise ValueError("project.dsmc が指定されていません")
         # メッシュ生成・初期充填も重いのでスレッドで実行
-        sim = await asyncio.to_thread(DsmcSimulation, project)
+        sim = await asyncio.to_thread(make_dsmc_simulation, project)
     except Exception as exc:
         await ws.send_json({"type": "error", "detail": str(exc)})
         return
@@ -1095,6 +1097,8 @@ async def ws_fluid1d(ws: WebSocket) -> None:
 # フロントは既に /mesh のレスポンスでメッシュを保持しており、fluid2d はその既存メッシュと
 # 同じ project から生成されるメッシュを使う (Project.geometry/mesh が変わっていなければ
 # 節点番号・座標は /mesh のときと完全に一致する) ので、二重送信を避けてペイロードを削減する。
+# 例外: mesh.mode="cartesian" (v2 直交格子版、prompts/125) は started に表示用メッシュを載せる
+# (mesh.amr があると /mesh は細分化したメッシュを返すが、流体は基準格子で解くため)。
 
 _last_simfluid2d: Fluid2dSimulation | None = None
 _fluid2d_lock = asyncio.Lock()
@@ -1107,7 +1111,7 @@ async def _run_fluid2d_session(ws: WebSocket, project_dict: dict) -> None:
         project = Project.model_validate(project_dict)
         # メッシュ生成・EAFE エッジ重み・Poisson の splu 事前分解も重いので
         # PIC と同様スレッドで実行する
-        sim = await asyncio.to_thread(Fluid2dSimulation, project)
+        sim = await asyncio.to_thread(make_fluid2d_simulation, project)
     except Exception as exc:
         await ws.send_json({"type": "error", "detail": str(exc)})
         return
@@ -1157,6 +1161,8 @@ async def _stream_run_fluid2d(ws: WebSocket, sim: Fluid2dSimulation) -> None:
             # 陰的反復ソルバーの実効スレッド数 (PIC の effective_threads と同じ趣旨、
             # prompts/115)。フロントで設定が実際に反映されているかを確認できるようにする
             "effective_threads": sim.effective_threads,
+            # v2 直交格子版のみ: 表示用メッシュ (フロントはこれを描画用メッシュにする)
+            **({"mesh": sim.mesh_payload()} if hasattr(sim, "mesh_payload") else {}),
         }
     )
 

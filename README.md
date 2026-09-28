@@ -187,6 +187,11 @@ GUI のメッシュ設定で「直交格子+埋め込み境界 (v2・GPU)」を�
 - **GPU PIC-MCC**: 1 ステップを CUDA Graph で再生するホスト同期ゼロの実装。v1 (8 スレッド) 比
   18〜42 倍 (`backend/benchmarks/v2_bench.py`)。軸対称・一様 B・MCC・SEE・誘電体表面電荷・
   IEDF コレクタ・EEDF 領域・位相分解に対応 (注入・FN 放出・粒子マージ・DSMC 連成は未対応)
+- **GPU DSMC** ([prompts/124](prompts/124-gpu-dsmc.md)): 所属セル O(1)・固体は厳密形状の拡散反射・
+  セル番号の基数ソート + 候補対ごとに並列の NTC 衝突。v1 (8 スレッド) 比 35 倍
+- **流体 2D の直交格子版** ([prompts/125](prompts/125-cartesian-fluid.md)): v1 と同じ物理・時間積分で、
+  輸送グラフを双対セルの気体部分 (固体は埋め込み境界、小セル併合) から、Poisson を EB の離散化から
+  組む。v1 構造格子と 1〜2% で一致、v1 非構造比 1.7〜4.6 倍 (輸送は CPU)
 - **LXCat 完全対応** (`es_sim/xs/`、`POST /v2/xs/parse`): boltzpmp のパーサーの上位互換
   (DATABASE・複数ガス・ROTATION・`<->` 統計重み・3 列目運動量移行・PARAM./COLUMNS 単位・
   Phelps イオン形式)、EFFECTIVE→ELASTIC の厳密変換、混合ガスの boltzpmp 変換
@@ -209,8 +214,11 @@ GUI のメッシュ設定で「直交格子+埋め込み境界 (v2・GPU)」を�
   PIC側のコレクタ機能で実装済み)
 - LXCat実データ(`backend/tests/data/Ar*.txt`)は再配布条件のため git 管理外。テストは同梱の
   合成フィクスチャで常時実行され、実データがあれば追加検証される
-- GPU (CuPy) は v2 エンジン (`mesh.mode: "cartesian"`) の静電場と PIC のみ。v2 の PIC は現状 GPU 専用
-  (CPU で PIC を回す場合は unstructured/structured の v1 エンジンを使う)。v2 は矩形 domain のみ対応
+- GPU (CuPy) は v2 エンジン (`mesh.mode: "cartesian"`) の静電場・PIC・DSMC のみ。v2 の PIC と DSMC は
+  現状 GPU 専用 (CPU で回す場合は unstructured/structured の v1 エンジンを使う)。v2 の流体 2D は輸送が
+  CPU (Poisson は大きな格子で GPU)。v2 は矩形 domain のみ対応
+- 流体 2D (v1・v2 共通) は誘電体表面と「なし (Neumann)」の外周辺を吸収壁として扱うが帯電させないため、
+  条件によっては電子だけが抜けて電位が上がり続ける (外周は symmetry か電極にするのが安全)
 - v2 の局所細分化 (AMR) は静電場と PIC に対応 (流体・DSMC・軌道追跡は基本格子)。PIC の動的再格子化は
   時間平均区間の前だけ。粗細界面には粒子の自己力が残る (大きさは PIC の粒子ノイズや壁際の鏡像力と
   同程度、[prompts/122](prompts/122-amr-gpu-pic.md))。解に基づく適応細分化 (`adaptive`) は静電場のみ

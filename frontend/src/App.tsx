@@ -1412,6 +1412,9 @@ export default function App() {
     onStarted: (msg) => {
       setFluid2dStarted(msg);
       setFluid2dFrame(null); // ライブ表示を新しい実行区間の内容に自然に切り替える
+      // v2 直交格子版 (mesh.mode="cartesian"、prompts/125) は流体が実際に使う表示用メッシュを
+      // 送ってくる (mesh.amr があると /mesh は細分化したメッシュを返すが、流体は基準格子で解く)
+      if (msg.mesh) setMeshResult(msg.mesh);
     },
     onFrame: (msg) => {
       setFluid2dFrame(msg);
@@ -1429,7 +1432,8 @@ export default function App() {
     onClose: () => setFluid2dRunning(false),
   });
 
-  // 流体2D開始: /ws/fluid2d の started はメッシュを含まない (server.py のコメント参照) ため、
+  // 流体2D開始: /ws/fluid2d の started はメッシュを含まない (server.py のコメント参照。v2 直交格子版だけは
+  // 含み、onStarted でそれに置き換える) ため、
   // 2D PIC 開始時の「バックエンドが返すメッシュをそのまま使う」挙動に相当するものとして、
   // 開始前にフロント側で POST /mesh を実行し直し、フィールド描画に使う meshResult を
   // 現在の project (fluid2d 実行に使われるものと同じ geometry/mesh) と確実に整合させる

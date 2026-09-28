@@ -787,6 +787,9 @@ export interface Fluid2dStartedMsg {
   // linear_solver="direct" のときも値は入るが、spsolve が並列化されないため意味を持たない。
   // optional なのは PicStartedMsg.effective_threads と同じ理由 (古いバックエンド互換)
   effective_threads?: number;
+  // v2 直交格子版 (mesh.mode="cartesian"、prompts/125) のみ: 流体が使う表示用メッシュ
+  // (フロントは描画用の meshResult をこれに置き換える)
+  mesh?: MeshResult;
 }
 
 // フレームは phi/n_e/n_i/t_e すべて全節点長の配列 (fluid2d.py _make_frame と同じ規約。
@@ -1564,7 +1567,8 @@ export interface ResultsBundle {
   // 1D プラズマ流体の完了結果一式 (prompts/104-108)。done.result そのもの (settings を含み自己完結)
   fluid1d?: Fluid1dResult | null;
   // 2D/軸対称 プラズマ流体の完了結果一式 (prompts/111-113)。done.result そのもの
-  // (settings を含み自己完結)。mesh は含まない (既存の mesh 結果を流用する、Fluid2dResult 参照)
+  // (settings を含み自己完結)。mesh は含まない (既存の mesh 結果を流用する、Fluid2dResult 参照。
+  // v2 直交格子版は started の mesh・バッチの ResultsBundle.mesh が流体の表示用メッシュになる)
   fluid2d?: Fluid2dResult | null;
   // VHF 定在波の完了結果一式 (prompts/101)。done.result そのもの (settings を含み自己完結)
   tl?: TlResult | null;
