@@ -11,6 +11,8 @@ export interface BackendInfo {
   version: string;
   gpu: boolean;
   numba: boolean;
+  /** サーバープロセスの識別子 (変われば再起動した。古いバックエンドは返さない) */
+  instance?: string;
   v2?: Record<string, unknown>;
 }
 
@@ -39,6 +41,7 @@ export function parseHealth(body: unknown): BackendInfo {
     version: String(b.version ?? "?"),
     gpu: Boolean(b.gpu),
     numba: b.numba === undefined ? true : Boolean(b.numba),
+    instance: typeof b.instance === "string" ? b.instance : undefined,
     v2: (b.v2 as Record<string, unknown> | undefined) ?? undefined,
   };
 }
@@ -57,10 +60,12 @@ export const useConnection = create<ConnectionState>()((set, get) => ({
     inflight = (async () => {
       try {
         const info = parseHealth(await apiGet("/health", { timeoutMs: 3000 }));
+        const prev = get().info;
         const wasConnected = get().status === "connected";
-        const versionChanged = get().info?.version !== info.version;
+        // 版が同じでも再起動 (instance が変わった) ならスキーマが変わっているかもしれない
+        const restarted = prev?.version !== info.version || prev?.instance !== info.instance;
         set({ status: "connected", info, lastError: null, port: getPort() });
-        if (!wasConnected || versionChanged || get().schema === null) {
+        if (!wasConnected || restarted || get().schema === null) {
           try {
             set({ schema: await apiGet<ProjectSchema>("/v2/schema", { timeoutMs: 10000 }) });
           } catch (e) {

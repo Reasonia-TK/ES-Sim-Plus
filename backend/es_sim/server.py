@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import secrets
 import shutil
 import tempfile
 import threading
@@ -57,6 +58,7 @@ from .schema import (
     TraceResult,
     XsProcess,
 )
+from .ui_schema import project_schema
 
 # _numba_kernels は particles.py などから optional 依存として import されるが、
 # 実際に import が走るのは初回 PIC/DSMC/trace 実行時 (遅延)。PyInstaller ビルドで
@@ -86,12 +88,18 @@ def _mesh_result(mesh) -> MeshResult:
     )
 
 
+#: このサーバープロセスの識別子 (/health)。UI v2 は値が変わったらバックエンドが再起動したとみなし、スキーマを
+#: 取り直す (版が同じでも schema.py が変わっていることがあるため、prompts/130)
+SERVER_INSTANCE = secrets.token_hex(8)
+
+
 @app.get("/health")
 def health():
     dev = describe_device()
     return {
         "status": "ok",
         "version": __version__,
+        "instance": SERVER_INSTANCE,
         # "gpu" は v2 エンジン (mesh.mode="cartesian") が CUDA を使えるか (prompts/119)
         "gpu": bool(dev["cuda"]) or gpu_available(),
         "numba": _numba_kernels.HAVE_NUMBA,
@@ -533,15 +541,16 @@ def xs_parse_v2_endpoint(req: XsParseRequest) -> XsParseResponse:
 
 @lru_cache(maxsize=1)
 def _project_schema() -> dict:
-    return Project.model_json_schema()
+    return project_schema()
 
 
 @app.get("/v2/schema")
 def v2_schema() -> dict:
     """プロジェクトの JSON Schema (UI v2 が設定フォームを組み立てる元、prompts/130)。
 
-    範囲・既定値・型・説明は pydantic のモデルから。単位と「詳細設定」の印は各フィールドの
-    json_schema_extra に書き足していく (P6b)。
+    範囲・既定値・型・説明は pydantic のモデルから、単位 (x-unit)・表示単位で扱う長さ (x-geom)・
+    「詳細設定」の印 (x-advanced) は schema.py の各フィールドの json_schema_extra (schema.ui) から。
+    UI は同じ内容を同梱もしている (es_sim.ui_schema)。
     """
     return {"version": __version__, "project": _project_schema()}
 

@@ -16,11 +16,13 @@
     "@tauri-apps/plugin-fs": "^2.5.1",
     "i18next": "26.4.2",
     "immer": "11.1.18",
+    "polygon-clipping": "0.15.7",
     "radix-ui": "1.6.7",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-i18next": "17.0.15",
     "react-resizable-panels": "4.14.1",
+    "uplot": "1.6.32",
     "zustand": "5.0.15"
   },
   "devDependencies": {

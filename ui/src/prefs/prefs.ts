@@ -22,10 +22,13 @@ interface PrefsState {
   theme: Theme;
   language: Language;
   lengthUnit: LengthUnit;
+  /** 設定欄で「詳細設定」の項目も出す */
+  showAdvanced: boolean;
   recent: RecentFile[];
   setTheme: (t: Theme) => void;
   setLanguage: (l: Language) => void;
   setLengthUnit: (u: LengthUnit) => void;
+  setShowAdvanced: (v: boolean) => void;
   addRecent: (f: Omit<RecentFile, "openedAt">) => void;
   removeRecent: (f: RecentFile) => void;
   clearRecent: () => void;
@@ -40,10 +43,12 @@ export const usePrefs = create<PrefsState>()(
       theme: "dark",
       language: "ja",
       lengthUnit: "mm",
+      showAdvanced: false,
       recent: [],
       setTheme: (theme) => set({ theme }),
       setLanguage: (language) => set({ language }),
       setLengthUnit: (lengthUnit) => set({ lengthUnit }),
+      setShowAdvanced: (showAdvanced) => set({ showAdvanced }),
       addRecent: (f) =>
         set((s) => ({
           recent: [{ ...f, openedAt: Date.now() }, ...s.recent.filter((r) => !sameFile(r, f))].slice(0, RECENT_LIMIT),
@@ -54,7 +59,13 @@ export const usePrefs = create<PrefsState>()(
     {
       name: "es-sim-ui.prefs",
       storage: createJSONStorage(() => localStorage),
-      partialize: (s) => ({ theme: s.theme, language: s.language, lengthUnit: s.lengthUnit, recent: s.recent }),
+      partialize: (s) => ({
+        theme: s.theme,
+        language: s.language,
+        lengthUnit: s.lengthUnit,
+        showAdvanced: s.showAdvanced,
+        recent: s.recent,
+      }),
     },
   ),
 );

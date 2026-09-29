@@ -738,3 +738,230 @@ details > summary {
   padding: 24px;
   max-width: 960px;
 }
+
+/* ---- 設定フォーム (P6b) ---- */
+
+.small {
+  font-size: 12px;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.ellipsis {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.study-toggle {
+  margin: 0 0 4px;
+}
+
+.form-section {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 0 0 10px;
+  background: color-mix(in srgb, var(--bg-panel) 60%, var(--bg));
+}
+
+.form-section.optional:not(.enabled) {
+  background: none;
+}
+
+.form-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+}
+
+.section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: none;
+  border: none;
+  padding: 0;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.section-actions {
+  margin-left: auto;
+}
+
+.form-section-body {
+  padding: 4px 10px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.form-section.optional > .hint {
+  margin: 0 10px 8px;
+}
+
+.subsection {
+  margin: 6px 0 10px;
+}
+
+.subsection-title {
+  font-weight: 600;
+  margin: 10px 0 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.field-toggle {
+  display: block;
+  margin: 4px 0 8px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.toggle-track {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--border);
+  flex: 0 0 28px;
+  transition: background 0.12s;
+}
+
+.toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  transition: transform 0.12s;
+}
+
+.toggle input:checked + .toggle-track {
+  background: var(--accent);
+}
+
+.toggle input:checked + .toggle-track::after {
+  transform: translateX(12px);
+}
+
+.toggle input:focus-visible + .toggle-track {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.toggle input:disabled + .toggle-track {
+  opacity: 0.5;
+}
+
+.point-input {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+}
+
+.hint-warn {
+  color: var(--warn);
+}
+
+.hint-error {
+  color: var(--error);
+}
+
+.button-row.tight {
+  margin: 4px 0 8px;
+  align-items: center;
+}
+
+.list-editor {
+  margin: 4px 0;
+}
+
+.list-item {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  margin: 0 0 6px;
+  background: var(--bg-panel);
+}
+
+.list-item.selected {
+  border-color: var(--accent);
+}
+
+.list-item-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.list-item-title {
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-item-body {
+  padding: 6px 8px 2px;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.table th {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.table tr.clickable {
+  cursor: pointer;
+}
+
+.table tr.clickable:hover {
+  background: var(--bg-hover);
+}
+
+.vertex-table td .input {
+  height: 22px;
+}
+
+.line-chart {
+  width: 100%;
+  min-height: 100px;
+}
+
+.line-chart .u-legend {
+  font-size: 11px;
+  color: var(--text-muted);
+}

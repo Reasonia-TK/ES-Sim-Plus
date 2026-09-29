@@ -13,16 +13,37 @@ from pydantic import BaseModel, Field, model_validator
 Point = tuple[float, float]
 
 
+def ui(unit: str | None = None, *, geom: bool = False, advanced: bool = False) -> dict:
+    """UI v2 の設定フォームへの追記 (JSON Schema の x-unit / x-geom / x-advanced、prompts/130)。
+
+    unit は保存値の単位 (SI、"1" は無次元)。geom=True の長さ・座標はプロジェクトの長さの表示単位
+    (mm / µm) で入出力する。advanced=True は「詳細設定」を開いたときだけ出す項目。
+    """
+    extra: dict = {}
+    if unit is not None:
+        extra["x-unit"] = unit
+    if geom:
+        extra["x-geom"] = True
+    if advanced:
+        extra["x-advanced"] = True
+    return extra
+
+
+GEOM = ui("m", geom=True)
+
+
 class Domain(BaseModel):
-    polygon: list[Point] = Field(..., min_length=3, description="解析領域の外周 (閉ポリゴン、反時計回り)")
+    polygon: list[Point] = Field(
+        ..., min_length=3, description="解析領域の外周 (閉ポリゴン、反時計回り)", json_schema_extra=GEOM
+    )
 
 
 class CircleShape(BaseModel):
     """円領域のパラメトリック形状。メッシュ生成時に多角形化する (meshing._region_polygon 参照)。"""
 
     kind: Literal["circle"] = "circle"
-    center: Point
-    radius: float = Field(..., gt=0)
+    center: Point = Field(..., json_schema_extra=GEOM)
+    radius: float = Field(..., gt=0, json_schema_extra=GEOM)
 
 
 class VoltageRF(BaseModel):
@@ -33,9 +54,9 @@ class VoltageRF(BaseModel):
     静電ソルブ (/solve) は従来通り直流分 voltage のみを使い、PIC のみが V(t) を使う。
     """
 
-    amplitude: float
-    freq_hz: float = Field(..., gt=0)
-    phase_deg: float = 0.0
+    amplitude: float = Field(..., json_schema_extra=ui("V"))
+    freq_hz: float = Field(..., gt=0, json_schema_extra=ui("Hz"))
+    phase_deg: float = Field(0.0, json_schema_extra=ui("deg"))
 
 
 def rf_components(rf: "VoltageRF | list[VoltageRF] | None") -> "list[VoltageRF]":
@@ -58,9 +79,9 @@ class VoltageWaveform(BaseModel):
     voltage_rf と同じく静電ソルブでは無視され、PIC のみが使う。
     """
 
-    freq_hz: float = Field(..., gt=0)
-    phase: list[float]  # 正規化位相 [0, 1) (昇順)
-    v: list[float]       # 対応する電圧 [V]
+    freq_hz: float = Field(..., gt=0, json_schema_extra=ui("Hz"))
+    phase: list[float] = Field(..., json_schema_extra=ui("1"))  # 正規化位相 [0, 1) (昇順)
+    v: list[float] = Field(..., json_schema_extra=ui("V"))       # 対応する電圧 [V]
 
     @model_validator(mode="after")
     def _check_phase(self) -> "VoltageWaveform":
@@ -78,19 +99,20 @@ class VoltageWaveform(BaseModel):
 class Region(BaseModel):
     id: str
     type: Literal["conductor", "dielectric", "charge"]
-    polygon: list[Point] | None = Field(None, min_length=3)
+    polygon: list[Point] | None = Field(None, min_length=3, json_schema_extra=GEOM)
     shape: CircleShape | None = None
-    voltage: float | None = None  # conductor: 電位 [V] (直流分)
+    voltage: float | None = Field(None, json_schema_extra=ui("V"))  # conductor: 電位 [V] (直流分)
     # conductor: RF 成分 (PIC のみ使用)。単一またはリスト (デュアル周波数、prompts/49)
     voltage_rf: VoltageRF | list[VoltageRF] | None = None
     # conductor: CSV インポート波形 (PIC のみ使用、prompts/73)。voltage_rf と併用可
     # (V(t) = voltage + Σ RF + V_wf(t))。UI は境界条件辺のみ対応、スキーマ上のみ対応
     voltage_waveform: VoltageWaveform | None = None
-    eps_r: float = 1.0            # dielectric: 比誘電率
-    rho: float = 0.0              # charge: 電荷密度 [C/m^3]
+    eps_r: float = Field(1.0, json_schema_extra=ui("1"))  # dielectric: 比誘電率
+    rho: float = Field(0.0, json_schema_extra=ui("C/m^3"))  # charge: 電荷密度 [C/m^3]
     see_gamma: float = Field(
         0.0, ge=0,
         description="conductor / dielectric: 二次電子放出係数 γ (0 = 無効、PIC のみ使用)",
+        json_schema_extra=ui("1"),
     )
 
     @model_validator(mode="after")
@@ -115,13 +137,15 @@ class BoundaryCondition(BaseModel):
 
     edges: list[int]
     type: Literal["dirichlet", "symmetry", "periodic"] = "dirichlet"
-    voltage: float = 0.0
+    voltage: float = Field(0.0, json_schema_extra=ui("V"))
     # RF 成分 (PIC のみ使用)。単一またはリスト (デュアル周波数、prompts/49)
     voltage_rf: VoltageRF | list[VoltageRF] | None = None
     # CSV インポート波形 (PIC のみ使用、prompts/73)。voltage_rf と併用可
     # (V(t) = voltage + Σ RF + V_wf(t))。dirichlet のみ有効
     voltage_waveform: VoltageWaveform | None = None
-    see_gamma: float = Field(0.0, ge=0, description="二次電子放出係数 γ (0 = 無効、PIC のみ使用)")
+    see_gamma: float = Field(
+        0.0, ge=0, description="二次電子放出係数 γ (0 = 無効、PIC のみ使用)", json_schema_extra=ui("1")
+    )
 
     @model_validator(mode="after")
     def _check_periodic_edge_count(self) -> "BoundaryCondition":
@@ -171,9 +195,9 @@ class BField(BaseModel):
     軸対称モード (rz / rz_x0) は未対応 (一様な径方向磁場は ∇·B=0 と矛盾するため)。
     """
 
-    bx: float = 0.0
-    by: float = 0.0
-    bz: float = 0.0
+    bx: float = Field(0.0, json_schema_extra=ui("T"))
+    by: float = Field(0.0, json_schema_extra=ui("T"))
+    bz: float = Field(0.0, json_schema_extra=ui("T"))
 
     def is_zero(self) -> bool:
         return self.bx == 0.0 and self.by == 0.0 and self.bz == 0.0
@@ -181,7 +205,7 @@ class BField(BaseModel):
 
 class LocalSize(BaseModel):
     region: str
-    size: float
+    size: float = Field(..., json_schema_extra=GEOM)
 
 
 class EdgeMeshSize(BaseModel):
@@ -192,19 +216,19 @@ class EdgeMeshSize(BaseModel):
     ドメイン辺の近傍だけシース解像などの目的で細かくしたい場合に使う。
     """
 
-    p1: Point
-    p2: Point
-    size: float = Field(..., gt=0)
+    p1: Point = Field(..., json_schema_extra=GEOM)
+    p2: Point = Field(..., json_schema_extra=GEOM)
+    size: float = Field(..., gt=0, json_schema_extra=GEOM)
     # 遷移距離 (None は自動: dist_in = 2·size、dist_out = 8·size。meshing.py 側で解決する)
-    dist_in: float | None = Field(None, gt=0)
-    dist_out: float | None = Field(None, gt=0)
+    dist_in: float | None = Field(None, gt=0, json_schema_extra=ui("m", geom=True, advanced=True))
+    dist_out: float | None = Field(None, gt=0, json_schema_extra=ui("m", geom=True, advanced=True))
 
 
 class AmrRegion(BaseModel):
     """ユーザー指定の細分化領域 (軸平行矩形、対角の 2 点)。level までの細分化を保証する。"""
 
-    p1: Point
-    p2: Point
+    p1: Point = Field(..., json_schema_extra=GEOM)
+    p2: Point = Field(..., json_schema_extra=GEOM)
     level: int = Field(1, ge=1, le=6)
 
 
@@ -220,27 +244,27 @@ class AmrSettings(BaseModel):
     # 導体・誘電体の境界から buffer_cells セル以内を max_level まで細分化する
     refine_boundaries: bool = True
     buffer_cells: int = Field(2, ge=0, le=16)
-    blocking_factor: int = Field(8, ge=1, le=64)
+    blocking_factor: int = Field(8, ge=1, le=64, json_schema_extra=ui(advanced=True))
     regions: list[AmrRegion] = []
     # 解に基づく適応細分化 (静電場のみ、prompts/122)。求解 → 誤差指標 (節点の二階差分 ≈ h²φ'') →
     # adapt_tol × (電位の範囲) を超える葉セルを 1 段細かく、を最大 adapt_iters 回 (max_level まで)
     adaptive: bool = False
-    adapt_tol: float = Field(1e-3, gt=0.0, le=0.5)
+    adapt_tol: float = Field(1e-3, gt=0.0, le=0.5, json_schema_extra=ui("1"))
     adapt_iters: int = Field(3, ge=1, le=8)
     # PIC の動的再格子化 (prompts/123)。pic_regrid_every ステップごとに、その区間で平均した
     # 電子密度・温度のデバイ長 λ_D に対し 格子幅/λ_D > pic_h_over_debye のセルを細かくする
     # (max_level まで。時間平均区間の前だけ。0 = 静的)
     pic_regrid_every: int = Field(0, ge=0)
-    pic_h_over_debye: float = Field(1.0, gt=0.0, le=100.0)
+    pic_h_over_debye: float = Field(1.0, gt=0.0, le=100.0, json_schema_extra=ui("1"))
     # DSMC の動的再格子化 (prompts/127)。dsmc_regrid_every ステップごとに、その区間で平均した密度・温度の
     # 平均自由行程 λ に対し 格子幅/λ > dsmc_h_over_mfp のセルを細かくする (max_level まで。時間平均区間の
     # 前だけ。0 = 静的)
     dsmc_regrid_every: int = Field(0, ge=0)
-    dsmc_h_over_mfp: float = Field(0.5, gt=0.0, le=100.0)
+    dsmc_h_over_mfp: float = Field(0.5, gt=0.0, le=100.0, json_schema_extra=ui("1"))
 
 
 class MeshSettings(BaseModel):
-    size: float = Field(..., gt=0, description="全体特性長 [m]")
+    size: float = Field(..., gt=0, description="全体特性長 [m]", json_schema_extra=GEOM)
     local_sizes: list[LocalSize] = []
     # 任意の線分近傍のローカルメッシュサイズ (prompts/90)。local_sizes (領域単位) と異なり
     # 幾何に依存しない任意の線分を指定できる。local_sizes と同じく structured では無視される
@@ -267,8 +291,8 @@ class Species(BaseModel):
     """粒子種。electron/proton プリセット、または custom で q・m を直接指定する。"""
 
     preset: Literal["electron", "proton", "custom"] = "electron"
-    q: float | None = None  # custom 時の電荷 [C]
-    m: float | None = None  # custom 時の質量 [kg]
+    q: float | None = Field(None, json_schema_extra=ui("C"))  # custom 時の電荷 [C]
+    m: float | None = Field(None, json_schema_extra=ui("kg"))  # custom 時の質量 [kg]
 
     @model_validator(mode="after")
     def _check_custom_qm(self) -> "Species":
@@ -286,15 +310,15 @@ class Emitter(BaseModel):
     """
 
     kind: Literal["line", "point"] = "line"
-    p1: Point
-    p2: Point | None = None
+    p1: Point = Field(..., json_schema_extra=GEOM)
+    p2: Point | None = Field(None, json_schema_extra=GEOM)
     n: int = Field(..., gt=0)
-    energy_ev: float = 0.0
-    direction_deg: float = 0.0
-    spread_deg: float = 0.0
+    energy_ev: float = Field(0.0, json_schema_extra=ui("eV"))
+    direction_deg: float = Field(0.0, json_schema_extra=ui("deg"))
+    spread_deg: float = Field(0.0, json_schema_extra=ui("deg"))
     energy_dist: Literal["mono", "maxwell"] = "mono"  # "mono": 従来動作 / "maxwell": 熱速度成分を付加
-    temperature_ev: float = Field(1.0, gt=0, description="maxwell 時の温度 kT [eV]")
-    seed: int = 0  # maxwell サンプリングの乱数シード (再現性確保)
+    temperature_ev: float = Field(1.0, gt=0, description="maxwell 時の温度 kT [eV]", json_schema_extra=ui("eV"))
+    seed: int = Field(0, json_schema_extra=ui(advanced=True))  # maxwell サンプリングの乱数シード (再現性確保)
 
     @model_validator(mode="after")
     def _check_line_needs_p2(self) -> "Emitter":
@@ -314,13 +338,13 @@ class FnEmission(BaseModel):
 
     edges: list[int] = []
     regions: list[str] = []
-    phi_ev: float = Field(4.5, gt=0, description="仕事関数 φ [eV]")
-    beta: float = Field(1.0, gt=0, description="電界増倍係数 β")
+    phi_ev: float = Field(4.5, gt=0, description="仕事関数 φ [eV]", json_schema_extra=ui("eV"))
+    beta: float = Field(1.0, gt=0, description="電界増倍係数 β", json_schema_extra=ui("1"))
     n: int = Field(200, gt=0, description="trace 時の放出マクロ粒子総数")
-    init_energy_ev: float = Field(0.1, ge=0, description="放出電子の初期エネルギー [eV]")
+    init_energy_ev: float = Field(0.1, ge=0, description="放出電子の初期エネルギー [eV]", json_schema_extra=ui("eV"))
     # PIC のみ: マクロ重み (実電子数/マクロ粒子)。None なら初期プラズマの重みを使う
-    macro_weight: float | None = Field(None, gt=0)
-    seed: int = 0  # PIC の放出位置サンプリング乱数シード
+    macro_weight: float | None = Field(None, gt=0, json_schema_extra=ui("1"))
+    seed: int = Field(0, json_schema_extra=ui(advanced=True))  # PIC の放出位置サンプリング乱数シード
 
     @model_validator(mode="after")
     def _check_sources(self) -> "FnEmission":
@@ -336,7 +360,7 @@ class ParticleSettings(BaseModel):
     # FN 電界放出源 (prompts/46)。指定時は emitter の代わりに電極表面から放出する。
     # 放出種は常に電子 (species は無視される)
     fn: FnEmission | None = None
-    dt: float | None = None  # 秒。None なら自動推定 (particles.py 参照)
+    dt: float | None = Field(None, json_schema_extra=ui("s"))  # 秒。None なら自動推定 (particles.py 参照)
     n_steps: int = Field(5000, gt=0)
     save_every: int = Field(10, gt=0)
 
@@ -353,12 +377,12 @@ class ParticleSettings(BaseModel):
 class InitialPlasma(BaseModel):
     """初期プラズマの一様装荷。null なら初期装荷なし。"""
 
-    density: float = Field(..., gt=0, description="数密度 [m^-3] (奥行き1m換算)")
-    te_ev: float = Field(2.0, ge=0, description="電子温度 kTe [eV]")
-    ti_ev: float = Field(0.03, ge=0, description="イオン温度 kTi [eV]")
-    ion_mass_amu: float = Field(40.0, gt=0, description="イオン質量 [amu] (Ar+ = 40)")
-    immobile_ions: bool = False  # true でイオン固定 (検証用)
-    seed: int = 0
+    density: float = Field(..., gt=0, description="数密度 [m^-3] (奥行き1m換算)", json_schema_extra=ui("m^-3"))
+    te_ev: float = Field(2.0, ge=0, description="電子温度 kTe [eV]", json_schema_extra=ui("eV"))
+    ti_ev: float = Field(0.03, ge=0, description="イオン温度 kTi [eV]", json_schema_extra=ui("eV"))
+    ion_mass_amu: float = Field(40.0, gt=0, description="イオン質量 [amu] (Ar+ = 40)", json_schema_extra=ui("amu"))
+    immobile_ions: bool = Field(False, json_schema_extra=ui(advanced=True))  # true でイオン固定 (検証用)
+    seed: int = Field(0, json_schema_extra=ui(advanced=True))
 
 
 class PicInjection(BaseModel):
@@ -370,7 +394,7 @@ class PicInjection(BaseModel):
 
     emitter: Emitter
     species: Literal["electron", "ion"] = "electron"
-    current_a_per_m: float = Field(..., gt=0)
+    current_a_per_m: float = Field(..., gt=0, json_schema_extra=ui("A/m"))
 
 
 # ---- MCC 衝突 (prompts/19、フロントと共通のスキーマ契約) ------------------------
@@ -381,10 +405,10 @@ class XsProcess(BaseModel):
 
     kind: Literal["elastic", "excitation", "ionization", "isotropic", "backscat"]
     label: str = ""                # PROCESS 行等から
-    threshold_ev: float = 0.0      # excitation/ionization のみ >0
-    mass_ratio: float = 0.0        # elastic のみ (m/M)。無ければ 0
-    energy_ev: list[float]         # 断面積テーブルのエネルギー [eV] (昇順)
-    sigma_m2: list[float]          # 断面積 [m^2] (energy_ev と同長)
+    threshold_ev: float = Field(0.0, json_schema_extra=ui("eV"))  # excitation/ionization のみ >0
+    mass_ratio: float = Field(0.0, json_schema_extra=ui("1"))     # elastic のみ (m/M)。無ければ 0
+    energy_ev: list[float] = Field(..., json_schema_extra=ui("eV"))   # 断面積テーブルのエネルギー [eV] (昇順)
+    sigma_m2: list[float] = Field(..., json_schema_extra=ui("m^2"))   # 断面積 [m^2] (energy_ev と同長)
 
     @model_validator(mode="after")
     def _check_table(self) -> "XsProcess":
@@ -399,8 +423,8 @@ class MccGas(BaseModel):
     """背景中性ガスの状態。数密度は n_g = p/(kB·T) で決まる。"""
 
     name: str = "Ar"
-    pressure_pa: float = Field(..., gt=0, description="ガス圧 [Pa]")
-    temperature_k: float = Field(300.0, gt=0, description="ガス温度 [K]")
+    pressure_pa: float = Field(..., gt=0, description="ガス圧 [Pa]", json_schema_extra=ui("Pa"))
+    temperature_k: float = Field(300.0, gt=0, description="ガス温度 [K]", json_schema_extra=ui("K"))
 
 
 class MccSettings(BaseModel):
@@ -409,7 +433,7 @@ class MccSettings(BaseModel):
     gas: MccGas
     electron_processes: list[XsProcess] = []  # elastic/excitation/ionization
     ion_processes: list[XsProcess] = []       # isotropic/backscat
-    seed: int = 0
+    seed: int = Field(0, json_schema_extra=ui(advanced=True))
     # 電離の余剰エネルギー分配: "half" = 散乱電子と生成電子で等分 (Turner ベンチマーク互換)、
     # "random" = 一様乱数比で分配 (従来動作)
     ionization_split: Literal["half", "random"] = "half"
@@ -428,9 +452,9 @@ class Collector(BaseModel):
     イオンのエネルギー・入射角・重みを記録する (ウエハ面の IEDF/IADF 取得用)。
     """
 
-    p1: Point
-    p2: Point
-    tol: float | None = Field(None, gt=0, description="判定距離 [m]。None なら mesh.size と同値")
+    p1: Point = Field(..., json_schema_extra=GEOM)
+    p2: Point = Field(..., json_schema_extra=GEOM)
+    tol: float | None = Field(None, gt=0, description="判定距離 [m]。None なら mesh.size と同値", json_schema_extra=GEOM)
     label: str = ""  # 表示用ラベル (空ならフロントが "C1" 等を振る、prompts/36)
 
 
@@ -442,8 +466,8 @@ class SheathLine(BaseModel):
     p1 = 電極側、p2 = バルク側 (Brinkmann 積分の参照点 x_b = p2 の位置)。
     """
 
-    p1: Point
-    p2: Point
+    p1: Point = Field(..., json_schema_extra=GEOM)
+    p2: Point = Field(..., json_schema_extra=GEOM)
     label: str = ""  # 空ならフロントが S1, S2... を振る
 
 
@@ -454,13 +478,13 @@ class EedfRegion(BaseModel):
     重み付きエネルギーヒストグラムへ加算し、EEDF (f(E)、∫f dE=1) を得る。
     """
 
-    p1: Point
-    p2: Point                      # 対角の2点 (順不同)
+    p1: Point = Field(..., json_schema_extra=GEOM)
+    p2: Point = Field(..., json_schema_extra=GEOM)  # 対角の2点 (順不同)
     label: str = ""
     bins: int = Field(100, ge=10, le=1000)
     # None = 平均区間の最初の集計ステップで「矩形内電子の最大エネルギー×1.2」に自動決定
     # (電子がいなければ 30 eV)。以後のステップはこの値で固定し、範囲外はオーバーフロー計数する
-    e_max_ev: float | None = None
+    e_max_ev: float | None = Field(None, json_schema_extra=ui("eV"))
 
 
 class PicMerge(BaseModel):
@@ -479,11 +503,11 @@ class PicSettings(BaseModel):
     initial_plasma: InitialPlasma | None = None
     injection: PicInjection | None = None
     n_macro: int = Field(20000, gt=0, description="種ごとの初期マクロ粒子数の目安")
-    dt: float | None = Field(None, description="秒。None なら 0.1/ωpe (初期密度から)")
+    dt: float | None = Field(None, description="秒。None なら 0.1/ωpe (初期密度から)", json_schema_extra=ui("s"))
     n_steps: int = Field(2000, gt=0)
     frame_every: int = Field(20, gt=0, description="フレーム送出間隔 (ステップ)")
     mcc: MccSettings | None = None  # null なら MCC 無効
-    see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]")
+    see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]", json_schema_extra=ui("eV"))
     # 完了時に返す時間平均フィールドの平均ステップ数 (最終 N ステップ、prompts/26)。
     # None なら全ステップの最後の 25% を平均する
     avg_steps: int | None = Field(None, gt=0)
@@ -523,11 +547,11 @@ class PicSettings(BaseModel):
     fn: FnEmission | None = None
     # イオンサブサイクリング (prompts/50): イオンを N ステップに1回、N·dt で押す。
     # 休止ステップ中はイオンの電荷堆積をキャッシュして再利用する。1 = 無効 (従来と完全一致)
-    ion_subcycle: int = Field(1, ge=1)
+    ion_subcycle: int = Field(1, ge=1, json_schema_extra=ui(advanced=True))
     # 粒子処理 (walk 探索) のワーカースレッド数 (prompts/50)。粒子ごとの walk は独立な
     # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。
     # 0 = 粒子数・CPU数から自動選択、1 = 逐次、2以上 = 明示並列
-    threads: int = Field(0, ge=0, le=128)
+    threads: int = Field(0, ge=0, le=128, json_schema_extra=ui(advanced=True))
     # 粒子マージ (高速化③、prompts/77)。null = 無効 (既定。マージ関連の処理・乱数消費が
     # 一切発生せず、従来経路と完全一致する)
     merge: PicMerge | None = None
@@ -559,12 +583,12 @@ class Fn1dEmission(BaseModel):
     毎ステップの放出数は決定論的な端数キャリーのみで決まる (乱数不使用)。
     """
 
-    phi_ev: float = Field(4.5, gt=0, description="仕事関数 φ [eV]")
-    beta: float = Field(1.0, gt=0, description="電界増倍係数 β")
-    init_energy_ev: float = Field(0.1, ge=0, description="放出電子の初期エネルギー [eV]")
+    phi_ev: float = Field(4.5, gt=0, description="仕事関数 φ [eV]", json_schema_extra=ui("eV"))
+    beta: float = Field(1.0, gt=0, description="電界増倍係数 β", json_schema_extra=ui("1"))
+    init_energy_ev: float = Field(0.1, ge=0, description="放出電子の初期エネルギー [eV]", json_schema_extra=ui("eV"))
     # マクロ重み [m^-2] (= 実電子数/マクロ粒子。1D のマクロ重みの単位そのものなので
     # 2D のような面積換算は不要)。None なら初期プラズマの w0 を使う
-    macro_weight: float | None = Field(None, gt=0)
+    macro_weight: float | None = Field(None, gt=0, json_schema_extra=ui("m^-2"))
 
 
 class Pic1dElectrode(BaseModel):
@@ -575,13 +599,13 @@ class Pic1dElectrode(BaseModel):
     pic1d.py の _electrode_voltage / pic.py の _eval_waveform 参照)。
     """
 
-    v_dc: float = 0.0
+    v_dc: float = Field(0.0, json_schema_extra=ui("V"))
     # RF 重畳 (prompts/93)。2D の BoundaryCondition.voltage_rf と同じ規約:
     # 単一 VoltageRF / リスト (デュアル周波数など) / None。
     # V_rf(t) = Σ amplitude·sin(2π·freq_hz·t + phase_deg·π/180)
     voltage_rf: VoltageRF | list[VoltageRF] | None = None
     waveforms: list[VoltageWaveform] = []
-    see_gamma: float = Field(0.0, ge=0.0, le=1.0, description="イオン入射あたりのSEE収率 γ")
+    see_gamma: float = Field(0.0, ge=0.0, le=1.0, description="イオン入射あたりのSEE収率 γ", json_schema_extra=ui("1"))
     # FN 電界放出 (prompts/95)。None なら放出なし (従来動作と完全ビット不変)
     fn: Fn1dEmission | None = None
 
@@ -589,12 +613,12 @@ class Pic1dElectrode(BaseModel):
 class Eedf1dRegion(BaseModel):
     """1D の EEDF/EEPF 集計区間 [x1, x2] (2D の EedfRegion の 1D 版、prompts/85 と同じ規約)。"""
 
-    x1: float
-    x2: float
+    x1: float = Field(..., json_schema_extra=GEOM)
+    x2: float = Field(..., json_schema_extra=GEOM)
     label: str = ""
     bins: int = Field(100, ge=10, le=1000)
     # None = 平均区間の最初の集計ステップで自動決定 (2D の EedfRegion.e_max_ev と同じ規約)
-    e_max_ev: float | None = Field(None, gt=0)
+    e_max_ev: float | None = Field(None, gt=0, json_schema_extra=ui("eV"))
 
 
 class Pic1dSettings(BaseModel):
@@ -604,16 +628,18 @@ class Pic1dSettings(BaseModel):
     メッシュ生成が無いため geometry/mesh の設定とは無関係に動作する。
     """
 
-    gap_m: float = Field(..., gt=0, description="電極間ギャップ [m]")
+    gap_m: float = Field(..., gt=0, description="電極間ギャップ [m]", json_schema_extra=GEOM)
     n_cells: int = Field(128, ge=8, le=100000)
     left: Pic1dElectrode = Pic1dElectrode()
     right: Pic1dElectrode = Pic1dElectrode()
-    init_density_m3: float = Field(..., gt=0, description="初期プラズマ密度 (一様、準中性) [m^-3]")
-    init_te_ev: float = Field(2.0, gt=0)
-    init_ti_ev: float = Field(0.03, gt=0)
-    ion_mass_amu: float = Field(39.948, gt=0, description="イオン質量 [amu] (He: 4.0026)")
+    init_density_m3: float = Field(
+        ..., gt=0, description="初期プラズマ密度 (一様、準中性) [m^-3]", json_schema_extra=ui("m^-3")
+    )
+    init_te_ev: float = Field(2.0, gt=0, json_schema_extra=ui("eV"))
+    init_ti_ev: float = Field(0.03, gt=0, json_schema_extra=ui("eV"))
+    ion_mass_amu: float = Field(39.948, gt=0, description="イオン質量 [amu] (He: 4.0026)", json_schema_extra=ui("amu"))
     n_macro: int = Field(20000, gt=0, description="種ごとの初期マクロ粒子数")
-    dt: float | None = Field(None, gt=0, description="秒。None なら 0.1/ωpe (初期密度から)")
+    dt: float | None = Field(None, gt=0, description="秒。None なら 0.1/ωpe (初期密度から)", json_schema_extra=ui("s"))
     n_steps: int = Field(2000, gt=0)
     frame_every: int = Field(20, gt=0)
     # 完了時に返す時間平均プロファイルの平均ステップ数。None なら最後の25% (2D と同じ規約)
@@ -622,13 +648,13 @@ class Pic1dSettings(BaseModel):
     # (基本周波数の決定優先順位は pic1d.py の Pic1dSimulation._cycle_freq 算出コメント参照)
     phase_bins: int = Field(40, ge=0)
     mcc: MccSettings | None = None  # 既存 MccSettings をそのまま流用 (null なら MCC 無効)
-    see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]")
+    see_energy_ev: float = Field(2.0, ge=0, description="SEE 電子の初期エネルギー [eV]", json_schema_extra=ui("eV"))
     eedf_regions: list[Eedf1dRegion] = []  # 最大4個 (validator)
     # 壁 IEDF (入射イオンエネルギー分布、prompts/116) のビン数。0=無効。平均区間中に
     # 壁 (左右) で吸収されたイオンの全運動エネルギーを重み付きヒストグラム化する
     # (粒子ベースの厳密な値。e_max は EEDF (eedf_regions) と同じ流儀で自動決定する)
     wall_iedf_bins: int = Field(100, ge=0, le=1000)
-    seed: int = 0  # 初期装荷の乱数種 (MCC は mcc.seed を使う)
+    seed: int = Field(0, json_schema_extra=ui(advanced=True))  # 初期装荷の乱数種 (MCC は mcc.seed を使う)
 
     @model_validator(mode="after")
     def _check_no_dsmc(self) -> "Pic1dSettings":
@@ -690,21 +716,25 @@ class Fluid1dSettings(BaseModel):
     ソルバー。
     """
 
-    gap_m: float = Field(..., gt=0, description="電極間ギャップ [m]")
+    gap_m: float = Field(..., gt=0, description="電極間ギャップ [m]", json_schema_extra=GEOM)
     n_cells: int = Field(200, ge=16, le=100000)
     left: Pic1dElectrode = Pic1dElectrode()   # 電圧合成・SEE γ を共用 (fn は未対応)
     right: Pic1dElectrode = Pic1dElectrode()
-    init_density_m3: float = Field(..., gt=0, description="初期プラズマ密度 (一様、準中性) [m^-3]")
-    init_te_ev: float = Field(2.0, gt=0)
-    gas_pressure_pa: float = Field(..., gt=0, description="一様背景ガス圧 [Pa]")
-    gas_temperature_k: float = Field(300.0, gt=0)
-    ion_mass_amu: float = Field(39.948, gt=0, description="イオン質量 [amu]")
+    init_density_m3: float = Field(
+        ..., gt=0, description="初期プラズマ密度 (一様、準中性) [m^-3]", json_schema_extra=ui("m^-3")
+    )
+    init_te_ev: float = Field(2.0, gt=0, json_schema_extra=ui("eV"))
+    gas_pressure_pa: float = Field(..., gt=0, description="一様背景ガス圧 [Pa]", json_schema_extra=ui("Pa"))
+    gas_temperature_k: float = Field(300.0, gt=0, json_schema_extra=ui("K"))
+    ion_mass_amu: float = Field(39.948, gt=0, description="イオン質量 [amu]", json_schema_extra=ui("amu"))
     # イオン低電界移動度 μ_i の基準値・基準ガス密度 (任意のガス密度へは
     # μ_i = mu_i_ref・(n_ref_m3/n_g) でスケールする、fluid1d.py 参照)。既定は
     # Ar+ in Ar の 1 Torr (133.3 Pa, 300K) 換算実測値
-    mu_i_ref: float = Field(1.45e-1, gt=0, description="μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)")
-    n_ref_m3: float = Field(3.22e22, gt=0, description="mu_i_ref の基準ガス密度 [m^-3]")
-    t_i_ev: float = Field(0.026, gt=0, description="イオン温度 (D_i = μ_i・T_i)")
+    mu_i_ref: float = Field(
+        1.45e-1, gt=0, description="μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)", json_schema_extra=ui("m^2/(V*s)")
+    )
+    n_ref_m3: float = Field(3.22e22, gt=0, description="mu_i_ref の基準ガス密度 [m^-3]", json_schema_extra=ui("m^-3"))
+    t_i_ev: float = Field(0.026, gt=0, description="イオン温度 (D_i = μ_i・T_i)", json_schema_extra=ui("eV"))
     # 修正 Frost イオン移動度 (prompts/116): μ_i(E/N) = μ_L/√(1+(E/N)/C) で
     # シース強電界での移動度低下を表現する。μ_L は上の mu_i_ref/n_ref_m3 から決まる
     # 低電界値、E/N [Td] = |E|/n_g/1e-21。C=frost_c_td は μ_L/√2 に落ちる E/N。
@@ -714,9 +744,11 @@ class Fluid1dSettings(BaseModel):
     # "const" は従来 (低電界一定値) の経路で、既存プロジェクト/テストとのビット
     # 不変を保つために残す (新規機能のため既定は "frost")
     ion_mobility_model: Literal["frost", "const"] = "frost"
-    frost_c_td: float = Field(150.0, gt=0, description="修正 Frost 式の C [Td] (const では無視)")
+    frost_c_td: float = Field(150.0, gt=0, description="修正 Frost 式の C [Td] (const では無視)", json_schema_extra=ui("Td"))
     electron_processes: list[XsProcess] = []  # 空なら eduPIC Ar 解析式を既定使用
-    dt: float | None = Field(None, gt=0, description="秒。None なら RF周期/2000 と 1e-10 の小さい方")
+    dt: float | None = Field(
+        None, gt=0, description="秒。None なら RF周期/2000 と 1e-10 の小さい方", json_schema_extra=ui("s")
+    )
     n_steps: int = Field(20000, gt=0)
     frame_every: int = Field(200, gt=0)
     avg_steps: int | None = Field(None, gt=0)
@@ -770,20 +802,26 @@ class Fluid2dSettings(BaseModel):
     periodic 境界は未対応 (fluid2d.py の Fluid2dSimulation.__init__ で ValueError)。
     """
 
-    init_density_m3: float = Field(..., gt=0, description="初期プラズマ密度 (一様、準中性) [m^-3]")
-    init_te_ev: float = Field(2.0, gt=0)
-    gas_pressure_pa: float = Field(..., gt=0, description="一様背景ガス圧 [Pa]")
-    gas_temperature_k: float = Field(300.0, gt=0)
-    ion_mass_amu: float = Field(39.948, gt=0, description="イオン質量 [amu]")
+    init_density_m3: float = Field(
+        ..., gt=0, description="初期プラズマ密度 (一様、準中性) [m^-3]", json_schema_extra=ui("m^-3")
+    )
+    init_te_ev: float = Field(2.0, gt=0, json_schema_extra=ui("eV"))
+    gas_pressure_pa: float = Field(..., gt=0, description="一様背景ガス圧 [Pa]", json_schema_extra=ui("Pa"))
+    gas_temperature_k: float = Field(300.0, gt=0, json_schema_extra=ui("K"))
+    ion_mass_amu: float = Field(39.948, gt=0, description="イオン質量 [amu]", json_schema_extra=ui("amu"))
     # イオン低電界移動度 (fluid1d.py と同じ規約: μ_i = mu_i_ref・(n_ref_m3/n_g))
-    mu_i_ref: float = Field(1.45e-1, gt=0, description="μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)")
-    n_ref_m3: float = Field(3.22e22, gt=0, description="mu_i_ref の基準ガス密度 [m^-3]")
-    t_i_ev: float = Field(0.026, gt=0, description="イオン温度 (D_i = μ_i・T_i)")
+    mu_i_ref: float = Field(
+        1.45e-1, gt=0, description="μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)", json_schema_extra=ui("m^2/(V*s)")
+    )
+    n_ref_m3: float = Field(3.22e22, gt=0, description="mu_i_ref の基準ガス密度 [m^-3]", json_schema_extra=ui("m^-3"))
+    t_i_ev: float = Field(0.026, gt=0, description="イオン温度 (D_i = μ_i・T_i)", json_schema_extra=ui("eV"))
     # 修正 Frost イオン移動度 (fluid1d.py と全く同じ規約・既定値・出典。prompts/116)
     ion_mobility_model: Literal["frost", "const"] = "frost"
-    frost_c_td: float = Field(150.0, gt=0, description="修正 Frost 式の C [Td] (const では無視)")
+    frost_c_td: float = Field(150.0, gt=0, description="修正 Frost 式の C [Td] (const では無視)", json_schema_extra=ui("Td"))
     electron_processes: list[XsProcess] = []  # 空なら eduPIC Ar 解析式を既定使用
-    dt: float | None = Field(None, gt=0, description="秒。None なら RF周期/2000 と 1e-10 の小さい方")
+    dt: float | None = Field(
+        None, gt=0, description="秒。None なら RF周期/2000 と 1e-10 の小さい方", json_schema_extra=ui("s")
+    )
     n_steps: int = Field(20000, gt=0)
     frame_every: int = Field(200, gt=0)
     avg_steps: int | None = Field(None, gt=0)
@@ -812,7 +850,7 @@ class Fluid2dSettings(BaseModel):
     # 陰的反復ソルバーの並列スレッド数 (numba の matvec に使う)。0=自動選択
     # (pic.py の _auto_thread_cap と同じ式: max(2, min(16, 論理コア数//2))。
     # linear_solver="direct" のときは無効 (spsolve は並列化しない、docstring 参照)
-    threads: int = Field(0, ge=0, le=128)
+    threads: int = Field(0, ge=0, le=128, json_schema_extra=ui(advanced=True))
 
 
 # ---- VHF 定在波 (非線形径方向伝送線路モデル、prompts/101) -----------------------------
@@ -825,19 +863,19 @@ class TlSettings(BaseModel):
     (tl.py 参照)。geometry/mesh とは無関係な専用の一様格子ソルバー (pic1d と同じ位置づけ)。
     """
 
-    radius_m: float = Field(0.15, gt=0)        # 電極半径 R
-    gap_m: float = Field(0.04, gt=0)           # ギャップ l
-    sheath_m: float = Field(5e-4, gt=0)        # 平衡シース厚 s0 (片側、上下対称)
-    n_e_m3: float = Field(1e16, gt=0)          # バルク電子密度
-    n_s_ratio: float = Field(0.4, gt=0, le=1)  # シース端イオン密度比 n_s/n_e (h係数)
-    nu_m_hz: float = Field(1e8, ge=0)          # 電子運動量衝突周波数 ν_m
-    freq_hz: float = Field(100e6, gt=0)        # 駆動周波数 f0
-    v0: float = Field(100.0, gt=0)             # 駆動振幅 [V]
+    radius_m: float = Field(0.15, gt=0, json_schema_extra=GEOM)        # 電極半径 R
+    gap_m: float = Field(0.04, gt=0, json_schema_extra=GEOM)           # ギャップ l
+    sheath_m: float = Field(5e-4, gt=0, json_schema_extra=GEOM)        # 平衡シース厚 s0 (片側、上下対称)
+    n_e_m3: float = Field(1e16, gt=0, json_schema_extra=ui("m^-3"))    # バルク電子密度
+    n_s_ratio: float = Field(0.4, gt=0, le=1, json_schema_extra=ui("1"))  # シース端イオン密度比 n_s/n_e (h係数)
+    nu_m_hz: float = Field(1e8, ge=0, json_schema_extra=ui("Hz"))      # 電子運動量衝突周波数 ν_m
+    freq_hz: float = Field(100e6, gt=0, json_schema_extra=ui("Hz"))    # 駆動周波数 f0
+    v0: float = Field(100.0, gt=0, json_schema_extra=ui("V"))          # 駆動振幅 [V]
     n_r: int = Field(400, ge=32, le=20000)     # 半径方向節点数
     n_periods: int = Field(200, ge=8)          # 総周期数
     n_fft_periods: int = Field(32, ge=4)       # FFT 窓の周期数 (n_periods より小)
     n_harm: int = Field(10, ge=1, le=40)       # 返す高調波次数
-    dt: float | None = Field(None, gt=0)       # 秒。None なら CFL から自動
+    dt: float | None = Field(None, gt=0, json_schema_extra=ui("s"))  # 秒。None なら CFL から自動
     # シースの電荷-電圧関係 (prompts/102)。"child": Child-Langmuir 型 (V_s∝q^{4/3})、
     # 既定。対称放電でも上下差し引きで奇数次高調波が定常生成される (tl.py 参照)。
     # "matrix": 行列シース (V_s∝q^2、従来モデル)。対称放電では厳密に線形化し
@@ -860,10 +898,10 @@ class DsmcGas(BaseModel):
     """DSMC のガス分子モデル (VHS: Variable Hard Sphere)。既定は Ar。"""
 
     name: str = "Ar"
-    mass_amu: float = Field(39.948, gt=0, description="分子質量 [amu]")
-    d_ref_m: float = Field(4.17e-10, gt=0, description="VHS 基準直径 [m] (T_ref にて)")
-    omega: float = Field(0.81, ge=0.5, le=1.0, description="粘性の温度指数 ω (HS=0.5)")
-    t_ref_k: float = Field(273.0, gt=0, description="基準温度 [K]")
+    mass_amu: float = Field(39.948, gt=0, description="分子質量 [amu]", json_schema_extra=ui("amu"))
+    d_ref_m: float = Field(4.17e-10, gt=0, description="VHS 基準直径 [m] (T_ref にて)", json_schema_extra=ui("m"))
+    omega: float = Field(0.81, ge=0.5, le=1.0, description="粘性の温度指数 ω (HS=0.5)", json_schema_extra=ui("1"))
+    t_ref_k: float = Field(273.0, gt=0, description="基準温度 [K]", json_schema_extra=ui("K"))
 
 
 class DsmcBoundary(BaseModel):
@@ -882,14 +920,14 @@ class DsmcBoundary(BaseModel):
     """
 
     edges: list[int] = []
-    p1: Point | None = None
-    p2: Point | None = None
+    p1: Point | None = Field(None, json_schema_extra=GEOM)
+    p2: Point | None = Field(None, json_schema_extra=GEOM)
     type: Literal["wall", "symmetry", "inlet", "outlet"] = "wall"
-    temperature_k: float = Field(300.0, gt=0)
-    pressure_pa: float | None = Field(None, ge=0)
+    temperature_k: float = Field(300.0, gt=0, json_schema_extra=ui("K"))
+    pressure_pa: float | None = Field(None, ge=0, json_schema_extra=ui("Pa"))
     # inlet の流量指定 [sccm] (標準状態 273.15 K・101325 Pa の cm^3/min)。
     # pressure_pa と排他。1 sccm = 4.478e17 分子/s
-    flow_sccm: float | None = Field(None, gt=0)
+    flow_sccm: float | None = Field(None, gt=0, json_schema_extra=ui("sccm"))
 
     @model_validator(mode="after")
     def _check(self) -> "DsmcBoundary":
@@ -923,22 +961,24 @@ class DsmcSettings(BaseModel):
     # 1.0 = 従来どおり FEM と同一メッシュ (このとき経路も従来と完全一致し、結果はビット不変)。
     # use_dsmc_gas (PIC 連成) では、mesh_scale>1 で DSMC メッシュ ≠ PIC メッシュになるため、
     # PIC 開始時に要素重心の点位置特定でガス場を PIC メッシュへ引き写す (dsmc.py 側で解決)
-    mesh_scale: float = Field(1.0, ge=1.0, le=20.0)
-    wall_temperature_k: float = Field(300.0, gt=0, description="未指定エッジ・領域輪郭の壁温 [K]")
-    init_pressure_pa: float = Field(..., gt=0, description="初期充填圧 [Pa]")
-    init_temperature_k: float = Field(300.0, gt=0)
+    mesh_scale: float = Field(1.0, ge=1.0, le=20.0, json_schema_extra=ui("1", advanced=True))
+    wall_temperature_k: float = Field(
+        300.0, gt=0, description="未指定エッジ・領域輪郭の壁温 [K]", json_schema_extra=ui("K")
+    )
+    init_pressure_pa: float = Field(..., gt=0, description="初期充填圧 [Pa]", json_schema_extra=ui("Pa"))
+    init_temperature_k: float = Field(300.0, gt=0, json_schema_extra=ui("K"))
     n_particles: int = Field(50000, gt=0, description="目標シミュレーション粒子数")
-    dt: float | None = Field(None, description="秒。None なら 0.25·h_min/v_mp から自動")
+    dt: float | None = Field(None, description="秒。None なら 0.25·h_min/v_mp から自動", json_schema_extra=ui("s"))
     n_steps: int = Field(2000, gt=0)
     avg_steps: int = Field(500, gt=0, description="最終 N ステップで時間平均")
-    seed: int = 0
+    seed: int = Field(0, json_schema_extra=ui(advanced=True))
     # 粒子処理 (walk 探索) のワーカースレッド数 (prompts/65)。粒子ごとの walk は独立な
     # ため、チャンク並列化しても結果は逐次実行とビット単位で一致する。1 = 従来経路
-    threads: int = Field(1, ge=1, le=128)
+    threads: int = Field(1, ge=1, le=128, json_schema_extra=ui(advanced=True))
     # 隣接セル拡散による統計ノイズ平滑化の回数 (0=無効、prompts/67)。導出前の生モーメント
     # (Σ個数・Σv・Σv²) に体積重み対称拡散を適用してから n/T/u/p を導出するため、
     # p = n kB T の整合を保ったまま総量 (質量・運動量・エネルギー) を厳密に保存する
-    smoothing_passes: int = Field(0, ge=0, le=20)
+    smoothing_passes: int = Field(0, ge=0, le=20, json_schema_extra=ui(advanced=True))
 
 
 class Project(BaseModel):

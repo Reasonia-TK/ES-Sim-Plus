@@ -1,0 +1,2911 @@
+{
+ "$defs": {
+  "AmrRegion": {
+   "description": "ユーザー指定の細分化領域 (軸平行矩形、対角の 2 点)。level までの細分化を保証する。",
+   "properties": {
+    "p1": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P1",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "p2": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P2",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "level": {
+     "default": 1,
+     "maximum": 6,
+     "minimum": 1,
+     "title": "Level",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "p1",
+    "p2"
+   ],
+   "title": "AmrRegion",
+   "type": "object"
+  },
+  "AmrSettings": {
+   "description": "v2 直交格子エンジン (mesh.mode=\"cartesian\") の局所細分化 (prompts/121)。\n\nレベル l の格子幅は size/2^l。細分化の単位は blocking_factor × blocking_factor セルの\nブロックで、細かいレベルは粗いレベルの内側に 1 ブロックの緩衝帯を持って入る (proper\nnesting、隣接する葉セルのレベル差は高々 1)。max_level=0 は細分化なし。",
+   "properties": {
+    "max_level": {
+     "default": 0,
+     "maximum": 6,
+     "minimum": 0,
+     "title": "Max Level",
+     "type": "integer"
+    },
+    "refine_boundaries": {
+     "default": true,
+     "title": "Refine Boundaries",
+     "type": "boolean"
+    },
+    "buffer_cells": {
+     "default": 2,
+     "maximum": 16,
+     "minimum": 0,
+     "title": "Buffer Cells",
+     "type": "integer"
+    },
+    "blocking_factor": {
+     "default": 8,
+     "maximum": 64,
+     "minimum": 1,
+     "title": "Blocking Factor",
+     "type": "integer",
+     "x-advanced": true
+    },
+    "regions": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/AmrRegion"
+     },
+     "title": "Regions",
+     "type": "array"
+    },
+    "adaptive": {
+     "default": false,
+     "title": "Adaptive",
+     "type": "boolean"
+    },
+    "adapt_tol": {
+     "default": 0.001,
+     "exclusiveMinimum": 0.0,
+     "maximum": 0.5,
+     "title": "Adapt Tol",
+     "type": "number",
+     "x-unit": "1"
+    },
+    "adapt_iters": {
+     "default": 3,
+     "maximum": 8,
+     "minimum": 1,
+     "title": "Adapt Iters",
+     "type": "integer"
+    },
+    "pic_regrid_every": {
+     "default": 0,
+     "minimum": 0,
+     "title": "Pic Regrid Every",
+     "type": "integer"
+    },
+    "pic_h_over_debye": {
+     "default": 1.0,
+     "exclusiveMinimum": 0.0,
+     "maximum": 100.0,
+     "title": "Pic H Over Debye",
+     "type": "number",
+     "x-unit": "1"
+    },
+    "dsmc_regrid_every": {
+     "default": 0,
+     "minimum": 0,
+     "title": "Dsmc Regrid Every",
+     "type": "integer"
+    },
+    "dsmc_h_over_mfp": {
+     "default": 0.5,
+     "exclusiveMinimum": 0.0,
+     "maximum": 100.0,
+     "title": "Dsmc H Over Mfp",
+     "type": "number",
+     "x-unit": "1"
+    }
+   },
+   "title": "AmrSettings",
+   "type": "object"
+  },
+  "BField": {
+   "description": "一様磁場 [T] (prompts/51)。\n\n粒子軌道追跡・PIC のローレンツ力 (Boris 回転) に適用する。静電場ソルブには\n影響しない。全成分 0 は未指定 (磁場なし) と等価。面内成分 (bx, by) は\n面外速度 vz と結合し、bz は面内のジャイロ運動・E×B ドリフトを生む。\n軸対称モード (rz / rz_x0) は未対応 (一様な径方向磁場は ∇·B=0 と矛盾するため)。",
+   "properties": {
+    "bx": {
+     "default": 0.0,
+     "title": "Bx",
+     "type": "number",
+     "x-unit": "T"
+    },
+    "by": {
+     "default": 0.0,
+     "title": "By",
+     "type": "number",
+     "x-unit": "T"
+    },
+    "bz": {
+     "default": 0.0,
+     "title": "Bz",
+     "type": "number",
+     "x-unit": "T"
+    }
+   },
+   "title": "BField",
+   "type": "object"
+  },
+  "BoltzTable": {
+   "description": "boltzpm による LMEA 係数テーブル (prompts/117)。ε̄=(3/2)Te をキーに参照する。\n\n各リストは ε̄ (mean_energy_ev) 昇順に整列済み (boltz.run_boltz_sweep が保証する)。\needf は表示用に全点分を保存する (eedf[i] が eedf_eps_ev グリッド上の EEDF、\n∫eedf[i] dε ≈ 1 — boltzpm の規格化そのまま、boltz.py モジュール docstring 参照)。",
+   "properties": {
+    "en_td": {
+     "items": {
+      "type": "number"
+     },
+     "title": "En Td",
+     "type": "array"
+    },
+    "mean_energy_ev": {
+     "items": {
+      "type": "number"
+     },
+     "title": "Mean Energy Ev",
+     "type": "array"
+    },
+    "mobility_n": {
+     "items": {
+      "type": "number"
+     },
+     "title": "Mobility N",
+     "type": "array"
+    },
+    "k_ion": {
+     "items": {
+      "type": "number"
+     },
+     "title": "K Ion",
+     "type": "array"
+    },
+    "k_exc": {
+     "items": {
+      "type": "number"
+     },
+     "title": "K Exc",
+     "type": "array"
+    },
+    "e_ion_ev": {
+     "items": {
+      "type": "number"
+     },
+     "title": "E Ion Ev",
+     "type": "array"
+    },
+    "e_exc_ev": {
+     "items": {
+      "type": "number"
+     },
+     "title": "E Exc Ev",
+     "type": "array"
+    },
+    "eedf_eps_ev": {
+     "items": {
+      "type": "number"
+     },
+     "title": "Eedf Eps Ev",
+     "type": "array"
+    },
+    "eedf": {
+     "items": {
+      "items": {
+       "type": "number"
+      },
+      "type": "array"
+     },
+     "title": "Eedf",
+     "type": "array"
+    },
+    "source_hash": {
+     "title": "Source Hash",
+     "type": "string"
+    },
+    "opts": {
+     "additionalProperties": true,
+     "default": {},
+     "title": "Opts",
+     "type": "object"
+    },
+    "warnings": {
+     "default": [],
+     "items": {
+      "type": "string"
+     },
+     "title": "Warnings",
+     "type": "array"
+    }
+   },
+   "required": [
+    "en_td",
+    "mean_energy_ev",
+    "mobility_n",
+    "k_ion",
+    "k_exc",
+    "e_ion_ev",
+    "e_exc_ev",
+    "eedf_eps_ev",
+    "eedf",
+    "source_hash"
+   ],
+   "title": "BoltzTable",
+   "type": "object"
+  },
+  "BoundaryCondition": {
+   "description": "domain 外周のエッジ単位の境界条件。\n\nedges: 外周ポリゴンのエッジ番号 (i 番目のエッジは頂点 i → i+1)。\n未指定のエッジは自然境界 (Neumann, dV/dn = 0)。\n\ntype (prompts/22、フロントと共通のスキーマ契約):\n  - \"dirichlet\": 固定電位。voltage / voltage_rf / see_gamma は dirichlet のみ有効\n  - \"symmetry\":  対称境界。場は自然境界 (Neumann)、粒子 (trace / PIC) は鏡面反射\n  - \"periodic\":  周期境界。edges にちょうど2本の対辺 (平行・同長) を指定する。\n                 場は対辺の節点 DOF を同一視して解き、粒子は反対側へラップする",
+   "properties": {
+    "edges": {
+     "items": {
+      "type": "integer"
+     },
+     "title": "Edges",
+     "type": "array"
+    },
+    "type": {
+     "default": "dirichlet",
+     "enum": [
+      "dirichlet",
+      "symmetry",
+      "periodic"
+     ],
+     "title": "Type",
+     "type": "string"
+    },
+    "voltage": {
+     "default": 0.0,
+     "title": "Voltage",
+     "type": "number",
+     "x-unit": "V"
+    },
+    "voltage_rf": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/VoltageRF"
+      },
+      {
+       "items": {
+        "$ref": "#/$defs/VoltageRF"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Voltage Rf"
+    },
+    "voltage_waveform": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/VoltageWaveform"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "see_gamma": {
+     "default": 0.0,
+     "description": "二次電子放出係数 γ (0 = 無効、PIC のみ使用)",
+     "minimum": 0,
+     "title": "See Gamma",
+     "type": "number",
+     "x-unit": "1"
+    }
+   },
+   "required": [
+    "edges"
+   ],
+   "title": "BoundaryCondition",
+   "type": "object"
+  },
+  "CircleShape": {
+   "description": "円領域のパラメトリック形状。メッシュ生成時に多角形化する (meshing._region_polygon 参照)。",
+   "properties": {
+    "kind": {
+     "const": "circle",
+     "default": "circle",
+     "title": "Kind",
+     "type": "string"
+    },
+    "center": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "Center",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "radius": {
+     "exclusiveMinimum": 0,
+     "title": "Radius",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    }
+   },
+   "required": [
+    "center",
+    "radius"
+   ],
+   "title": "CircleShape",
+   "type": "object"
+  },
+  "Collector": {
+   "description": "IEDF/IADF コレクタ線分 (prompts/30)。null なら無効。\n\n平均区間中にコレクタ線分の近傍 (距離 tol 以内・線分区間内) で吸収された\nイオンのエネルギー・入射角・重みを記録する (ウエハ面の IEDF/IADF 取得用)。",
+   "properties": {
+    "p1": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P1",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "p2": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P2",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "tol": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "判定距離 [m]。None なら mesh.size と同値",
+     "title": "Tol",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "label": {
+     "default": "",
+     "title": "Label",
+     "type": "string"
+    }
+   },
+   "required": [
+    "p1",
+    "p2"
+   ],
+   "title": "Collector",
+   "type": "object"
+  },
+  "Domain": {
+   "properties": {
+    "polygon": {
+     "description": "解析領域の外周 (閉ポリゴン、反時計回り)",
+     "items": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "number"
+       }
+      ],
+      "type": "array"
+     },
+     "minItems": 3,
+     "title": "Polygon",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    }
+   },
+   "required": [
+    "polygon"
+   ],
+   "title": "Domain",
+   "type": "object"
+  },
+  "DsmcBoundary": {
+   "description": "DSMC 境界条件。未指定の境界は拡散反射壁になる。\n\n適用範囲は edges (domain 外周のエッジ番号) と p1-p2 (外周上の線分、部分区間\n指定。prompts/55) のどちらでも指定できる (両方指定は和集合)。電極と外枠の\n隙間などエッジの一部だけを流入口にしたい場合は線分指定を使う。\n\n- \"wall\":     拡散反射 (完全適応、temperature_k で再放出)\n- \"symmetry\": 鏡面反射\n- \"inlet\":    圧力リザーバ (pressure_pa: 平衡流入 + 流出吸収) または\n              流量指定 (flow_sccm: 指定流量を注入し、入射粒子は拡散反射壁。\n              正味流量が指定値に厳密一致する。2D なので奥行き 1 m 換算)\n- \"outlet\":   圧力リザーバまたは真空 (pressure_pa 省略/0 = 真空排気)",
+   "properties": {
+    "edges": {
+     "default": [],
+     "items": {
+      "type": "integer"
+     },
+     "title": "Edges",
+     "type": "array"
+    },
+    "p1": {
+     "anyOf": [
+      {
+       "maxItems": 2,
+       "minItems": 2,
+       "prefixItems": [
+        {
+         "type": "number"
+        },
+        {
+         "type": "number"
+        }
+       ],
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "P1",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "p2": {
+     "anyOf": [
+      {
+       "maxItems": 2,
+       "minItems": 2,
+       "prefixItems": [
+        {
+         "type": "number"
+        },
+        {
+         "type": "number"
+        }
+       ],
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "P2",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "type": {
+     "default": "wall",
+     "enum": [
+      "wall",
+      "symmetry",
+      "inlet",
+      "outlet"
+     ],
+     "title": "Type",
+     "type": "string"
+    },
+    "temperature_k": {
+     "default": 300.0,
+     "exclusiveMinimum": 0,
+     "title": "Temperature K",
+     "type": "number",
+     "x-unit": "K"
+    },
+    "pressure_pa": {
+     "anyOf": [
+      {
+       "minimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Pressure Pa",
+     "x-unit": "Pa"
+    },
+    "flow_sccm": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Flow Sccm",
+     "x-unit": "sccm"
+    }
+   },
+   "title": "DsmcBoundary",
+   "type": "object"
+  },
+  "DsmcGas": {
+   "description": "DSMC のガス分子モデル (VHS: Variable Hard Sphere)。既定は Ar。",
+   "properties": {
+    "name": {
+     "default": "Ar",
+     "title": "Name",
+     "type": "string"
+    },
+    "mass_amu": {
+     "default": 39.948,
+     "description": "分子質量 [amu]",
+     "exclusiveMinimum": 0,
+     "title": "Mass Amu",
+     "type": "number",
+     "x-unit": "amu"
+    },
+    "d_ref_m": {
+     "default": 4.17e-10,
+     "description": "VHS 基準直径 [m] (T_ref にて)",
+     "exclusiveMinimum": 0,
+     "title": "D Ref M",
+     "type": "number",
+     "x-unit": "m"
+    },
+    "omega": {
+     "default": 0.81,
+     "description": "粘性の温度指数 ω (HS=0.5)",
+     "maximum": 1.0,
+     "minimum": 0.5,
+     "title": "Omega",
+     "type": "number",
+     "x-unit": "1"
+    },
+    "t_ref_k": {
+     "default": 273.0,
+     "description": "基準温度 [K]",
+     "exclusiveMinimum": 0,
+     "title": "T Ref K",
+     "type": "number",
+     "x-unit": "K"
+    }
+   },
+   "title": "DsmcGas",
+   "type": "object"
+  },
+  "DsmcSettings": {
+   "description": "定常ガス流れの DSMC 設定 (prompts/54)。null なら無効。\n\nNTC 法 + VHS 分子モデル。既存の三角形メッシュをセルとして使い、\n定常後の時間平均で要素ごとの n・T・u を得る (MCC の背景ガス場に使える)。\n平面2D (coord=\"xy\") のみ対応。",
+   "properties": {
+    "gas": {
+     "$ref": "#/$defs/DsmcGas",
+     "default": {
+      "name": "Ar",
+      "mass_amu": 39.948,
+      "d_ref_m": 4.17e-10,
+      "omega": 0.81,
+      "t_ref_k": 273.0
+     }
+    },
+    "boundaries": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/DsmcBoundary"
+     },
+     "title": "Boundaries",
+     "type": "array"
+    },
+    "mesh_scale": {
+     "default": 1.0,
+     "maximum": 20.0,
+     "minimum": 1.0,
+     "title": "Mesh Scale",
+     "type": "number",
+     "x-advanced": true,
+     "x-unit": "1"
+    },
+    "wall_temperature_k": {
+     "default": 300.0,
+     "description": "未指定エッジ・領域輪郭の壁温 [K]",
+     "exclusiveMinimum": 0,
+     "title": "Wall Temperature K",
+     "type": "number",
+     "x-unit": "K"
+    },
+    "init_pressure_pa": {
+     "description": "初期充填圧 [Pa]",
+     "exclusiveMinimum": 0,
+     "title": "Init Pressure Pa",
+     "type": "number",
+     "x-unit": "Pa"
+    },
+    "init_temperature_k": {
+     "default": 300.0,
+     "exclusiveMinimum": 0,
+     "title": "Init Temperature K",
+     "type": "number",
+     "x-unit": "K"
+    },
+    "n_particles": {
+     "default": 50000,
+     "description": "目標シミュレーション粒子数",
+     "exclusiveMinimum": 0,
+     "title": "N Particles",
+     "type": "integer"
+    },
+    "dt": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "秒。None なら 0.25·h_min/v_mp から自動",
+     "title": "Dt",
+     "x-unit": "s"
+    },
+    "n_steps": {
+     "default": 2000,
+     "exclusiveMinimum": 0,
+     "title": "N Steps",
+     "type": "integer"
+    },
+    "avg_steps": {
+     "default": 500,
+     "description": "最終 N ステップで時間平均",
+     "exclusiveMinimum": 0,
+     "title": "Avg Steps",
+     "type": "integer"
+    },
+    "seed": {
+     "default": 0,
+     "title": "Seed",
+     "type": "integer",
+     "x-advanced": true
+    },
+    "threads": {
+     "default": 1,
+     "maximum": 128,
+     "minimum": 1,
+     "title": "Threads",
+     "type": "integer",
+     "x-advanced": true
+    },
+    "smoothing_passes": {
+     "default": 0,
+     "maximum": 20,
+     "minimum": 0,
+     "title": "Smoothing Passes",
+     "type": "integer",
+     "x-advanced": true
+    }
+   },
+   "required": [
+    "init_pressure_pa"
+   ],
+   "title": "DsmcSettings",
+   "type": "object"
+  },
+  "EdgeMeshSize": {
+   "description": "線分近傍のローカルメッシュサイズ (prompts/90)。gmsh の Distance+Threshold フィールドで、\n線分から dist_in までは size、dist_out で全体特性長 (mesh.size) へ線形に戻す。\n\nキャンバスの「メッシュ細分」ツール (2点クリック) で追加する他、任意の電極エッジ・\nドメイン辺の近傍だけシース解像などの目的で細かくしたい場合に使う。",
+   "properties": {
+    "p1": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P1",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "p2": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P2",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "size": {
+     "exclusiveMinimum": 0,
+     "title": "Size",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "dist_in": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Dist In",
+     "x-advanced": true,
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "dist_out": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Dist Out",
+     "x-advanced": true,
+     "x-geom": true,
+     "x-unit": "m"
+    }
+   },
+   "required": [
+    "p1",
+    "p2",
+    "size"
+   ],
+   "title": "EdgeMeshSize",
+   "type": "object"
+  },
+  "Eedf1dRegion": {
+   "description": "1D の EEDF/EEPF 集計区間 [x1, x2] (2D の EedfRegion の 1D 版、prompts/85 と同じ規約)。",
+   "properties": {
+    "x1": {
+     "title": "X1",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "x2": {
+     "title": "X2",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "label": {
+     "default": "",
+     "title": "Label",
+     "type": "string"
+    },
+    "bins": {
+     "default": 100,
+     "maximum": 1000,
+     "minimum": 10,
+     "title": "Bins",
+     "type": "integer"
+    },
+    "e_max_ev": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "E Max Ev",
+     "x-unit": "eV"
+    }
+   },
+   "required": [
+    "x1",
+    "x2"
+   ],
+   "title": "Eedf1dRegion",
+   "type": "object"
+  },
+  "EedfRegion": {
+   "description": "EEDF/EEPF の集計領域 (軸平行矩形、prompts/85)。キャンバスの2点クリックで指定する。\n\n時間平均区間中の毎ステップ、矩形内 (min(p1,p2) ≦ x ≦ max(p1,p2)) の電子を\n重み付きエネルギーヒストグラムへ加算し、EEDF (f(E)、∫f dE=1) を得る。",
+   "properties": {
+    "p1": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P1",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "p2": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P2",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "label": {
+     "default": "",
+     "title": "Label",
+     "type": "string"
+    },
+    "bins": {
+     "default": 100,
+     "maximum": 1000,
+     "minimum": 10,
+     "title": "Bins",
+     "type": "integer"
+    },
+    "e_max_ev": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "E Max Ev",
+     "x-unit": "eV"
+    }
+   },
+   "required": [
+    "p1",
+    "p2"
+   ],
+   "title": "EedfRegion",
+   "type": "object"
+  },
+  "Emitter": {
+   "description": "粒子源。\n\nline: p1-p2 の線分上に n 個を等間隔配置。point: p1 に全粒子を配置 (p2 は無視)。\ndirection_deg は x 軸から反時計回りの射出方向 [度]、spread_deg はその一様分布\n半角 [度] (乱数は使わず、n 個に等間隔で振り分ける)。",
+   "properties": {
+    "kind": {
+     "default": "line",
+     "enum": [
+      "line",
+      "point"
+     ],
+     "title": "Kind",
+     "type": "string"
+    },
+    "p1": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P1",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "p2": {
+     "anyOf": [
+      {
+       "maxItems": 2,
+       "minItems": 2,
+       "prefixItems": [
+        {
+         "type": "number"
+        },
+        {
+         "type": "number"
+        }
+       ],
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "P2",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "n": {
+     "exclusiveMinimum": 0,
+     "title": "N",
+     "type": "integer"
+    },
+    "energy_ev": {
+     "default": 0.0,
+     "title": "Energy Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "direction_deg": {
+     "default": 0.0,
+     "title": "Direction Deg",
+     "type": "number",
+     "x-unit": "deg"
+    },
+    "spread_deg": {
+     "default": 0.0,
+     "title": "Spread Deg",
+     "type": "number",
+     "x-unit": "deg"
+    },
+    "energy_dist": {
+     "default": "mono",
+     "enum": [
+      "mono",
+      "maxwell"
+     ],
+     "title": "Energy Dist",
+     "type": "string"
+    },
+    "temperature_ev": {
+     "default": 1.0,
+     "description": "maxwell 時の温度 kT [eV]",
+     "exclusiveMinimum": 0,
+     "title": "Temperature Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "seed": {
+     "default": 0,
+     "title": "Seed",
+     "type": "integer",
+     "x-advanced": true
+    }
+   },
+   "required": [
+    "p1",
+    "n"
+   ],
+   "title": "Emitter",
+   "type": "object"
+  },
+  "Fluid1dSettings": {
+   "description": "1D プラズマ流体 (ドリフト拡散 + 電子エネルギー、prompts/104-106)。null なら無効。\n\nScharfetter-Gummel フラックス + 半陰的時間積分 (fluid1d.py) で n_e・n_i・電子\nエネルギー w・φ を解く。pic1d 同様 geometry/mesh とは無関係な専用の一様格子\nソルバー。",
+   "properties": {
+    "gap_m": {
+     "description": "電極間ギャップ [m]",
+     "exclusiveMinimum": 0,
+     "title": "Gap M",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "n_cells": {
+     "default": 200,
+     "maximum": 100000,
+     "minimum": 16,
+     "title": "N Cells",
+     "type": "integer"
+    },
+    "left": {
+     "$ref": "#/$defs/Pic1dElectrode",
+     "default": {
+      "v_dc": 0.0,
+      "voltage_rf": null,
+      "waveforms": [],
+      "see_gamma": 0.0,
+      "fn": null
+     }
+    },
+    "right": {
+     "$ref": "#/$defs/Pic1dElectrode",
+     "default": {
+      "v_dc": 0.0,
+      "voltage_rf": null,
+      "waveforms": [],
+      "see_gamma": 0.0,
+      "fn": null
+     }
+    },
+    "init_density_m3": {
+     "description": "初期プラズマ密度 (一様、準中性) [m^-3]",
+     "exclusiveMinimum": 0,
+     "title": "Init Density M3",
+     "type": "number",
+     "x-unit": "m^-3"
+    },
+    "init_te_ev": {
+     "default": 2.0,
+     "exclusiveMinimum": 0,
+     "title": "Init Te Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "gas_pressure_pa": {
+     "description": "一様背景ガス圧 [Pa]",
+     "exclusiveMinimum": 0,
+     "title": "Gas Pressure Pa",
+     "type": "number",
+     "x-unit": "Pa"
+    },
+    "gas_temperature_k": {
+     "default": 300.0,
+     "exclusiveMinimum": 0,
+     "title": "Gas Temperature K",
+     "type": "number",
+     "x-unit": "K"
+    },
+    "ion_mass_amu": {
+     "default": 39.948,
+     "description": "イオン質量 [amu]",
+     "exclusiveMinimum": 0,
+     "title": "Ion Mass Amu",
+     "type": "number",
+     "x-unit": "amu"
+    },
+    "mu_i_ref": {
+     "default": 0.145,
+     "description": "μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)",
+     "exclusiveMinimum": 0,
+     "title": "Mu I Ref",
+     "type": "number",
+     "x-unit": "m^2/(V*s)"
+    },
+    "n_ref_m3": {
+     "default": 3.22e+22,
+     "description": "mu_i_ref の基準ガス密度 [m^-3]",
+     "exclusiveMinimum": 0,
+     "title": "N Ref M3",
+     "type": "number",
+     "x-unit": "m^-3"
+    },
+    "t_i_ev": {
+     "default": 0.026,
+     "description": "イオン温度 (D_i = μ_i・T_i)",
+     "exclusiveMinimum": 0,
+     "title": "T I Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "ion_mobility_model": {
+     "default": "frost",
+     "enum": [
+      "frost",
+      "const"
+     ],
+     "title": "Ion Mobility Model",
+     "type": "string"
+    },
+    "frost_c_td": {
+     "default": 150.0,
+     "description": "修正 Frost 式の C [Td] (const では無視)",
+     "exclusiveMinimum": 0,
+     "title": "Frost C Td",
+     "type": "number",
+     "x-unit": "Td"
+    },
+    "electron_processes": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/XsProcess"
+     },
+     "title": "Electron Processes",
+     "type": "array"
+    },
+    "dt": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "秒。None なら RF周期/2000 と 1e-10 の小さい方",
+     "title": "Dt",
+     "x-unit": "s"
+    },
+    "n_steps": {
+     "default": 20000,
+     "exclusiveMinimum": 0,
+     "title": "N Steps",
+     "type": "integer"
+    },
+    "frame_every": {
+     "default": 200,
+     "exclusiveMinimum": 0,
+     "title": "Frame Every",
+     "type": "integer"
+    },
+    "avg_steps": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Avg Steps"
+    },
+    "phase_bins": {
+     "default": 40,
+     "minimum": 0,
+     "title": "Phase Bins",
+     "type": "integer"
+    },
+    "wall_iedf_bins": {
+     "default": 100,
+     "maximum": 1000,
+     "minimum": 0,
+     "title": "Wall Iedf Bins",
+     "type": "integer"
+    },
+    "electron_model": {
+     "default": "maxwell",
+     "enum": [
+      "maxwell",
+      "boltzmann"
+     ],
+     "title": "Electron Model",
+     "type": "string"
+    },
+    "boltz_table": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/BoltzTable"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    }
+   },
+   "required": [
+    "gap_m",
+    "init_density_m3",
+    "gas_pressure_pa"
+   ],
+   "title": "Fluid1dSettings",
+   "type": "object"
+  },
+  "Fluid2dSettings": {
+   "description": "2D/軸対称 プラズマ流体 (ドリフト拡散 + 電子エネルギー、EAFE/FEM-SG、prompts/111)。\n\nnull なら無効。geometry/mesh (非構造 or 構造格子の三角形メッシュ)・境界条件は\n既存のプロジェクト設定 (Project.geometry.boundaries の dirichlet/symmetry、\nRegion の conductor/dielectric/voltage/voltage_rf/see_gamma) をそのまま使う —\n2D PIC (pic.py) と同一条件で直接比較できることが設計目標。\nperiodic 境界は未対応 (fluid2d.py の Fluid2dSimulation.__init__ で ValueError)。",
+   "properties": {
+    "init_density_m3": {
+     "description": "初期プラズマ密度 (一様、準中性) [m^-3]",
+     "exclusiveMinimum": 0,
+     "title": "Init Density M3",
+     "type": "number",
+     "x-unit": "m^-3"
+    },
+    "init_te_ev": {
+     "default": 2.0,
+     "exclusiveMinimum": 0,
+     "title": "Init Te Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "gas_pressure_pa": {
+     "description": "一様背景ガス圧 [Pa]",
+     "exclusiveMinimum": 0,
+     "title": "Gas Pressure Pa",
+     "type": "number",
+     "x-unit": "Pa"
+    },
+    "gas_temperature_k": {
+     "default": 300.0,
+     "exclusiveMinimum": 0,
+     "title": "Gas Temperature K",
+     "type": "number",
+     "x-unit": "K"
+    },
+    "ion_mass_amu": {
+     "default": 39.948,
+     "description": "イオン質量 [amu]",
+     "exclusiveMinimum": 0,
+     "title": "Ion Mass Amu",
+     "type": "number",
+     "x-unit": "amu"
+    },
+    "mu_i_ref": {
+     "default": 0.145,
+     "description": "μ_i の基準値 [m^2/(V・s)] (n_ref_m3 にて)",
+     "exclusiveMinimum": 0,
+     "title": "Mu I Ref",
+     "type": "number",
+     "x-unit": "m^2/(V*s)"
+    },
+    "n_ref_m3": {
+     "default": 3.22e+22,
+     "description": "mu_i_ref の基準ガス密度 [m^-3]",
+     "exclusiveMinimum": 0,
+     "title": "N Ref M3",
+     "type": "number",
+     "x-unit": "m^-3"
+    },
+    "t_i_ev": {
+     "default": 0.026,
+     "description": "イオン温度 (D_i = μ_i・T_i)",
+     "exclusiveMinimum": 0,
+     "title": "T I Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "ion_mobility_model": {
+     "default": "frost",
+     "enum": [
+      "frost",
+      "const"
+     ],
+     "title": "Ion Mobility Model",
+     "type": "string"
+    },
+    "frost_c_td": {
+     "default": 150.0,
+     "description": "修正 Frost 式の C [Td] (const では無視)",
+     "exclusiveMinimum": 0,
+     "title": "Frost C Td",
+     "type": "number",
+     "x-unit": "Td"
+    },
+    "electron_processes": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/XsProcess"
+     },
+     "title": "Electron Processes",
+     "type": "array"
+    },
+    "dt": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "秒。None なら RF周期/2000 と 1e-10 の小さい方",
+     "title": "Dt",
+     "x-unit": "s"
+    },
+    "n_steps": {
+     "default": 20000,
+     "exclusiveMinimum": 0,
+     "title": "N Steps",
+     "type": "integer"
+    },
+    "frame_every": {
+     "default": 200,
+     "exclusiveMinimum": 0,
+     "title": "Frame Every",
+     "type": "integer"
+    },
+    "avg_steps": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Avg Steps"
+    },
+    "phase_bins": {
+     "default": 0,
+     "minimum": 0,
+     "title": "Phase Bins",
+     "type": "integer"
+    },
+    "electron_model": {
+     "default": "maxwell",
+     "enum": [
+      "maxwell",
+      "boltzmann"
+     ],
+     "title": "Electron Model",
+     "type": "string"
+    },
+    "boltz_table": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/BoltzTable"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "linear_solver": {
+     "default": "iterative",
+     "enum": [
+      "iterative",
+      "direct"
+     ],
+     "title": "Linear Solver",
+     "type": "string"
+    },
+    "threads": {
+     "default": 0,
+     "maximum": 128,
+     "minimum": 0,
+     "title": "Threads",
+     "type": "integer",
+     "x-advanced": true
+    }
+   },
+   "required": [
+    "init_density_m3",
+    "gas_pressure_pa"
+   ],
+   "title": "Fluid2dSettings",
+   "type": "object"
+  },
+  "Fn1dEmission": {
+   "description": "1D 電極の FN (Fowler–Nordheim) 電界放出 (prompts/95)。\n\n2D の FnEmission (fn.py の Murphy-Good式 + Forbes近似 fn_current_density を\nそのまま流用) と同じ物理・パラメータだが、1D は電極がちょうど1点 (左端 x=0\nまたは右端 x=gap) なので放出面/位置サンプリングという概念がなく、\nedges/regions/n (放出マクロ粒子総数)/seed (位置乱数シード) は不要 —\n毎ステップの放出数は決定論的な端数キャリーのみで決まる (乱数不使用)。",
+   "properties": {
+    "phi_ev": {
+     "default": 4.5,
+     "description": "仕事関数 φ [eV]",
+     "exclusiveMinimum": 0,
+     "title": "Phi Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "beta": {
+     "default": 1.0,
+     "description": "電界増倍係数 β",
+     "exclusiveMinimum": 0,
+     "title": "Beta",
+     "type": "number",
+     "x-unit": "1"
+    },
+    "init_energy_ev": {
+     "default": 0.1,
+     "description": "放出電子の初期エネルギー [eV]",
+     "minimum": 0,
+     "title": "Init Energy Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "macro_weight": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Macro Weight",
+     "x-unit": "m^-2"
+    }
+   },
+   "title": "Fn1dEmission",
+   "type": "object"
+  },
+  "FnEmission": {
+   "description": "Fowler–Nordheim 電界放出源 (prompts/46)。\n\n電極 (Dirichlet) 表面の指定区間から、表面電界に応じた FN 電流密度\n(Murphy-Good 式 + Forbes 近似、fn.py 参照) で電子を放出する。\n放出面の指定は edges (domain 外周エッジ番号) と regions (conductor 領域 id)\nの少なくとも一方。",
+   "properties": {
+    "edges": {
+     "default": [],
+     "items": {
+      "type": "integer"
+     },
+     "title": "Edges",
+     "type": "array"
+    },
+    "regions": {
+     "default": [],
+     "items": {
+      "type": "string"
+     },
+     "title": "Regions",
+     "type": "array"
+    },
+    "phi_ev": {
+     "default": 4.5,
+     "description": "仕事関数 φ [eV]",
+     "exclusiveMinimum": 0,
+     "title": "Phi Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "beta": {
+     "default": 1.0,
+     "description": "電界増倍係数 β",
+     "exclusiveMinimum": 0,
+     "title": "Beta",
+     "type": "number",
+     "x-unit": "1"
+    },
+    "n": {
+     "default": 200,
+     "description": "trace 時の放出マクロ粒子総数",
+     "exclusiveMinimum": 0,
+     "title": "N",
+     "type": "integer"
+    },
+    "init_energy_ev": {
+     "default": 0.1,
+     "description": "放出電子の初期エネルギー [eV]",
+     "minimum": 0,
+     "title": "Init Energy Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "macro_weight": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Macro Weight",
+     "x-unit": "1"
+    },
+    "seed": {
+     "default": 0,
+     "title": "Seed",
+     "type": "integer",
+     "x-advanced": true
+    }
+   },
+   "title": "FnEmission",
+   "type": "object"
+  },
+  "Geometry": {
+   "properties": {
+    "domain": {
+     "$ref": "#/$defs/Domain"
+    },
+    "regions": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/Region"
+     },
+     "title": "Regions",
+     "type": "array"
+    },
+    "boundaries": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/BoundaryCondition"
+     },
+     "title": "Boundaries",
+     "type": "array"
+    }
+   },
+   "required": [
+    "domain"
+   ],
+   "title": "Geometry",
+   "type": "object"
+  },
+  "InitialPlasma": {
+   "description": "初期プラズマの一様装荷。null なら初期装荷なし。",
+   "properties": {
+    "density": {
+     "description": "数密度 [m^-3] (奥行き1m換算)",
+     "exclusiveMinimum": 0,
+     "title": "Density",
+     "type": "number",
+     "x-unit": "m^-3"
+    },
+    "te_ev": {
+     "default": 2.0,
+     "description": "電子温度 kTe [eV]",
+     "minimum": 0,
+     "title": "Te Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "ti_ev": {
+     "default": 0.03,
+     "description": "イオン温度 kTi [eV]",
+     "minimum": 0,
+     "title": "Ti Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "ion_mass_amu": {
+     "default": 40.0,
+     "description": "イオン質量 [amu] (Ar+ = 40)",
+     "exclusiveMinimum": 0,
+     "title": "Ion Mass Amu",
+     "type": "number",
+     "x-unit": "amu"
+    },
+    "immobile_ions": {
+     "default": false,
+     "title": "Immobile Ions",
+     "type": "boolean",
+     "x-advanced": true
+    },
+    "seed": {
+     "default": 0,
+     "title": "Seed",
+     "type": "integer",
+     "x-advanced": true
+    }
+   },
+   "required": [
+    "density"
+   ],
+   "title": "InitialPlasma",
+   "type": "object"
+  },
+  "LocalSize": {
+   "properties": {
+    "region": {
+     "title": "Region",
+     "type": "string"
+    },
+    "size": {
+     "title": "Size",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    }
+   },
+   "required": [
+    "region",
+    "size"
+   ],
+   "title": "LocalSize",
+   "type": "object"
+  },
+  "MccGas": {
+   "description": "背景中性ガスの状態。数密度は n_g = p/(kB·T) で決まる。",
+   "properties": {
+    "name": {
+     "default": "Ar",
+     "title": "Name",
+     "type": "string"
+    },
+    "pressure_pa": {
+     "description": "ガス圧 [Pa]",
+     "exclusiveMinimum": 0,
+     "title": "Pressure Pa",
+     "type": "number",
+     "x-unit": "Pa"
+    },
+    "temperature_k": {
+     "default": 300.0,
+     "description": "ガス温度 [K]",
+     "exclusiveMinimum": 0,
+     "title": "Temperature K",
+     "type": "number",
+     "x-unit": "K"
+    }
+   },
+   "required": [
+    "pressure_pa"
+   ],
+   "title": "MccGas",
+   "type": "object"
+  },
+  "MccSettings": {
+   "description": "MCC 設定。null なら MCC 無効 (従来の無衝突動作)。",
+   "properties": {
+    "gas": {
+     "$ref": "#/$defs/MccGas"
+    },
+    "electron_processes": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/XsProcess"
+     },
+     "title": "Electron Processes",
+     "type": "array"
+    },
+    "ion_processes": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/XsProcess"
+     },
+     "title": "Ion Processes",
+     "type": "array"
+    },
+    "seed": {
+     "default": 0,
+     "title": "Seed",
+     "type": "integer",
+     "x-advanced": true
+    },
+    "ionization_split": {
+     "default": "half",
+     "enum": [
+      "half",
+      "random"
+     ],
+     "title": "Ionization Split",
+     "type": "string"
+    },
+    "ion_energy_frame": {
+     "default": "lab",
+     "enum": [
+      "com",
+      "lab"
+     ],
+     "title": "Ion Energy Frame",
+     "type": "string"
+    },
+    "use_dsmc_gas": {
+     "default": false,
+     "title": "Use Dsmc Gas",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "gas"
+   ],
+   "title": "MccSettings",
+   "type": "object"
+  },
+  "MeshSettings": {
+   "properties": {
+    "size": {
+     "description": "全体特性長 [m]",
+     "exclusiveMinimum": 0,
+     "title": "Size",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "local_sizes": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/LocalSize"
+     },
+     "title": "Local Sizes",
+     "type": "array"
+    },
+    "local_edge_sizes": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/EdgeMeshSize"
+     },
+     "title": "Local Edge Sizes",
+     "type": "array"
+    },
+    "mode": {
+     "default": "unstructured",
+     "enum": [
+      "unstructured",
+      "structured",
+      "cartesian"
+     ],
+     "title": "Mode",
+     "type": "string"
+    },
+    "amr": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/AmrSettings"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    }
+   },
+   "required": [
+    "size"
+   ],
+   "title": "MeshSettings",
+   "type": "object"
+  },
+  "ParticleSettings": {
+   "properties": {
+    "species": {
+     "$ref": "#/$defs/Species",
+     "default": {
+      "preset": "electron",
+      "q": null,
+      "m": null
+     }
+    },
+    "emitter": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Emitter"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "fn": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/FnEmission"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "dt": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Dt",
+     "x-unit": "s"
+    },
+    "n_steps": {
+     "default": 5000,
+     "exclusiveMinimum": 0,
+     "title": "N Steps",
+     "type": "integer"
+    },
+    "save_every": {
+     "default": 10,
+     "exclusiveMinimum": 0,
+     "title": "Save Every",
+     "type": "integer"
+    }
+   },
+   "title": "ParticleSettings",
+   "type": "object"
+  },
+  "Pic1dElectrode": {
+   "description": "1D の左右電極。電圧は v_dc + Σ RF sin + Σ waveforms(t) の合成 (prompts/93)。\n2D の Region/BoundaryCondition の voltage_rf と同じ規約 (単一/リスト/None、\npic.py の _dirichlet_values と同じ式) をそのまま流用する。CSV 波形\n(VoltageWaveform) とは併記可能 (両方指定すれば両方の寄与が加算される。\npic1d.py の _electrode_voltage / pic.py の _eval_waveform 参照)。",
+   "properties": {
+    "v_dc": {
+     "default": 0.0,
+     "title": "V Dc",
+     "type": "number",
+     "x-unit": "V"
+    },
+    "voltage_rf": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/VoltageRF"
+      },
+      {
+       "items": {
+        "$ref": "#/$defs/VoltageRF"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Voltage Rf"
+    },
+    "waveforms": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/VoltageWaveform"
+     },
+     "title": "Waveforms",
+     "type": "array"
+    },
+    "see_gamma": {
+     "default": 0.0,
+     "description": "イオン入射あたりのSEE収率 γ",
+     "maximum": 1.0,
+     "minimum": 0.0,
+     "title": "See Gamma",
+     "type": "number",
+     "x-unit": "1"
+    },
+    "fn": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Fn1dEmission"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    }
+   },
+   "title": "Pic1dElectrode",
+   "type": "object"
+  },
+  "Pic1dSettings": {
+   "description": "1D PIC/MCC (1d3v)。null なら無効。2D の pic とは独立に実行できる (pic1d.py 参照)。\n\n一様格子 (n_cells 個のセル、n_nodes = n_cells+1 節点) + 三重対角 Poisson。\nメッシュ生成が無いため geometry/mesh の設定とは無関係に動作する。",
+   "properties": {
+    "gap_m": {
+     "description": "電極間ギャップ [m]",
+     "exclusiveMinimum": 0,
+     "title": "Gap M",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "n_cells": {
+     "default": 128,
+     "maximum": 100000,
+     "minimum": 8,
+     "title": "N Cells",
+     "type": "integer"
+    },
+    "left": {
+     "$ref": "#/$defs/Pic1dElectrode",
+     "default": {
+      "v_dc": 0.0,
+      "voltage_rf": null,
+      "waveforms": [],
+      "see_gamma": 0.0,
+      "fn": null
+     }
+    },
+    "right": {
+     "$ref": "#/$defs/Pic1dElectrode",
+     "default": {
+      "v_dc": 0.0,
+      "voltage_rf": null,
+      "waveforms": [],
+      "see_gamma": 0.0,
+      "fn": null
+     }
+    },
+    "init_density_m3": {
+     "description": "初期プラズマ密度 (一様、準中性) [m^-3]",
+     "exclusiveMinimum": 0,
+     "title": "Init Density M3",
+     "type": "number",
+     "x-unit": "m^-3"
+    },
+    "init_te_ev": {
+     "default": 2.0,
+     "exclusiveMinimum": 0,
+     "title": "Init Te Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "init_ti_ev": {
+     "default": 0.03,
+     "exclusiveMinimum": 0,
+     "title": "Init Ti Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "ion_mass_amu": {
+     "default": 39.948,
+     "description": "イオン質量 [amu] (He: 4.0026)",
+     "exclusiveMinimum": 0,
+     "title": "Ion Mass Amu",
+     "type": "number",
+     "x-unit": "amu"
+    },
+    "n_macro": {
+     "default": 20000,
+     "description": "種ごとの初期マクロ粒子数",
+     "exclusiveMinimum": 0,
+     "title": "N Macro",
+     "type": "integer"
+    },
+    "dt": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "秒。None なら 0.1/ωpe (初期密度から)",
+     "title": "Dt",
+     "x-unit": "s"
+    },
+    "n_steps": {
+     "default": 2000,
+     "exclusiveMinimum": 0,
+     "title": "N Steps",
+     "type": "integer"
+    },
+    "frame_every": {
+     "default": 20,
+     "exclusiveMinimum": 0,
+     "title": "Frame Every",
+     "type": "integer"
+    },
+    "avg_steps": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Avg Steps"
+    },
+    "phase_bins": {
+     "default": 40,
+     "minimum": 0,
+     "title": "Phase Bins",
+     "type": "integer"
+    },
+    "mcc": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/MccSettings"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "see_energy_ev": {
+     "default": 2.0,
+     "description": "SEE 電子の初期エネルギー [eV]",
+     "minimum": 0,
+     "title": "See Energy Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "eedf_regions": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/Eedf1dRegion"
+     },
+     "title": "Eedf Regions",
+     "type": "array"
+    },
+    "wall_iedf_bins": {
+     "default": 100,
+     "maximum": 1000,
+     "minimum": 0,
+     "title": "Wall Iedf Bins",
+     "type": "integer"
+    },
+    "seed": {
+     "default": 0,
+     "title": "Seed",
+     "type": "integer",
+     "x-advanced": true
+    }
+   },
+   "required": [
+    "gap_m",
+    "init_density_m3"
+   ],
+   "title": "Pic1dSettings",
+   "type": "object"
+  },
+  "PicInjection": {
+   "description": "エミッタからの定常注入。電流を毎ステップの実電荷として等分注入する。\n\ncurrent_a_per_m の単位: 平面2D (xy) = [A/m] (奥行き1m換算)、\n軸対称 (rz / rz_x0) = [A] (リングエミッタの全電流)。",
+   "properties": {
+    "emitter": {
+     "$ref": "#/$defs/Emitter"
+    },
+    "species": {
+     "default": "electron",
+     "enum": [
+      "electron",
+      "ion"
+     ],
+     "title": "Species",
+     "type": "string"
+    },
+    "current_a_per_m": {
+     "exclusiveMinimum": 0,
+     "title": "Current A Per M",
+     "type": "number",
+     "x-unit": "A/m"
+    }
+   },
+   "required": [
+    "emitter",
+    "current_a_per_m"
+   ],
+   "title": "PicInjection",
+   "type": "object"
+  },
+  "PicMerge": {
+   "description": "粒子マージ設定 (高速化③、prompts/77)。\n\n電離でマクロ粒子数が増え続けると計算コストが際限なく上がるため、種ごとの\nマクロ粒子数が n_max を超えたら every ステップごとにセル内保存的マージ\n(Vranic et al. 2015 の k→2 マージ) で削減する。null なら無効 (既定)。",
+   "properties": {
+    "n_max": {
+     "default": 100000,
+     "description": "種ごとの上限マクロ粒子数",
+     "minimum": 1000,
+     "title": "N Max",
+     "type": "integer"
+    },
+    "every": {
+     "default": 100,
+     "description": "チェック間隔 [ステップ]",
+     "minimum": 1,
+     "title": "Every",
+     "type": "integer"
+    }
+   },
+   "title": "PicMerge",
+   "type": "object"
+  },
+  "PicSettings": {
+   "properties": {
+    "initial_plasma": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/InitialPlasma"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "injection": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/PicInjection"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "n_macro": {
+     "default": 20000,
+     "description": "種ごとの初期マクロ粒子数の目安",
+     "exclusiveMinimum": 0,
+     "title": "N Macro",
+     "type": "integer"
+    },
+    "dt": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "秒。None なら 0.1/ωpe (初期密度から)",
+     "title": "Dt",
+     "x-unit": "s"
+    },
+    "n_steps": {
+     "default": 2000,
+     "exclusiveMinimum": 0,
+     "title": "N Steps",
+     "type": "integer"
+    },
+    "frame_every": {
+     "default": 20,
+     "description": "フレーム送出間隔 (ステップ)",
+     "exclusiveMinimum": 0,
+     "title": "Frame Every",
+     "type": "integer"
+    },
+    "mcc": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/MccSettings"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "see_energy_ev": {
+     "default": 2.0,
+     "description": "SEE 電子の初期エネルギー [eV]",
+     "minimum": 0,
+     "title": "See Energy Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "avg_steps": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Avg Steps"
+    },
+    "phase_bins": {
+     "default": 40,
+     "minimum": 0,
+     "title": "Phase Bins",
+     "type": "integer"
+    },
+    "collector": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/Collector"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "collectors": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/Collector"
+     },
+     "title": "Collectors",
+     "type": "array"
+    },
+    "eedf_regions": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/EedfRegion"
+     },
+     "title": "Eedf Regions",
+     "type": "array"
+    },
+    "reflect_edges": {
+     "items": {
+      "type": "integer"
+     },
+     "title": "Reflect Edges",
+     "type": "array"
+    },
+    "fn": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/FnEmission"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "ion_subcycle": {
+     "default": 1,
+     "minimum": 1,
+     "title": "Ion Subcycle",
+     "type": "integer",
+     "x-advanced": true
+    },
+    "threads": {
+     "default": 0,
+     "maximum": 128,
+     "minimum": 0,
+     "title": "Threads",
+     "type": "integer",
+     "x-advanced": true
+    },
+    "merge": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/PicMerge"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "sheath_lines": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/SheathLine"
+     },
+     "title": "Sheath Lines",
+     "type": "array"
+    }
+   },
+   "title": "PicSettings",
+   "type": "object"
+  },
+  "Region": {
+   "properties": {
+    "id": {
+     "title": "Id",
+     "type": "string"
+    },
+    "type": {
+     "enum": [
+      "conductor",
+      "dielectric",
+      "charge"
+     ],
+     "title": "Type",
+     "type": "string"
+    },
+    "polygon": {
+     "anyOf": [
+      {
+       "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+         {
+          "type": "number"
+         },
+         {
+          "type": "number"
+         }
+        ],
+        "type": "array"
+       },
+       "minItems": 3,
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Polygon",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "shape": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/CircleShape"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "voltage": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Voltage",
+     "x-unit": "V"
+    },
+    "voltage_rf": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/VoltageRF"
+      },
+      {
+       "items": {
+        "$ref": "#/$defs/VoltageRF"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Voltage Rf"
+    },
+    "voltage_waveform": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/VoltageWaveform"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "eps_r": {
+     "default": 1.0,
+     "title": "Eps R",
+     "type": "number",
+     "x-unit": "1"
+    },
+    "rho": {
+     "default": 0.0,
+     "title": "Rho",
+     "type": "number",
+     "x-unit": "C/m^3"
+    },
+    "see_gamma": {
+     "default": 0.0,
+     "description": "conductor / dielectric: 二次電子放出係数 γ (0 = 無効、PIC のみ使用)",
+     "minimum": 0,
+     "title": "See Gamma",
+     "type": "number",
+     "x-unit": "1"
+    }
+   },
+   "required": [
+    "id",
+    "type"
+   ],
+   "title": "Region",
+   "type": "object"
+  },
+  "SheathLine": {
+   "description": "2D シースエッジの Brinkmann 評価ライン (prompts/98)。可視化専用で計算はフロント側\n(時間平均・位相分解の n_e/n_i 節点配列は既に done メッセージでフロントに届いており、\nα スライダの即時反映や保存済み結果ファイルでの再計算にもフロント計算が適切なため)。\n\np1 = 電極側、p2 = バルク側 (Brinkmann 積分の参照点 x_b = p2 の位置)。",
+   "properties": {
+    "p1": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P1",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "p2": {
+     "maxItems": 2,
+     "minItems": 2,
+     "prefixItems": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "number"
+      }
+     ],
+     "title": "P2",
+     "type": "array",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "label": {
+     "default": "",
+     "title": "Label",
+     "type": "string"
+    }
+   },
+   "required": [
+    "p1",
+    "p2"
+   ],
+   "title": "SheathLine",
+   "type": "object"
+  },
+  "SolverSettings": {
+   "properties": {
+    "backend": {
+     "default": "numpy",
+     "enum": [
+      "numpy",
+      "cupy",
+      "auto"
+     ],
+     "title": "Backend",
+     "type": "string"
+    }
+   },
+   "title": "SolverSettings",
+   "type": "object"
+  },
+  "Species": {
+   "description": "粒子種。electron/proton プリセット、または custom で q・m を直接指定する。",
+   "properties": {
+    "preset": {
+     "default": "electron",
+     "enum": [
+      "electron",
+      "proton",
+      "custom"
+     ],
+     "title": "Preset",
+     "type": "string"
+    },
+    "q": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Q",
+     "x-unit": "C"
+    },
+    "m": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "M",
+     "x-unit": "kg"
+    }
+   },
+   "title": "Species",
+   "type": "object"
+  },
+  "TlSettings": {
+   "description": "VHF 定在波スタディ (非線形径方向伝送線路モデル、prompts/101)。null なら無効。\n\n円板電極 (半径 radius_m、ギャップ gap_m)・中心給電・軸対称の径方向 1D モデル\n(tl.py 参照)。geometry/mesh とは無関係な専用の一様格子ソルバー (pic1d と同じ位置づけ)。",
+   "properties": {
+    "radius_m": {
+     "default": 0.15,
+     "exclusiveMinimum": 0,
+     "title": "Radius M",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "gap_m": {
+     "default": 0.04,
+     "exclusiveMinimum": 0,
+     "title": "Gap M",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "sheath_m": {
+     "default": 0.0005,
+     "exclusiveMinimum": 0,
+     "title": "Sheath M",
+     "type": "number",
+     "x-geom": true,
+     "x-unit": "m"
+    },
+    "n_e_m3": {
+     "default": 1e+16,
+     "exclusiveMinimum": 0,
+     "title": "N E M3",
+     "type": "number",
+     "x-unit": "m^-3"
+    },
+    "n_s_ratio": {
+     "default": 0.4,
+     "exclusiveMinimum": 0,
+     "maximum": 1,
+     "title": "N S Ratio",
+     "type": "number",
+     "x-unit": "1"
+    },
+    "nu_m_hz": {
+     "default": 100000000.0,
+     "minimum": 0,
+     "title": "Nu M Hz",
+     "type": "number",
+     "x-unit": "Hz"
+    },
+    "freq_hz": {
+     "default": 100000000.0,
+     "exclusiveMinimum": 0,
+     "title": "Freq Hz",
+     "type": "number",
+     "x-unit": "Hz"
+    },
+    "v0": {
+     "default": 100.0,
+     "exclusiveMinimum": 0,
+     "title": "V0",
+     "type": "number",
+     "x-unit": "V"
+    },
+    "n_r": {
+     "default": 400,
+     "maximum": 20000,
+     "minimum": 32,
+     "title": "N R",
+     "type": "integer"
+    },
+    "n_periods": {
+     "default": 200,
+     "minimum": 8,
+     "title": "N Periods",
+     "type": "integer"
+    },
+    "n_fft_periods": {
+     "default": 32,
+     "minimum": 4,
+     "title": "N Fft Periods",
+     "type": "integer"
+    },
+    "n_harm": {
+     "default": 10,
+     "maximum": 40,
+     "minimum": 1,
+     "title": "N Harm",
+     "type": "integer"
+    },
+    "dt": {
+     "anyOf": [
+      {
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Dt",
+     "x-unit": "s"
+    },
+    "sheath_law": {
+     "default": "child",
+     "enum": [
+      "child",
+      "matrix"
+     ],
+     "title": "Sheath Law",
+     "type": "string"
+    }
+   },
+   "title": "TlSettings",
+   "type": "object"
+  },
+  "VoltageRF": {
+   "description": "RF 電圧成分 (フェーズ3)。V(t) = voltage + Σ_k amplitude_k * sin(2π f_k t + phase_k)。\n\nvoltage_rf フィールドには単一成分 (VoltageRF) と成分リスト (list[VoltageRF]、\nデュアル周波数など) のどちらも指定できる (prompts/49)。\n静電ソルブ (/solve) は従来通り直流分 voltage のみを使い、PIC のみが V(t) を使う。",
+   "properties": {
+    "amplitude": {
+     "title": "Amplitude",
+     "type": "number",
+     "x-unit": "V"
+    },
+    "freq_hz": {
+     "exclusiveMinimum": 0,
+     "title": "Freq Hz",
+     "type": "number",
+     "x-unit": "Hz"
+    },
+    "phase_deg": {
+     "default": 0.0,
+     "title": "Phase Deg",
+     "type": "number",
+     "x-unit": "deg"
+    }
+   },
+   "required": [
+    "amplitude",
+    "freq_hz"
+   ],
+   "title": "VoltageRF",
+   "type": "object"
+  },
+  "VoltageWaveform": {
+   "description": "CSV からインポートした任意周期波形 (prompts/73)。\n\nCSV の時間列は波形の「形状」を定義するためだけに使い、実際の周期は\nfreq_hz (ユーザー指定) で決まる。取り込み時にフロント側で時間 t を\n[t_min, t_max] → [0, 1) へ線形写像した正規化位相として保存するため、\nここでは phase を昇順・[0,1) の範囲としてのみ検証する。\n評価は V_wf(t) = interp(frac(t·freq_hz), phase, v) (pic.py 参照)。\nvoltage_rf と同じく静電ソルブでは無視され、PIC のみが使う。",
+   "properties": {
+    "freq_hz": {
+     "exclusiveMinimum": 0,
+     "title": "Freq Hz",
+     "type": "number",
+     "x-unit": "Hz"
+    },
+    "phase": {
+     "items": {
+      "type": "number"
+     },
+     "title": "Phase",
+     "type": "array",
+     "x-unit": "1"
+    },
+    "v": {
+     "items": {
+      "type": "number"
+     },
+     "title": "V",
+     "type": "array",
+     "x-unit": "V"
+    }
+   },
+   "required": [
+    "freq_hz",
+    "phase",
+    "v"
+   ],
+   "title": "VoltageWaveform",
+   "type": "object"
+  },
+  "XsProcess": {
+   "description": "LXCat 由来の衝突断面積プロセス (パース済み、プロジェクト JSON に埋め込む)。",
+   "properties": {
+    "kind": {
+     "enum": [
+      "elastic",
+      "excitation",
+      "ionization",
+      "isotropic",
+      "backscat"
+     ],
+     "title": "Kind",
+     "type": "string"
+    },
+    "label": {
+     "default": "",
+     "title": "Label",
+     "type": "string"
+    },
+    "threshold_ev": {
+     "default": 0.0,
+     "title": "Threshold Ev",
+     "type": "number",
+     "x-unit": "eV"
+    },
+    "mass_ratio": {
+     "default": 0.0,
+     "title": "Mass Ratio",
+     "type": "number",
+     "x-unit": "1"
+    },
+    "energy_ev": {
+     "items": {
+      "type": "number"
+     },
+     "title": "Energy Ev",
+     "type": "array",
+     "x-unit": "eV"
+    },
+    "sigma_m2": {
+     "items": {
+      "type": "number"
+     },
+     "title": "Sigma M2",
+     "type": "array",
+     "x-unit": "m^2"
+    }
+   },
+   "required": [
+    "kind",
+    "energy_ev",
+    "sigma_m2"
+   ],
+   "title": "XsProcess",
+   "type": "object"
+  }
+ },
+ "properties": {
+  "version": {
+   "default": 1,
+   "title": "Version",
+   "type": "integer"
+  },
+  "unit": {
+   "default": "m",
+   "enum": [
+    "m",
+    "mm"
+   ],
+   "title": "Unit",
+   "type": "string"
+  },
+  "coord": {
+   "default": "xy",
+   "enum": [
+    "xy",
+    "rz",
+    "rz_x0"
+   ],
+   "title": "Coord",
+   "type": "string"
+  },
+  "geometry": {
+   "$ref": "#/$defs/Geometry"
+  },
+  "mesh": {
+   "$ref": "#/$defs/MeshSettings"
+  },
+  "solver": {
+   "$ref": "#/$defs/SolverSettings",
+   "default": {
+    "backend": "numpy"
+   }
+  },
+  "b_field": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/BField"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null
+  },
+  "dsmc": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/DsmcSettings"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null
+  },
+  "particles": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/ParticleSettings"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null
+  },
+  "pic": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/PicSettings"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null
+  },
+  "pic1d": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/Pic1dSettings"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null
+  },
+  "fluid1d": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/Fluid1dSettings"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null
+  },
+  "fluid2d": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/Fluid2dSettings"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null
+  },
+  "tl": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/TlSettings"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null
+  }
+ },
+ "required": [
+  "geometry",
+  "mesh"
+ ],
+ "title": "Project",
+ "type": "object"
+}

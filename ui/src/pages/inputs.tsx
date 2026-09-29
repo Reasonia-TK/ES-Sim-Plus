@@ -50,10 +50,11 @@ interface CommitTextProps {
   inputMode?: "text" | "decimal";
   autoFocus?: boolean;
   onCancel?: () => void;
+  disabled?: boolean;
   "aria-label"?: string;
 }
 
-export function CommitText({ id, value, onCommit, validate, onError, className, placeholder, inputMode, autoFocus, onCancel, ...rest }: CommitTextProps) {
+export function CommitText({ id, value, onCommit, validate, onError, className, placeholder, inputMode, autoFocus, onCancel, disabled, ...rest }: CommitTextProps) {
   const [draft, setDraft] = useState(value);
   const [editing, setEditing] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
@@ -80,6 +81,7 @@ export function CommitText({ id, value, onCommit, validate, onError, className, 
       placeholder={placeholder}
       inputMode={inputMode}
       autoFocus={autoFocus}
+      disabled={disabled}
       spellCheck={false}
       aria-label={rest["aria-label"]}
       onFocus={() => setEditing(true)}

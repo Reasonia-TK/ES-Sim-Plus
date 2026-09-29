@@ -32,6 +32,44 @@ def test_v2_schema_describes_the_project_model():
     assert client.get("/v2/schema").json() == body
 
 
+def test_health_reports_a_stable_instance_id():
+    """UI v2 は instance が変わったらバックエンドが再起動したとみなしてスキーマを取り直す。"""
+    client = TestClient(server.app)
+    a = client.get("/health").json()
+    b = client.get("/health").json()
+    assert isinstance(a["instance"], str) and len(a["instance"]) == 16
+    assert a["instance"] == b["instance"] == server.SERVER_INSTANCE
+
+
+def test_every_numeric_field_declares_its_unit():
+    """UI の設定フォームは x-unit で単位を出し、x-geom の長さは表示単位 (mm/µm) で入出力する。"""
+    from es_sim.ui_schema import project_schema
+
+    schema = project_schema()
+    missing = []
+    for name, d in [("Project", schema), *schema["$defs"].items()]:
+        for key, prop in d.get("properties", {}).items():
+            types = {prop.get("type")} | {a.get("type") for a in prop.get("anyOf", [])}
+            if "number" in types and "x-unit" not in prop:
+                missing.append(f"{name}.{key}")
+    assert missing == []
+    props = schema["$defs"]["PicSettings"]["properties"]
+    assert props["dt"]["x-unit"] == "s" and props["threads"]["x-advanced"] is True
+    assert schema["$defs"]["CircleShape"]["properties"]["center"]["x-geom"] is True
+    # 分子の直径は幾何の長さではない (mm で表示しない)
+    assert "x-geom" not in schema["$defs"]["DsmcGas"]["properties"]["d_ref_m"]
+
+
+def test_ui_schema_snapshot_is_current():
+    """ui/src/schema/project.schema.json が schema.py と一致する (違えば python -m es_sim.ui_schema で書き直す)。"""
+    from es_sim.ui_schema import SNAPSHOT, snapshot_text
+
+    assert SNAPSHOT.exists(), "python -m es_sim.ui_schema で ui/src/schema/project.schema.json を作ってください"
+    assert json.loads(SNAPSHOT.read_text(encoding="utf-8")) == json.loads(snapshot_text()), (
+        "UI に同梱したスキーマが古い: python -m es_sim.ui_schema で書き直してください"
+    )
+
+
 def test_examples_bundled_in_the_ui_are_valid_projects():
     files = sorted(EXAMPLES.glob("*.json"))
     assert files, "examples/*.json が見つかりません"

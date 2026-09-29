@@ -41,6 +41,27 @@ export function lengthUnitLabel(unit: LengthUnit): string {
   return unit === "um" ? "µm" : "mm";
 }
 
+const SI: [number, string][] = [
+  [1e12, "T"],
+  [1e9, "G"],
+  [1e6, "M"],
+  [1e3, "k"],
+  [1, ""],
+  [1e-3, "m"],
+  [1e-6, "µ"],
+  [1e-9, "n"],
+  [1e-12, "p"],
+];
+
+/** SI 接頭辞を付けた表示 (13560000 Hz → "13.56 MHz") */
+export function formatSi(v: number, unit: string, digits = 4): string {
+  if (!Number.isFinite(v)) return `${v} ${unit}`;
+  if (v === 0) return `0 ${unit}`;
+  const a = Math.abs(v);
+  const [scale, prefix] = SI.find(([s]) => a >= s * 0.9999999) ?? SI[SI.length - 1];
+  return `${Number((v / scale).toPrecision(digits))} ${prefix}${unit}`;
+}
+
 /** 経過時間 m:ss / h:mm:ss (v1 のステータスバーと同じ) */
 export function formatElapsed(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds));
