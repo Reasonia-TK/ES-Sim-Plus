@@ -5,7 +5,8 @@ GPU 版は CPU 版 (CartesianFluid2dSimulation) と同じ離散化・同じ BiCG
 読み書き (デバイスが正、読むとホストへ写す)、Poisson の 3 経路 (密な直接法・同期なしの GMG-PCG・
 特異な問題の同期版)、Boltzmann 係数モデル、続き実行、server / 振り分けを確かめる。
 合成格子 (AMR) 版 (GpuAmrFluid2dSimulation: 輸送は同じカーネル、Poisson は GPU の AMG-PCG) も
-CPU の AmrFluid2dSimulation と一致することを確かめる (prompts/128)。
+CPU の AmrFluid2dSimulation と一致することを確かめる (prompts/128)。サブステップ数の上限・サブステップ間の
+停止 (デバイスの状態の巻き戻し)・Joule 緩和時間 (電子がほぼ空の節点を除く) も v1 と同じ判定になること。
 """
 
 from __future__ import annotations
@@ -197,6 +198,95 @@ def test_frames_carry_device_state():
     last = frames[-1]
     assert np.allclose(last["n_e"], sim.n_e) and np.allclose(last["phi"], sim.phi)
     assert last["counts"]["n_e_total"] == sim.history["n_e_total"][-1]
+
+
+# ---- サブステップの制御 (v1 fluid2d の上限・停止・τ_J と同じ判定) ---------------------------------
+
+
+def test_dc_cathode_sheath_substeps_match_cpu():
+    """健全な DC 放電: 陰極シースのほぼ空の節点を τ_J から除き、サブステップ数がステップごとに CPU 版と
+    同じで少ない (除外を忘れると 1 ステップ数千万回を要求して上限で ValueError になる)。"""
+    bnd = [{"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": 100.0},
+           {"edges": [0, 2], "type": "symmetry"}]
+    p = _project([], bnd, size=2e-3, w=0.1, h=0.05, init_density_m3=1e15, init_te_ev=2.0, gas_pressure_pa=50.0)
+    cpu = CartesianFluid2dSimulation(p.model_copy(deep=True), device="cpu")
+    gpu = GpuCartesianFluid2dSimulation(p.model_copy(deep=True))
+    counts = {"cpu": [], "gpu": []}
+
+    def counting(name, f):
+        def wrapped(*a, **kw):
+            counts[name][-1] += 1
+            return f(*a, **kw)
+        return wrapped
+
+    cpu._step_once = counting("cpu", cpu._step_once)
+    gpu._g.substep = counting("gpu", gpu._g.substep)
+    for _ in range(200):
+        for name, sim in (("cpu", cpu), ("gpu", gpu)):
+            counts[name].append(0)
+            sim.step()
+    assert counts["gpu"] == counts["cpu"] and max(counts["gpu"]) <= 5
+    assert _rel(cpu.phi, gpu.phi) < 1e-9 and _rel(cpu.n_e, gpu.n_e) < 1e-9
+    assert float(np.max(gpu.phi)) < 110.0
+
+
+def test_substep_limit_raises_without_changing_device_state():
+    sim = GpuCartesianFluid2dSimulation(_project(init_density_m3=1e15, gas_pressure_pa=50.0, dt=1e-9))
+    sim.step()
+    before = {k: getattr(sim, k).copy() for k in ("n_e", "n_i", "w", "phi")}
+    wall = dict(sim.wall)
+    sim._max_substeps = 1
+    with pytest.raises(ValueError, match="上限 1 "):
+        sim.step()
+    assert sim.step_count == 1 and len(sim.history["step"]) == 1
+    for k, arr in before.items():
+        assert np.array_equal(getattr(sim, k), arr), k
+    assert sim.wall == wall
+
+
+def test_stop_between_substeps_rolls_back_device_state_and_continues_identically():
+    """サブステップの合間の停止要求: デバイスの状態 (壁損失・生成の積算を含む) をステップ開始時に戻して
+    None を返し、続きは中断なしの実行とビット一致する (決定的な集約・密な直接法の Poisson)。"""
+    p = _project(init_density_m3=1e15, gas_pressure_pa=50.0, dt=1e-9)
+    sim = GpuCartesianFluid2dSimulation(p.model_copy(deep=True))
+    ref = GpuCartesianFluid2dSimulation(p.model_copy(deep=True))
+    assert sim._g.poisson.direct
+    sim.step()
+    ref.step()
+    keys = ("n_e", "n_i", "w", "phi")
+    before = {k: getattr(sim, k).copy() for k in keys}
+    for k in keys:                                       # ref も同じく読んで (ホスト → デバイスの戻し) 揃える
+        getattr(ref, k)
+    n_checks = 0
+
+    def stop_at_third_check():
+        nonlocal n_checks
+        n_checks += 1
+        return n_checks >= 3
+
+    assert sim.step(stop_at_third_check) is None
+    assert n_checks == 3 and sim.step_count == 1 and len(sim.history["t"]) == 1
+    for k in keys:
+        assert np.array_equal(getattr(sim, k), before[k]), k
+    sim.step()
+    ref.step()
+    for k in keys:
+        assert np.array_equal(getattr(sim, k), getattr(ref, k)), k
+    assert sim.wall == ref.wall and sim.gen_total == ref.gen_total
+
+
+def test_run_batch_stop_request_within_a_step_on_gpu():
+    """run_batch の停止要求がステップの途中 (サブステップの合間) でも効き、履歴は完了したステップだけ。"""
+    sim = GpuCartesianFluid2dSimulation(_project(init_density_m3=1e15, gas_pressure_pa=50.0, dt=1e-9, n_steps=5))
+    calls = 0
+
+    def stop_soon():
+        nonlocal calls
+        calls += 1
+        return calls > 4                                  # 1 ステップ目の途中で停止
+    hist, _ = sim.run_batch(should_stop=stop_soon, store_frames=False)
+    assert sim.step_count == 0 and hist["t"] == []
+    assert np.all(np.isfinite(sim.n_e))
 
 
 # ---- 合成格子 (AMR) 版 ------------------------------------------------------------------

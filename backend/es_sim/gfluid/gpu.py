@@ -11,7 +11,9 @@ CartesianFluid2dSimulation (gfluid.simulation) と同じ輸送グラフ・物理
 - Poisson は GPU の GMG-PCG (未知数 4096 以下は密な逆行列で厳密に解く、_EbPoisson)。AMR 版
   (gfluid.amr.GpuAmrFluid2dSimulation) は合成格子の AMG-PCG (_AmrPoisson、prompts/128)。
 - ホストとの同期は 1 ステップに 1 回の統計 (全量・壁損失・発散検出・次のステップのサブステップ
-  制御量) と、BiCGSTAB・GMG の収束判定だけ。
+  制御量) と、BiCGSTAB・GMG の収束判定だけ。サブステップ数の上限 (超えたら ValueError)・サブステップの
+  合間の停止要求 (デバイスの状態をその場でステップ開始時へ戻す)・Joule 緩和時間 (体積あたりの加熱率、
+  電子がほぼ空の節点を除く) は v1 の step と同じ判定。
 - n_e / n_i / w / phi はデバイスが正。属性として読むとホストへ写し、代入 (または読んだ配列の
   書き換え) は次のステップの前にデバイスへ戻す。フレーム・時間平均・位相分解は v1 と同じ形。
 
@@ -57,7 +59,8 @@ _P_RR, _P_BB = 5, 6
 _KERNELS = (
     "fl_coeffs", "fl_edges", "fl_nodes", "fl_wall_ci", "fl_wall_diag", "fl_diag", "fl_rhs", "fl_floor",
     "fl_see", "fl_gwe", "fl_joule", "fl_scale2", "fl_energy_off", "fl_wallgen", "fl_poisson_rhs",
-    "fl_fixed", "bcg_init", "bcg_p", "bcg_v", "bcg_s", "bcg_t", "bcg_x", "fl_stats", "fl_accum", "fl_tri_e",
+    "fl_fixed", "bcg_init", "bcg_p", "bcg_v", "bcg_s", "bcg_t", "bcg_x", "fl_nemax", "fl_stats", "fl_accum",
+    "fl_tri_e",
 )
 
 
@@ -111,20 +114,29 @@ class GpuCartesianFluid2dSimulation(CartesianFluid2dSimulation):
     # ---- 1 ステップ (v1 Fluid2dSimulation.step と同じサブステップ分割) ---------------------------
 
     def step(self, should_stop=None):
-        """1 ステップ。戻り値は φ のデバイス配列 (run_batch は None を途中停止と見なす)。"""
+        """1 ステップ (v1 の step と同じ判定: サブステップ数の上限超過は状態を変えずに ValueError、
+        サブステップの合間の停止要求はステップ開始時の状態へ戻して None)。
+
+        戻り値は φ のデバイス配列 (run_batch は None を途中停止と見なし、発散検出は _state_finite)。
+        """
         g = self._g
         g.push()
         dt = self.dt
         t = self.t
+        tau_d = EPS0 / (QE * max(g.ctl_nemu, 1.0e-300))
+        dt_diff_bound = 0.5 * self.h_min**2 / max(g.ctl_de, 1.0e-300)
+        n_sub = self._substep_count(
+            dt, (("誘電緩和時間", 0.5 * tau_d), ("拡散 CFL", dt_diff_bound), ("Joule 加熱", 0.5 * g.ctl_joule))
+        )
         accumulating = self._accum_start is not None and self.step_count + 1 >= self._accum_start
         if accumulating:
             self._ensure_accumulators()
-        tau_d = EPS0 / (QE * max(g.ctl_nemu, 1.0e-300))
-        dt_diff_bound = 0.5 * self.h_min**2 / max(g.ctl_de, 1.0e-300)
-        dt_bound = min(0.5 * tau_d, dt_diff_bound, 0.5 * g.ctl_joule)
-        n_sub = max(1, math.ceil(dt / dt_bound))
         dt_sub = dt / n_sub
+        saved = self._save_step_state() if should_stop is not None and n_sub > 1 else None
         for k in range(n_sub):
+            if saved is not None and k > 0 and should_stop():
+                self._restore_step_state(saved)
+                return None
             g.substep(dt_sub, t + k * dt_sub)
         self.t = t + dt
         self.step_count += 1
@@ -143,6 +155,23 @@ class GpuCartesianFluid2dSimulation(CartesianFluid2dSimulation):
 
     def _state_finite(self, phi) -> bool:
         return self._g.n_bad == 0
+
+    def _save_step_state(self):
+        """ステップ開始時のデバイスの状態 (n_e・n_i・w・φ と壁損失・生成の積算) の複製。"""
+        g = self._g
+        with g.stream:
+            return tuple(a.copy() for a in (g.ne, g.ni, g.w, g.phi, g.acc_wg))
+
+    def _restore_step_state(self, saved) -> None:
+        """退避した状態へその場で戻す (CUDA Graph が配列のポインタを持つので差し替えない)。
+
+        ホスト側の壁損失・生成の累計・全量・制御量はステップの終わりにしか更新しないので戻す必要が無い。
+        """
+        g = self._g
+        with g.stream:
+            for dst, src in zip((g.ne, g.ni, g.w, g.phi, g.acc_wg), saved):
+                dst[...] = src
+            g.version += 1           # 途中のサブステップで読まれたホスト側の写しを無効にする
 
     # ---- 時間平均・位相分解 (デバイスで積算し、取り出すときに v1 の形へ) ---------------------------
 
@@ -406,6 +435,7 @@ class _GpuFluid:
             setattr(self, name, cp.zeros(n_edges))
         self.ci = cp.zeros(max(self.n_wall, 1))
         self.part = cp.zeros(7 * NB)
+        self.nemax = cp.zeros(NB)
         self.S = cp.zeros(8)
         self.stat = cp.zeros(9 * NB + 2)   # [統計 6 × NB | 壁損失・生成の積算 3 × NB | 係数表範囲外 | 予備]
         self.acc_wg = self.stat[6 * NB:9 * NB]
@@ -688,8 +718,10 @@ class _GpuFluid:
 
     def _stats(self) -> None:
         sim = self.sim
+        n = np.int32(self.n)
+        self.k["fl_nemax"]((NB,), (NT,), (self.ne, n, self.nemax))
         self.k["fl_stats"]((NB,), (NT,), (self.ne, self.ni, self.w, self.vol, self.mue, self.te, self.joule,
-                                         np.int32(self.n), self.phi, np.int32(self.nn), self.stat))
+                                         n, self.phi, np.int32(self.nn), self.nemax, self.stat))
         h = self.stat.get()
         self.ne_total = float(h[0:NB].sum())
         self.ni_total = float(h[NB:2 * NB].sum())

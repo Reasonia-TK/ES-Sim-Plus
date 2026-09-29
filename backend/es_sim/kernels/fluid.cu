@@ -65,6 +65,21 @@ __device__ void fl_store(double v, double* sh, double* part, int slot, int mode)
     __syncthreads();
 }
 
+// max of the FL_NB partials of a slot (every block computes the same value in the same order)
+__device__ double fl_max_all(const double* part, int slot, double* sh)
+{
+    int t = threadIdx.x;
+    sh[t] = part[slot * FL_NB + t];
+    __syncthreads();
+    for (int w = FL_NT / 2; w > 0; w >>= 1) {
+        if (t < w) sh[t] = fmax(sh[t], sh[t + w]);
+        __syncthreads();
+    }
+    double r = sh[0];
+    __syncthreads();
+    return r;
+}
+
 // sum of the FL_NB partials of a slot (every block computes the same value in the same order)
 __device__ double fl_total(const double* part, int slot, double* sh)
 {
@@ -506,11 +521,25 @@ extern "C" __global__ void bcg_x(double* x, double* r, const double* s, const do
 
 // partial slots of out (FL_NB each): 0 sum n_e V, 1 sum n_i V, 2 non-finite count, 3 max n_e mu_e,
 // 4 max mu_e Te, 5 min w / Joule heating (heating > 0 only). Launch with FL_NB x FL_NT.
-extern "C" __global__ void fl_stats(const double* ne, const double* ni, const double* w, const double* vol,
-                                    const double* mue, const double* te, const double* joule, int n,
-                                    const double* phi, int nn, double* out)
+// per-block max of n_e (input of fl_stats: the Joule time scale skips nearly empty nodes)
+extern "C" __global__ void fl_nemax(const double* ne, int n, double* out)
 {
     __shared__ double sh[FL_NT];
+    double m = -1.0e308;
+    FL_LOOP(k, n)
+    {
+        m = fmax(m, ne[k]);
+    }
+    fl_store(m, sh, out, 0, 1);
+}
+
+extern "C" __global__ void fl_stats(const double* ne, const double* ni, const double* w, const double* vol,
+                                    const double* mue, const double* te, const double* joule, int n,
+                                    const double* phi, int nn, const double* nemax, double* out)
+{
+    __shared__ double sh[FL_NT];
+    // fluid2d._joule_relaxation_time: heating per volume, nodes with n_e <= 1e-3 max(n_e) excluded
+    double thr = 1.0e-3 * fl_max_all(nemax, 0, sh);
     double se = 0.0, si = 0.0, bad = 0.0, m1 = 0.0, m2 = 0.0, m3 = 1.0e308;
     FL_LOOP(k, n)
     {
@@ -520,8 +549,8 @@ extern "C" __global__ void fl_stats(const double* ne, const double* ni, const do
         if (!isfinite(a) || !isfinite(b) || !isfinite(c)) bad += 1.0;
         m1 = fmax(m1, a * mue[k]);
         m2 = fmax(m2, mue[k] * te[k]);
-        double h = joule[k];
-        if (h > 0.0) m3 = fmin(m3, c / fmax(h, 1.0e-300));
+        double h = fmax(joule[k], 0.0) / vol[k];
+        if (a > thr && h > 0.0) m3 = fmin(m3, c / fmax(h, 1.0e-300));
     }
     FL_LOOP(k, nn)
     {
