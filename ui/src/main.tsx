@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import { App } from "./app/App";
 import { ErrorBoundary } from "./app/ErrorBoundary";
 import { startConnection } from "./backend/connection";
+import { startJobEffects } from "./jobs/effects";
+import { startJobEvents } from "./jobs/jobsStore";
 import { t } from "./i18n";
 import { offerRecovery, startAutosave } from "./io/autosave";
 import { findExample } from "./io/examples";
@@ -24,6 +26,7 @@ createRoot(document.getElementById("root")!).render(
   </StrictMode>,
 );
 
-void startConnection();
+void startConnection().then(() => startJobEvents());
+startJobEffects();
 void offerRecovery();
 startAutosave();

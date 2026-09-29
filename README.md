@@ -177,6 +177,8 @@ PIC-MCC統合ではTurnerベンチマーク(M. M. Turner et al., *Phys. Plasmas*
 - 検証: 平衡箱の n/T/p 保持(3%以内)、自由分子流の解析値一致(リザーバの1/2密度・c̄/2流速、
   5%以内)、圧力駆動チャネル流の質量収支(10%以内)
 - WebSocketライブ実行(`/ws/pic`: 進捗・φ・粒子・診断のストリーミング、停止可)
+- UI v2 はジョブ (`/v2/jobs`・`WS /v2/events`、[prompts/130](prompts/130-ui-v2-plan.md) P6d) で実行する: 同じソルバーの
+  同時実行・待ち行列・停止・続き・実行ごとの結果
 
 ### v2 エンジン(`mesh.mode: "cartesian"`、再構築中 — [prompts/119](prompts/119-v2-rebuild-plan.md))
 

@@ -14,6 +14,8 @@ import { dsmcParticlesPerCell } from "../../util/runHints";
 import { CommitText, Field } from "../inputs";
 import { Hint } from "../widgets/common";
 import { ListEditor } from "../widgets/ListEditor";
+import { SweepCases } from "../widgets/SweepCases";
+import { RunControls } from "../widgets/RunControls";
 import { StudyShell } from "./StudyShell";
 import { useSelection } from "../../model/selection";
 
@@ -108,7 +110,7 @@ export function DsmcPage() {
   const sel = useSelection((s) => s.selectedPlacement);
   const P = ["dsmc"] as const;
   return (
-    <StudyShell settingsKey="dsmc" defaults={defaultDsmc} description={t("dsmcPage.description")}>
+    <StudyShell settingsKey="dsmc" defaults={defaultDsmc} description={t("dsmcPage.description")} run={<RunControls kind="dsmc" />}>
       <Section title={t("dsmcPage.gas")}>
         <SchemaField path={[...P, "gas", "name"]} />
         <SchemaField path={[...P, "gas", "mass_amu"]} />
@@ -154,7 +156,7 @@ export function TlPage() {
   const sheathBad = (tl.sheath_m ?? 0) * 2 >= (tl.gap_m ?? Infinity);
   const fftBad = (tl.n_fft_periods ?? 0) >= (tl.n_periods ?? Infinity);
   return (
-    <StudyShell settingsKey="tl" defaults={defaultTl} description={t("tlPage.description")}>
+    <StudyShell settingsKey="tl" defaults={defaultTl} description={t("tlPage.description")} run={<RunControls kind="tl" />}>
       <Section title={t("tlPage.geometry")}>
         <SchemaField path={[...P, "radius_m"]} />
         <SchemaField path={[...P, "gap_m"]} />
@@ -266,7 +268,13 @@ export function SweepPage() {
           />
         )}
       </Field>
-      <Hint>{t("sweepPage.runLater")}</Hint>
+      <RunControls
+        kind="sweep"
+        runLabel={t("sweepPage.runSweep")}
+        blocked={!s.param_path || current === undefined ? t("sweepPage.needPath") : values.length === 0 ? t("sweepPage.noValues") : null}
+        options={() => ({ param_path: s.param_path, values, parallel: s.parallel, module: sweepModuleForPath(s.param_path) })}
+      />
+      <SweepCases />
     </>
   );
 }

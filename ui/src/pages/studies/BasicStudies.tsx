@@ -9,6 +9,7 @@ import { formatNumber } from "../../util/format";
 import { defaultParticles } from "../../schema/defaults";
 import { Hint } from "../widgets/common";
 import { FnSection } from "../widgets/FnSection";
+import { RunControls } from "../widgets/RunControls";
 import { SolveSummary } from "../widgets/StaticRun";
 import { StudyShell } from "./StudyShell";
 
@@ -51,7 +52,7 @@ export function TracePage() {
   const maxwell = ps?.emitter?.energy_dist === "maxwell";
   const e = ["particles", "emitter"] as const;
   return (
-    <StudyShell settingsKey="particles" defaults={() => defaultParticles(project)} description={t("tracePage.description")}>
+    <StudyShell settingsKey="particles" defaults={() => defaultParticles(project)} description={t("tracePage.description")} run={<RunControls kind="trace" />}>
       {fnOn ? (
         <Hint>{t("tracePage.fnReplaces")}</Hint>
       ) : (

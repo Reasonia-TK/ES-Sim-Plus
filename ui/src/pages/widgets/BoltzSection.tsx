@@ -1,5 +1,5 @@
 // 電子の係数モデル (Maxwell / Boltzmann) と boltzpm の係数表の情報・鮮度 (流体 1D・2D)。
-// 表の生成 (/ws/boltz) は実行の仕組み (P6d) と一緒に作る。
+// 表の生成は boltzpm のジョブ (BoltzGenerate)。
 
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -8,6 +8,7 @@ import { useDocument } from "../../model/documentStore";
 import { getIn, type Path } from "../../schema/schema";
 import { computeProcessesHash, type XsProcessLike } from "../../util/boltzHash";
 import { formatNumber } from "../../util/format";
+import { BoltzGenerate } from "./BoltzGenerate";
 import { Hint } from "./common";
 
 interface BoltzTable {
@@ -85,9 +86,8 @@ export function BoltzSection({ path }: { path: Path }) {
             {t("widgets.boltzDelete")}
           </button>
         </>
-      ) : (
-        <Hint>{t("widgets.boltzGenerateLater")}</Hint>
-      )}
+      ) : null}
+      {(path[0] === "fluid1d" || path[0] === "fluid2d") && <BoltzGenerate module={path[0]} />}
     </div>
   );
 }

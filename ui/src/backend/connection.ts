@@ -13,6 +13,8 @@ export interface BackendInfo {
   numba: boolean;
   /** サーバープロセスの識別子 (変われば再起動した。古いバックエンドは返さない) */
   instance?: string;
+  /** UI v2 のジョブ (/v2/jobs・/v2/events) がある */
+  jobs?: boolean;
   v2?: Record<string, unknown>;
 }
 
@@ -42,6 +44,7 @@ export function parseHealth(body: unknown): BackendInfo {
     gpu: Boolean(b.gpu),
     numba: b.numba === undefined ? true : Boolean(b.numba),
     instance: typeof b.instance === "string" ? b.instance : undefined,
+    jobs: b.jobs === true,
     v2: (b.v2 as Record<string, unknown> | undefined) ?? undefined,
   };
 }

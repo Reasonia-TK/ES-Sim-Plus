@@ -11,6 +11,7 @@ import {
   type Project,
 } from "../model/project";
 import type { NodeId } from "../model/selection";
+import type { JobKind, JobSummary } from "../jobs/types";
 import { formatNumber, lengthUnitLabel, toDisplayLength, type LengthUnit } from "../util/format";
 
 export type BadgeTone = "muted" | "ok" | "warn" | "error" | "run";
@@ -87,12 +88,56 @@ function bfieldDetail(p: Project): string {
   return `(${formatNumber(b.bx ?? 0)}, ${formatNumber(b.by ?? 0)}, ${formatNumber(b.bz ?? 0)}) T`;
 }
 
+/** スタディ → ジョブの種類 (静電場はジョブではない) */
+export const STUDY_JOB_KIND: Record<StudyKind, JobKind | null> = {
+  fem: null,
+  trace: "trace",
+  pic: "pic",
+  pic1d: "pic1d",
+  fluid1d: "fluid1d",
+  fluid2d: "fluid2d",
+  dsmc: "dsmc",
+  tl: "tl",
+  sweep: "sweep",
+};
+
+function runName(j: JobSummary, t: TFunction): string {
+  return `${j.label ?? t(`jobs.kind.${j.kind}`)} #${j.seq}`;
+}
+
+const STATE_TONE: Record<JobSummary["state"], BadgeTone> = {
+  queued: "muted",
+  running: "run",
+  done: "ok",
+  stopped: "warn",
+  error: "error",
+  cancelled: "muted",
+};
+
+function pct(j: JobSummary): string {
+  const f = j.progress?.fraction;
+  return f === null || f === undefined ? "" : ` ${Math.round(f * 100)}%`;
+}
+
+/** 実行の状態の印 (実行中の進捗、待ち、直近の失敗)。無ければ null */
+function runBadge(jobs: JobSummary[], t: TFunction): TreeNode["badge"] | null {
+  if (jobs.length === 0) return null;
+  const running = jobs.filter((j) => j.state === "running");
+  if (running.length) return { text: `${t("jobs.state.running")}${pct(running[0])}${running.length > 1 ? ` +${running.length - 1}` : ""}`, tone: "run" };
+  if (jobs.some((j) => j.state === "queued")) return { text: t("jobs.state.queued"), tone: "muted" };
+  const latest = jobs[0];
+  if (latest.state === "error") return { text: t("jobs.state.error"), tone: "error" };
+  if (latest.state === "done" || latest.state === "stopped") return { text: t(`jobs.state.${latest.state}`), tone: STATE_TONE[latest.state] };
+  return null;
+}
+
 export function studyConfigured(p: Project, kind: StudyKind): boolean {
   const key = STUDY_SETTINGS_KEY[kind];
   return key === null ? true : p[key] !== null && p[key] !== undefined;
 }
 
-export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: string): TreeNode {
+export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: string, jobs: JobSummary[] = []): TreeNode {
+  const newest = [...jobs].sort((a, b) => b.created - a.created);
   const regions: TreeNode[] = p.geometry.regions.map((r) => ({
     id: `region:${r.id}`,
     label: r.id,
@@ -106,14 +151,18 @@ export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: s
   const studies: TreeNode[] = STUDIES.map((kind) => {
     const configured = studyConfigured(p, kind);
     const hasBlock = STUDY_SETTINGS_KEY[kind] !== null;
+    const jk = STUDY_JOB_KIND[kind];
+    const run = jk ? runBadge(newest.filter((j) => j.kind === jk), t) : null;
     return {
       id: `study:${kind}`,
       label: t(`study.${kind}`),
-      badge: hasBlock
-        ? configured
-          ? { text: t("tree.configured"), tone: "ok" }
-          : { text: t("tree.notConfigured"), tone: "muted" }
-        : undefined,
+      badge:
+        run ??
+        (hasBlock
+          ? configured
+            ? { text: t("tree.configured"), tone: "ok" }
+            : { text: t("tree.notConfigured"), tone: "muted" }
+          : undefined),
     };
   });
   return {
@@ -140,7 +189,14 @@ export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: s
       {
         id: "results",
         label: t("tree.results"),
-        children: [{ id: "results.empty", label: t("tree.noResults"), placeholder: true }],
+        detail: newest.length ? String(newest.length) : undefined,
+        children: newest.length
+          ? newest.map((j) => ({
+              id: `result:${j.id}`,
+              label: runName(j, t),
+              badge: { text: `${t(`jobs.state.${j.state}`)}${j.state === "running" ? pct(j) : ""}`, tone: STATE_TONE[j.state] },
+            }))
+          : [{ id: "results.empty", label: t("tree.noResults"), placeholder: true }],
       },
     ],
   };

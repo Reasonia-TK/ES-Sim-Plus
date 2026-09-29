@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 
@@ -45,6 +46,7 @@ from .xs.api import XsParseRequest, XsParseResponse, parse_xs_text
 from .device import describe as describe_device
 from .field.compat import cartesian_mesh_result, cartesian_profile, cartesian_solve
 from .gpic import make_pic_simulation
+from .jobs import Hooks, JobManager, default_runners, make_router
 from .schema import (
     DsmcResultModel,
     ElectrodeCharge,
@@ -103,6 +105,8 @@ def health():
         # "gpu" は v2 エンジン (mesh.mode="cartesian") が CUDA を使えるか (prompts/119)
         "gpu": bool(dev["cuda"]) or gpu_available(),
         "numba": _numba_kernels.HAVE_NUMBA,
+        # UI v2 のジョブ (/v2/jobs・/v2/events、prompts/130 P6d) がある
+        "jobs": True,
         "v2": dev,
     }
 
@@ -1610,3 +1614,34 @@ def sweep_result_endpoint(i: int) -> dict:
         raise HTTPException(status_code=404, detail=f"ケース {i} の結果がありません (未完了または失敗)")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+# ---- UI v2 のジョブ (/v2/jobs・/v2/events、prompts/130 P6d) ----------------------------------
+#
+# v1 の WebSocket (ソルバーの種類ごとに 1 実行・1 保持スロット) はそのまま残し、UI v2 はこちらを使う。
+# 同じソルバーの同時実行・実行ごとの結果・停止・続き・イベントの多重化は es_sim.jobs が受け持つ。
+# DSMC の結果は v1 と同じ保持スロット (_last_dsmc: PIC の use_dsmc_gas が使う) にも入れ、ジョブごとの
+# ガス場も新しい方から 8 件持つ (PIC のジョブに options.dsmc_job を渡すとそれを使う)。
+
+_job_gas_fields: "OrderedDict[str, GasField]" = OrderedDict()
+
+
+def _store_dsmc_for_job(sim, res, job_id: str) -> None:
+    _store_dsmc_result(sim, res)
+    _job_gas_fields[job_id] = _last_dsmc["field"]
+    while len(_job_gas_fields) > 8:
+        _job_gas_fields.popitem(last=False)
+
+
+jobs = JobManager(
+    default_runners(),
+    # スイープは自分で子プロセスを並べる、Boltzmann の表は 1 本ずつで足りる
+    per_kind={"sweep": 1, "boltz": 1},
+    ctx=Hooks(
+        store_dsmc=_store_dsmc_for_job,
+        last_dsmc_field=lambda: None if _last_dsmc is None else _last_dsmc["field"],
+        dsmc_result=lambda sim, res: _dsmc_result_model(sim, res).model_dump(),
+        job_dsmc_field=lambda job_id: _job_gas_fields.get(job_id),
+    ),
+)
+app.include_router(make_router(jobs, SERVER_INSTANCE))

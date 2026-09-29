@@ -1,9 +1,16 @@
-// 下部パネル: メッセージ (レベルで絞れる)・進捗・ジョブ (進捗とジョブは P6d)。
+// 下部パネル: メッセージ (レベルで絞れる)・進捗 (実行中・待ちのジョブ)・ジョブ (全部)。
 
 import { Tabs } from "radix-ui";
 import { useEffect, useRef, useState } from "react";
+import { create } from "zustand";
+import { JobsView, ProgressView } from "../jobs/JobsPanels";
 import { useTranslation } from "react-i18next";
 import { useMessages, type MessageLevel } from "./messages";
+
+export type BottomTab = "messages" | "progress" | "jobs";
+
+/** 開いているタブ (ステータスバーから「進捗」を開く) */
+export const useBottomTab = create<{ tab: BottomTab; setTab: (t: BottomTab) => void }>()((set) => ({ tab: "messages", setTab: (tab) => set({ tab }) }));
 
 function MessagesView() {
   const { t, i18n } = useTranslation();
@@ -49,8 +56,10 @@ function MessagesView() {
 
 export function BottomPanel() {
   const { t } = useTranslation();
+  const tab = useBottomTab((s) => s.tab);
+  const setTab = useBottomTab((s) => s.setTab);
   return (
-    <Tabs.Root className="bottom-panel" defaultValue="messages">
+    <Tabs.Root className="bottom-panel" value={tab} onValueChange={(v) => setTab(v as BottomTab)}>
       <Tabs.List className="tabs-list" aria-label={t("bottom.messages")}>
         <Tabs.Trigger className="tabs-trigger" value="messages">
           {t("bottom.messages")}
@@ -66,10 +75,10 @@ export function BottomPanel() {
         <MessagesView />
       </Tabs.Content>
       <Tabs.Content className="tabs-content" value="progress">
-        <div className="muted pad">{t("bottom.notYet")}</div>
+        <ProgressView />
       </Tabs.Content>
       <Tabs.Content className="tabs-content" value="jobs">
-        <div className="muted pad">{t("bottom.notYet")}</div>
+        <JobsView />
       </Tabs.Content>
     </Tabs.Root>
   );

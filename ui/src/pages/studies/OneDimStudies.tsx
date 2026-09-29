@@ -17,6 +17,7 @@ import { ListEditor, nextLabel } from "../widgets/ListEditor";
 import { ProcessList } from "../widgets/ProcessList";
 import { PhaseBinHint, RfCycleHint } from "../widgets/RunHints";
 import { MccBlock } from "./PicPage";
+import { RunControls } from "../widgets/RunControls";
 import { StudyShell } from "./StudyShell";
 
 interface Electrode {
@@ -103,7 +104,7 @@ export function Pic1dPage() {
   const freqs = electrodeFreqs(blk.left, blk.right);
   const P = ["pic1d"] as const;
   return (
-    <StudyShell settingsKey="pic1d" defaults={defaultPic1d} description={t("pic1dPage.description")}>
+    <StudyShell settingsKey="pic1d" defaults={defaultPic1d} description={t("pic1dPage.description")} run={<RunControls kind="pic1d" />}>
       <Section title={t("pic1dPage.presets")}>
         <Presets />
       </Section>
@@ -222,7 +223,7 @@ export function Fluid1dPage() {
       }
     });
   return (
-    <StudyShell settingsKey="fluid1d" defaults={defaultFluid1d} description={t("fluidPage.description1d")}>
+    <StudyShell settingsKey="fluid1d" defaults={defaultFluid1d} description={t("fluidPage.description1d")} run={<RunControls kind="fluid1d" />}>
       <div className="button-row tight">
         <button type="button" className="button small" disabled={!pic1d} onClick={importPic1d} title={pic1d ? undefined : t("fluidPage.noPic1d")}>
           {t("fluidPage.importPic1d")}
@@ -272,7 +273,7 @@ export function Fluid2dPage() {
       dst.electron_processes = JSON.parse(JSON.stringify(src.electron_processes ?? []));
     });
   return (
-    <StudyShell settingsKey="fluid2d" defaults={defaultFluid2d} description={t("fluidPage.description2d")}>
+    <StudyShell settingsKey="fluid2d" defaults={defaultFluid2d} description={t("fluidPage.description2d")} run={<RunControls kind="fluid2d" />}>
       <div className="button-row tight">
         <button type="button" className="button small" disabled={!hasF1} onClick={importFluid1d} title={hasF1 ? undefined : t("fluidPage.noFluid1d")}>
           {t("fluidPage.importFluid1d")}

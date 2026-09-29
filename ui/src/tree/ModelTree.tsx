@@ -11,6 +11,7 @@ import { addCircleRegion, addRectRegion, deleteRegion, duplicateRegion, renameRe
 import { useSelection, type NodeId } from "../model/selection";
 import { CommitText } from "../pages/inputs";
 import { usePrefs } from "../prefs/prefs";
+import { useJobs } from "../jobs/jobsStore";
 import { buildTree, filterTree, visibleNodes, type TreeNode } from "./treeModel";
 
 /** 境界条件の枝を最初から開いておく辺の数の上限 (同軸の例は 64 辺) */
@@ -48,7 +49,8 @@ export function ModelTree() {
   const [renameError, setRenameError] = useState<string | null>(null);
   const treeRef = useRef<HTMLDivElement>(null);
 
-  const root = useMemo(() => buildTree(project, t, unit, docName), [project, t, unit, docName]);
+  const jobs = useJobs((s) => s.jobs);
+  const root = useMemo(() => buildTree(project, t, unit, docName, Object.values(jobs)), [project, t, unit, docName, jobs]);
   const shown = useMemo(() => filterTree(root, query), [root, query]);
   const filtering = query.trim() !== "";
   const rows = useMemo(() => (shown ? visibleNodes(shown, expanded, filtering) : []), [shown, expanded, filtering]);

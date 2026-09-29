@@ -1292,3 +1292,131 @@ details > summary {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+/* ---- ジョブ (P6d) ---- */
+
+.run-controls {
+  margin: 4px 0 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-panel) 60%, var(--bg));
+}
+
+.job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.job-row {
+  padding: 3px 4px;
+  border-radius: 4px;
+}
+
+.job-row:hover {
+  background: var(--bg-hover);
+}
+
+.job-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.job-row-head .badge {
+  margin-left: 0;
+}
+
+.job-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.job-row-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0;
+}
+
+.job-error {
+  margin: 2px 0 0;
+}
+
+.progress {
+  position: relative;
+  flex: 1;
+  min-width: 60px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+.progress.indeterminate .progress-bar {
+  width: 30%;
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+.jobs-view {
+  height: 100%;
+  overflow: auto;
+  padding: 0 6px 6px;
+}
+
+.jobs-limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  color: var(--text-muted);
+}
+
+.jobs-limit .input {
+  width: 48px;
+  height: 22px;
+}
+
+.status-jobs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  padding: 0 6px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.status-jobs .progress {
+  width: 80px;
+  flex: 0 0 80px;
+}
+
+.continue-popover {
+  width: 280px;
+}
+
+.text-error {
+  color: var(--error);
+}

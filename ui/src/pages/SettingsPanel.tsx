@@ -8,13 +8,20 @@ import { useSelection } from "../model/selection";
 import { edgeLabel, type StudyKind } from "../tree/treeModel";
 import { BFieldPage, BoundariesPage, DomainPage, EdgePage, ProjectPage, RegionPage, RegionsPage } from "./GeometryPages";
 import { MeshPage } from "./MeshPage";
+import { RunPage } from "./RunPage";
+import { jobName, useJobs } from "../jobs/jobsStore";
+import type { JobSummary } from "../jobs/types";
 import { FemPage, TracePage } from "./studies/BasicStudies";
 import { Fluid1dPage, Fluid2dPage, Pic1dPage } from "./studies/OneDimStudies";
 import { DsmcPage, SweepPage, TlPage } from "./studies/OtherStudies";
 import { PicPage } from "./studies/PicPage";
 
-function pageTitle(node: string, project: Project, t: ReturnType<typeof useTranslation>["t"]): string {
+function pageTitle(node: string, project: Project, t: ReturnType<typeof useTranslation>["t"], jobs: Record<string, JobSummary>): string {
   if (node.startsWith("region:")) return `${t("tree.regions")} › ${node.slice(7)}`;
+  if (node.startsWith("result:")) {
+    const job = jobs[node.slice(7)];
+    return `${t("tree.results")} › ${job ? jobName(job) : "-"}`;
+  }
   if (node.startsWith("edge:")) return `${t("tree.boundaries")} › ${edgeLabel(project, Number(node.slice(5)), t)}`;
   if (node.startsWith("study:")) return t(`study.${node.slice(6) as StudyKind}`);
   const titles: Record<string, string> = {
@@ -59,6 +66,7 @@ function PageBody({ node }: { node: string }) {
   }
   if (node === "studies") return <p className="hint">{t("settings.studiesHint")}</p>;
   if (node === "results") return <p className="hint">{t("settings.resultsLater")}</p>;
+  if (node.startsWith("result:")) return <RunPage id={node.slice(7)} />;
   return null;
 }
 
@@ -66,10 +74,11 @@ export function SettingsPanel() {
   const { t } = useTranslation();
   const node = useSelection((s) => s.activeNode);
   const project = useDocument((s) => s.project);
+  const jobs = useJobs((s) => s.jobs);
   return (
     <div className="settings-panel">
       <div className="panel-header">
-        <h2 className="panel-title">{pageTitle(node, project, t)}</h2>
+        <h2 className="panel-title">{pageTitle(node, project, t, jobs)}</h2>
         <span className="spacer" />
         <AdvancedSwitch />
       </div>

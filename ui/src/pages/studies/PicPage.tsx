@@ -14,6 +14,8 @@ import { FnSection } from "../widgets/FnSection";
 import { ListEditor, nextLabel } from "../widgets/ListEditor";
 import { ProcessList } from "../widgets/ProcessList";
 import { PhaseBinHint, RfCycleHint } from "../widgets/RunHints";
+import { DsmcSourceSelect, useDsmcSource } from "../widgets/DsmcSource";
+import { RunControls } from "../widgets/RunControls";
 import { StudyShell } from "./StudyShell";
 import { useSelection } from "../../model/selection";
 
@@ -58,6 +60,21 @@ function segment(p: Project, fy: number): { p1: Point; p2: Point } {
   return { p1: [b.x0 + 0.25 * (b.x1 - b.x0), y], p2: [b.x0 + 0.75 * (b.x1 - b.x0), y] };
 }
 
+/** PIC の実行 (背景ガスに DSMC の結果を使うときは、どの実行の結果かを選ぶ) */
+function PicRun() {
+  const { t } = useTranslation();
+  const useGas = useDocument((s) => Boolean((s.project.pic as { mcc?: { use_dsmc_gas?: boolean } | null } | null)?.mcc?.use_dsmc_gas));
+  const src = useDsmcSource();
+  return (
+    <RunControls
+      kind="pic"
+      blocked={useGas && !src.available ? t("jobs.dsmcNone") : null}
+      options={() => (useGas && src.selected ? { dsmc_job: src.selected } : {})}
+      extra={useGas ? <DsmcSourceSelect source={src} /> : null}
+    />
+  );
+}
+
 export function PicPage() {
   const { t } = useTranslation();
   const project = useDocument((s) => s.project);
@@ -71,7 +88,7 @@ export function PicPage() {
   const sel = useSelection((s) => s.selectedPlacement);
   const selectPlacement = useSelection((s) => s.selectPlacement);
   return (
-    <StudyShell settingsKey="pic" defaults={() => structuredClone(DEFAULT_PIC)} description={t("picPage.description")}>
+    <StudyShell settingsKey="pic" defaults={() => structuredClone(DEFAULT_PIC)} description={t("picPage.description")} run={<PicRun />}>
       <OptionalBlock path={[...P, "initial_plasma"]} title={t("picPage.initialPlasma")} defaults={() => ({ ...DEFAULT_INITIAL_PLASMA })}>
         <SchemaField path={[...P, "initial_plasma", "density"]} />
         <SchemaField path={[...P, "initial_plasma", "te_ev"]} />
