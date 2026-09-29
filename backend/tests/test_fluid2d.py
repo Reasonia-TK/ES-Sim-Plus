@@ -528,3 +528,44 @@ def test_run_batch_stop_request_takes_effect_within_a_step():
     assert n_checks == 3
     assert sim.step_count == 0 and history["step"] == []
     assert sim.fields is None
+
+
+# ---- 9. Joule 加熱の緩和時間 τ_J (サブステップ分割の上限の一つ) ---------------------------
+
+
+def _uniform_field_tau_ratio(size: float) -> float:
+    """一様プラズマ (n_e=n_i)・一様電場 E=V0/L (上下 symmetry の帯) での τ_J / 解析値。
+
+    解析値は τ_J = w / (Joule 加熱密度) = (3/2)n_e Te / (n_e μ_e E²) = (3/2)Te / (μ_e E²)
+    (一様密度では SG フラックスが純ドリフト −μ_e n_e E になる)。
+    """
+    length, height, v0, te = 0.02, 0.004, 50.0, 3.0
+    geo = Geometry(
+        domain=Domain(polygon=[(0, 0), (length, 0), (length, height), (0, height)]),
+        boundaries=[
+            BoundaryCondition(edges=[3], type="dirichlet", voltage=0.0),
+            BoundaryCondition(edges=[1], type="dirichlet", voltage=v0),
+            BoundaryCondition(edges=[0, 2], type="symmetry"),
+        ],
+    )
+    s = Fluid2dSettings(init_density_m3=1.0e15, init_te_ev=te, gas_pressure_pa=50.0, n_steps=1)
+    sim = Fluid2dSimulation(_project2d(geo, MeshSettings(size=size, mode="structured"), s))
+    sim.phi = sim._solve_phi(0.0)  # 空間電荷 0 なので φ は電極間で線形
+    te0, mu_e0, *_ = sim._te_and_coeffs(sim.n_e[sim.active_idx], sim.w[sim.active_idx])
+    expected = 1.5 * te / (float(mu_e0[0]) * (v0 / length) ** 2)
+    return sim._joule_relaxation_time(te0, mu_e0) / expected
+
+
+def test_joule_relaxation_time_is_intensive_and_matches_uniform_field():
+    """τ_J は節点体積に依らず、一様電場の解析値 (3/2)Te/(μ_e E²) と O(1) で一致する。
+
+    以前は加熱率 (節点へ配分した外延量) を節点体積で割っておらず、τ_J が 1/V_i 倍
+    (ここでは 1e6 倍前後) 過大で、メッシュを細かくするほど大きくなっていた (上限が実質無効)。
+    最小を取るのは領域の角の節点: 三角形 1 枚だけに属し、P1 の集中体積 (1/6 セル) が
+    エッジの重みに対応する制御体積 (1/4 セル) より小さく加熱密度が 1.5 倍になるため、
+    構造格子では解析値の 2/3 になる (その節点の w の式にとってはこれが正しい時間スケール)。
+    """
+    r_coarse = _uniform_field_tau_ratio(0.002)
+    r_fine = _uniform_field_tau_ratio(0.0005)  # 節点体積は 1/16
+    assert r_fine == pytest.approx(r_coarse, rel=1e-9)
+    assert 0.5 < r_coarse <= 1.0 + 1e-9

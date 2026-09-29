@@ -331,6 +331,21 @@ def test_stop_between_substeps_rolls_back_and_continues_identically():
     assert sim.wall == ref.wall and sim.gen_total == ref.gen_total
 
 
+@pytest.mark.parametrize("coord", ["xy", "rz"])
+def test_joule_relaxation_time_matches_uniform_field_analytic(coord):
+    """一様プラズマ・一様電場 E では τ_J = (3/2)Te/(μ_e E²) (双対セルの体積と面の重みが整合し、全節点で厳密)。"""
+    v0 = 50.0
+    bnd = [{"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": v0},
+           {"edges": [0, 2], "type": "symmetry"}]
+    sim = CartesianFluid2dSimulation(
+        _project([], bnd, coord=coord, size=1e-3, fluid={"init_density_m3": 1e15, "gas_pressure_pa": 50.0}),
+        device="cpu")
+    sim.phi = sim._solve_phi(0.0)                          # 空間電荷 0 → φ は電極間で線形
+    te0, mu_e0, *_ = sim._te_and_coeffs(sim.n_e[sim.active_idx], sim.w[sim.active_idx])
+    expected = 1.5 * float(te0[0]) / (float(mu_e0[0]) * (v0 / W) ** 2)
+    assert sim._joule_relaxation_time(te0, mu_e0) == pytest.approx(expected, rel=1e-9)
+
+
 def test_rejects_periodic_boundary():
     bnd = [{"edges": [0, 2], "type": "periodic"},
            {"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": 0.0}]

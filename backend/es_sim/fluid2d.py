@@ -936,6 +936,13 @@ class Fluid2dSimulation:
         (壁損失の陰的化だけでは解消しない不安定性だったことを実測で確認済み)。
         直近 (前ステップ終了時) の φ・Te・n_e から Joule 加熱率を見積もり、
         加熱側 (正) のみを対象に w/heating の最小値を返す (冷却側は問題にならない)。
+        一様プラズマ・一様電場 E なら τ_J = (3/2)Te/(μ_e E²) (test_fluid2d.py で検証)。
+
+        注: 導入時 (prompts/111) から加熱率 (節点へ配分した外延量 [eV/s]) を節点体積で
+        割らずにエネルギー密度 w [eV/m³] と比を取っており、τ_J が 1/V_i 倍 (SI の数値で
+        通常 1e4〜1e8 倍) 過大で、この上限は解が暴走した末期にしか効いていなかった
+        (上の「実測で確認済み」はその状態での記録)。修正後も既存テスト・CCP ベンチマーク
+        の条件ではほぼ効かない (効くのは強い電場で電子が加熱される領域)。
         """
         phi_a = self.phi[self.active_idx]
         dphi = phi_a[self.i_idx] - phi_a[self.j_idx]
@@ -951,7 +958,8 @@ class Fluid2dSimulation:
         joule = np.zeros(self.n_active)
         np.add.at(joule, self.i_idx, 0.5 * p_edge)
         np.add.at(joule, self.j_idx, 0.5 * p_edge)
-        heating = np.maximum(joule, 0.0)
+        # joule は外延量 [eV/s] なので節点体積で割り、w と同じ体積あたり [eV/(m³·s)] にする
+        heating = np.maximum(joule, 0.0) / self.node_vol
         w_a = self.w[self.active_idx]
         if not np.any(heating > 0.0):
             return math.inf
