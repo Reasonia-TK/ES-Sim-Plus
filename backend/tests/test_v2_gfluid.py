@@ -304,6 +304,33 @@ def test_explicit_matches_semi_implicit_at_small_dt():
     np.testing.assert_allclose(ex.phi, im.phi, rtol=1e-3, atol=1e-5)
 
 
+def test_stop_between_substeps_rolls_back_and_continues_identically():
+    """サブステップの合間の停止要求 (v1 の step を継承): ステップ開始時の状態に戻り、続きは中断なしとビット一致。"""
+    proj = _project([PIN, BLOCK], size=0.5e-3, fluid={"init_density_m3": 1e15, "gas_pressure_pa": 50.0, "dt": 1e-9})
+    sim = CartesianFluid2dSimulation(proj, device="cpu")
+    ref = CartesianFluid2dSimulation(proj.model_copy(deep=True), device="cpu")
+    sim.step()
+    ref.step()
+    keys = ("n_e", "n_i", "w", "phi")
+    before = {k: getattr(sim, k).copy() for k in keys}
+    n_checks = 0
+
+    def stop_at_third_check():
+        nonlocal n_checks
+        n_checks += 1
+        return n_checks >= 3
+
+    assert sim.step(stop_at_third_check) is None           # dt は安定条件の目安の数倍 → 6 回以上に刻む
+    assert n_checks == 3 and sim.step_count == 1
+    for k in keys:
+        assert np.array_equal(getattr(sim, k), before[k]), k
+    sim.step()
+    ref.step()
+    for k in keys:
+        assert np.array_equal(getattr(sim, k), getattr(ref, k)), k
+    assert sim.wall == ref.wall and sim.gen_total == ref.gen_total
+
+
 def test_rejects_periodic_boundary():
     bnd = [{"edges": [0, 2], "type": "periodic"},
            {"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": 0.0}]

@@ -44,7 +44,7 @@ import numpy as np
 import pydantic
 import pytest
 
-from es_sim.fluid2d import FLOOR_N, Fluid2dSimulation, build_fluid2d_result
+from es_sim.fluid2d import FLOOR_N, MAX_SUBSTEPS, Fluid2dSimulation, build_fluid2d_result
 from es_sim.fluid1d import Fluid1dSimulation
 from es_sim.schema import (
     BoundaryCondition,
@@ -441,3 +441,90 @@ def test_iterative_falls_back_to_direct_when_not_converged():
     assert np.all(np.isfinite(sim.n_e))
     assert np.all(np.isfinite(sim.n_i))
     assert np.all(np.isfinite(sim.w))
+
+
+# ---- 8. サブステップ数の上限・サブステップ途中の停止要求 ---------------------------------
+#
+# 解が暴走すると (UI 既定のサンプル形状で実測: 電位 kV 超・Te 数百 eV 超) 必要なサブステップ数が
+# 際限なく増え、step() が終わらず停止ボタンも効かなかった。ここでは dt を安定条件の目安
+# (この条件で ~1e-10 s) より大きく取り、同じ経路を決定論的に再現する。
+
+_STATE_KEYS = ("n_e", "n_i", "w", "phi")
+
+
+def test_substep_limit_raises_value_error_without_changing_state():
+    """必要なサブステップ数が上限を超えたら ValueError (発散の兆候)。状態は変えない。"""
+    sim = Fluid2dSimulation(_small_solver_project(n_steps=5, dt=1.0e-6))  # 必要数 ~6e3
+    before = {k: getattr(sim, k).copy() for k in _STATE_KEYS}
+    with pytest.raises(ValueError, match="サブステップ数") as exc:
+        sim.run_batch(store_frames=False)
+    assert f"上限 {MAX_SUBSTEPS}" in str(exc.value)
+    assert sim.step_count == 0 and sim.t == 0.0 and sim.history["step"] == []
+    for k, arr in before.items():
+        assert np.array_equal(getattr(sim, k), arr), k
+
+    # 上限は _max_substeps (テスト用フック) で決まる: 6〜7 回に刻む条件で上限 5 なら超過
+    sim2 = Fluid2dSimulation(_small_solver_project(n_steps=5, dt=1.0e-9))
+    sim2._max_substeps = 5
+    with pytest.raises(ValueError, match="上限 5 "):
+        sim2.step()
+
+
+def test_stop_request_between_substeps_rolls_back_the_step():
+    """サブステップの合間の停止要求で状態をステップ開始時に戻し、None を返す。
+
+    戻した状態から続けた結果は、中断しなかった実行とビット一致する (停止 → 続きからの整合)。
+    """
+    dt = 1.0e-9  # 安定条件の目安の約 10 倍 → 1 ステップを 6〜7 回のサブステップに刻む
+    sim = Fluid2dSimulation(_small_solver_project(n_steps=5, dt=dt))
+    ref = Fluid2dSimulation(_small_solver_project(n_steps=5, dt=dt))
+    sim.step()
+    ref.step()
+    before = {k: getattr(sim, k).copy() for k in _STATE_KEYS}
+    wall0, gen0 = dict(sim.wall), sim.gen_total
+
+    calls: list[float] = []
+    step_once = sim._step_once
+
+    def counting_step_once(dt_sub, t, implicit):
+        calls.append(t)
+        return step_once(dt_sub, t, implicit)
+
+    sim._step_once = counting_step_once
+    checks: list[int] = []
+
+    def should_stop() -> bool:
+        checks.append(len(calls))
+        return len(calls) >= 2  # 2 サブステップ進んだところで停止要求
+
+    assert sim.step(should_stop) is None
+    assert checks == [1, 2]  # 1 回目のサブステップの前には確認しない (run_batch がステップ前に確認する)
+    for k, arr in before.items():
+        assert np.array_equal(getattr(sim, k), arr), k
+    assert sim.wall == wall0 and sim.gen_total == gen0
+    assert sim.step_count == 1 and sim.t == dt and len(sim.history["step"]) == 1
+
+    sim.step()
+    ref.step()
+    for k in _STATE_KEYS:
+        assert np.array_equal(getattr(sim, k), getattr(ref, k)), k
+    assert sim.wall == ref.wall and sim.gen_total == ref.gen_total
+
+
+def test_run_batch_stop_request_takes_effect_within_a_step():
+    """run_batch の should_stop はステップ間だけでなくサブステップの合間にも効く。
+
+    途中で止めたステップは history・フレームに残さない (step_count も進めない)。
+    """
+    sim = Fluid2dSimulation(_small_solver_project(n_steps=5, dt=1.0e-9))
+    n_checks = 0
+
+    def should_stop() -> bool:
+        nonlocal n_checks
+        n_checks += 1
+        return n_checks >= 3  # 1 回目はステップ前 (run_batch)、2 回目以降がサブステップの合間
+
+    history, _ = sim.run_batch(should_stop=should_stop, store_frames=False)
+    assert n_checks == 3
+    assert sim.step_count == 0 and history["step"] == []
+    assert sim.fields is None
