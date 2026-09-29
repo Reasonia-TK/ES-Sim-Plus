@@ -1,0 +1,171 @@
+// モデルツリーの節 (プロジェクト文書から組み立てる。React に依存しないのでテストできる)。
+
+import type { TFunction } from "i18next";
+import {
+  axisEdge,
+  boundaryOfEdge,
+  coordOf,
+  edgeCount,
+  isRectDomain,
+  polygonBounds,
+  type Project,
+} from "../model/project";
+import type { NodeId } from "../model/selection";
+import { formatNumber, lengthUnitLabel, toDisplayLength, type LengthUnit } from "../util/format";
+
+export type BadgeTone = "muted" | "ok" | "warn" | "error" | "run";
+
+export interface TreeNode {
+  id: NodeId;
+  label: string;
+  /** 補足 (値の概要) */
+  detail?: string;
+  badge?: { text: string; tone: BadgeTone };
+  /** 選べない説明だけの行 (「領域なし」など) */
+  placeholder?: boolean;
+  children?: TreeNode[];
+}
+
+export const STUDIES = ["fem", "trace", "pic", "pic1d", "fluid1d", "fluid2d", "dsmc", "tl", "sweep"] as const;
+export type StudyKind = (typeof STUDIES)[number];
+
+/** スタディの設定が入っている project のキー (静電場・スイープは専用の設定ブロックが無い) */
+export const STUDY_SETTINGS_KEY: Record<StudyKind, keyof Project | null> = {
+  fem: null,
+  trace: "particles",
+  pic: "pic",
+  pic1d: "pic1d",
+  fluid1d: "fluid1d",
+  fluid2d: "fluid2d",
+  dsmc: "dsmc",
+  tl: "tl",
+  sweep: null,
+};
+
+/** 辺の表示名 (矩形は座標系ごとの名前、それ以外は「辺 n」) */
+export function edgeLabel(p: Project, i: number, t: TFunction): string {
+  if (isRectDomain(p)) {
+    const labels = t(`edge.${coordOf(p)}`, { returnObjects: true }) as unknown as string[];
+    if (Array.isArray(labels) && labels[i]) return labels[i];
+  }
+  return t("edge.generic", { n: i });
+}
+
+/** 辺の境界条件の概要 (v1 のツリーと同じ: 対称軸 / なし / Dirichlet NV [+RF] / 対称 / 周期) */
+export function edgeSummary(p: Project, i: number, t: TFunction): string {
+  if (axisEdge(p) === i) return t("bc.axis");
+  const bc = boundaryOfEdge(p, i);
+  if (!bc || bc.type === "neumann") return t("bc.none");
+  if (bc.type === "dirichlet") {
+    const v = typeof bc.voltage === "number" ? bc.voltage : 0;
+    let s = `${t("bc.dirichlet")} ${formatNumber(v)} V`;
+    if (bc.voltage_rf) s += ` + ${t("bc.rf")}`;
+    if (bc.voltage_waveform) s += ` + ${t("bc.waveform")}`;
+    return s;
+  }
+  return t(`bc.${bc.type}`);
+}
+
+function domainDetail(p: Project, unit: LengthUnit): string {
+  const b = polygonBounds(p.geometry.domain.polygon);
+  const u = lengthUnitLabel(unit);
+  const w = formatNumber(toDisplayLength(b.x1 - b.x0, unit));
+  const h = formatNumber(toDisplayLength(b.y1 - b.y0, unit));
+  return `${w} × ${h} ${u}`;
+}
+
+function meshDetail(p: Project, unit: LengthUnit): string {
+  const size = `${formatNumber(toDisplayLength(p.mesh.size, unit))} ${lengthUnitLabel(unit)}`;
+  const mode = p.mesh.mode ?? "unstructured";
+  const amr = mode === "cartesian" && p.mesh.amr?.max_level ? ` · AMR L${p.mesh.amr.max_level}` : "";
+  return `${size} · ${mode}${amr}`;
+}
+
+function bfieldDetail(p: Project): string {
+  const b = p.b_field;
+  if (!b || (!b.bx && !b.by && !b.bz)) return "0";
+  return `(${formatNumber(b.bx ?? 0)}, ${formatNumber(b.by ?? 0)}, ${formatNumber(b.bz ?? 0)}) T`;
+}
+
+export function studyConfigured(p: Project, kind: StudyKind): boolean {
+  const key = STUDY_SETTINGS_KEY[kind];
+  return key === null ? true : p[key] !== null && p[key] !== undefined;
+}
+
+export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: string): TreeNode {
+  const regions: TreeNode[] = p.geometry.regions.map((r) => ({
+    id: `region:${r.id}`,
+    label: r.id,
+    detail: `${t(`region.${r.type}`)} · ${r.shape ? t("region.circle") : t("region.polygon")}`,
+  }));
+  const edges: TreeNode[] = Array.from({ length: edgeCount(p) }, (_, i) => ({
+    id: `edge:${i}`,
+    label: edgeLabel(p, i, t),
+    detail: edgeSummary(p, i, t),
+  }));
+  const studies: TreeNode[] = STUDIES.map((kind) => {
+    const configured = studyConfigured(p, kind);
+    const hasBlock = STUDY_SETTINGS_KEY[kind] !== null;
+    return {
+      id: `study:${kind}`,
+      label: t(`study.${kind}`),
+      badge: hasBlock
+        ? configured
+          ? { text: t("tree.configured"), tone: "ok" }
+          : { text: t("tree.notConfigured"), tone: "muted" }
+        : undefined,
+    };
+  });
+  return {
+    id: "project",
+    label: docName,
+    children: [
+      {
+        id: "geometry",
+        label: t("tree.geometry"),
+        children: [
+          { id: "domain", label: t("tree.domain"), detail: domainDetail(p, unit) },
+          {
+            id: "regions",
+            label: t("tree.regions"),
+            detail: String(regions.length),
+            children: regions.length ? regions : [{ id: "regions.empty", label: t("tree.noRegions"), placeholder: true }],
+          },
+          { id: "boundaries", label: t("tree.boundaries"), detail: String(edges.length), children: edges },
+          { id: "mesh", label: t("tree.mesh"), detail: meshDetail(p, unit) },
+          { id: "bfield", label: t("tree.bfield"), detail: bfieldDetail(p) },
+        ],
+      },
+      { id: "studies", label: t("tree.studies"), children: studies },
+      {
+        id: "results",
+        label: t("tree.results"),
+        children: [{ id: "results.empty", label: t("tree.noResults"), placeholder: true }],
+      },
+    ],
+  };
+}
+
+/** 検索語で絞る (一致した節とその祖先を残す)。空なら null (絞らない) */
+export function filterTree(root: TreeNode, query: string): TreeNode | null {
+  const q = query.trim().toLowerCase();
+  if (!q) return root;
+  const walk = (n: TreeNode): TreeNode | null => {
+    const kids = (n.children ?? []).map(walk).filter((c): c is TreeNode => c !== null);
+    const hit = !n.placeholder && `${n.label} ${n.detail ?? ""}`.toLowerCase().includes(q);
+    if (!hit && kids.length === 0) return null;
+    return { ...n, children: n.children ? kids : undefined };
+  };
+  return walk(root);
+}
+
+/** 表示中の節の並び (キーボード操作用)。expanded に無い枝の子は含めない */
+export function visibleNodes(root: TreeNode, expanded: Set<NodeId>, forceOpen = false): { node: TreeNode; level: number; parent: NodeId | null }[] {
+  const out: { node: TreeNode; level: number; parent: NodeId | null }[] = [];
+  const walk = (n: TreeNode, level: number, parent: NodeId | null) => {
+    out.push({ node: n, level, parent });
+    if (n.children && (forceOpen || expanded.has(n.id))) for (const c of n.children) walk(c, level + 1, n.id);
+  };
+  walk(root, 1, null);
+  return out;
+}

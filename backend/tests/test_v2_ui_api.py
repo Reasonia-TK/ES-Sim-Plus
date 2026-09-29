@@ -1,0 +1,39 @@
+"""UI v2 (ui/) が使うバックエンドの API のテスト (prompts/130)。"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+import es_sim
+import es_sim.server as server
+from es_sim.schema import Project
+
+EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+
+
+def test_v2_schema_describes_the_project_model():
+    client = TestClient(server.app)
+    res = client.get("/v2/schema")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["version"] == es_sim.__version__
+    schema = body["project"]
+    assert {"geometry", "mesh", "pic", "pic1d", "fluid1d", "fluid2d", "dsmc", "tl"} <= set(schema["properties"])
+    defs = schema["$defs"]
+    assert {"Fluid2dSettings", "AmrSettings", "Region", "BoundaryCondition"} <= set(defs)
+    # 範囲・既定値の制約がそのまま載る (UI のフォームの検証に使う)
+    max_level = defs["AmrSettings"]["properties"]["max_level"]
+    assert max_level["minimum"] == 0 and max_level["maximum"] == 6 and max_level["default"] == 0
+    assert defs["Fluid2dSettings"]["properties"]["gas_pressure_pa"]["exclusiveMinimum"] == 0
+    # 2 回目はキャッシュ (同じ内容)
+    assert client.get("/v2/schema").json() == body
+
+
+def test_examples_bundled_in_the_ui_are_valid_projects():
+    files = sorted(EXAMPLES.glob("*.json"))
+    assert files, "examples/*.json が見つかりません"
+    for f in files:
+        Project.model_validate(json.loads(f.read_text(encoding="utf-8")))

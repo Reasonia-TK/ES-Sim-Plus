@@ -22,7 +22,9 @@
 ## 構成
 
 - `backend/` — Python 計算コア(FastAPI ローカルサーバー、gmsh メッシュ、P1-FEM、粒子・PIC-MCC)
-- `frontend/` — Tauri 2 + React + TypeScript(CADキャンバス・結果ビューア)
+- `frontend/` — Tauri 2 + React + TypeScript(CADキャンバス・結果ビューア、v1 の UI)
+- `ui/` — UI v2 (作り直し中、React 19 + Vite 8。[prompts/130](prompts/130-ui-v2-plan.md))。完成したら Tauri を
+  こちらに切り替える
 - `examples/` — サンプルプロジェクト(JSON、詳細は下記)
 - `docs/SPEC.md` — 仕様書
 - `docs/DSMC.md` — DSMC(定常ガス流れ)のアルゴリズム解説
@@ -75,6 +77,15 @@ npm run tauri dev
 アプリが起動したらツールバー右上に `backend v0.1.0` と表示されれば疎通OK。
 
 Tauri を使わずブラウザで動作確認する場合は `npm run dev` → http://localhost:1420
+
+### UI v2(作り直し中、prompts/130)
+
+```powershell
+cd ui
+npm install
+npm run dev      # → http://localhost:1421 (v1 の 1420 と並べて使える。バックエンドは上と同じ)
+npm test         # Vitest
+```
 
 ## バッチ実行(パラメータスイープ、prompts/78)
 

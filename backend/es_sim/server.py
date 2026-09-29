@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -528,6 +529,21 @@ def xs_parse_v2_endpoint(req: XsParseRequest) -> XsParseResponse:
         return parse_xs_text(req.text)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@lru_cache(maxsize=1)
+def _project_schema() -> dict:
+    return Project.model_json_schema()
+
+
+@app.get("/v2/schema")
+def v2_schema() -> dict:
+    """プロジェクトの JSON Schema (UI v2 が設定フォームを組み立てる元、prompts/130)。
+
+    範囲・既定値・型・説明は pydantic のモデルから。単位と「詳細設定」の印は各フィールドの
+    json_schema_extra に書き足していく (P6b)。
+    """
+    return {"version": __version__, "project": _project_schema()}
 
 
 # ---- PIC WebSocket ストリーミング (フェーズ3、仕様書 §9) ----------------------
