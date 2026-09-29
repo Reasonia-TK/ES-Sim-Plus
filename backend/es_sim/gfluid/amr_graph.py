@@ -261,6 +261,7 @@ def build_amr_fluid_graph(model: GeometryModel, hier: AmrHierarchy, lay: AmrPicL
 
     # ---- 5. 壁 (外周の辺と固体の表面) ------------------------------------------------------
     walls = _side_walls_amr(model, xy, tri, eps)
+    n_side = len(walls)
     tree = cKDTree(xy)
     for mid, area, n_in, gamma, group, pg in solid_pieces(model, SEG_FRAC * h_min, eps):
         _, node = tree.query(pg)
@@ -273,6 +274,9 @@ def build_amr_fluid_graph(model: GeometryModel, hier: AmrHierarchy, lay: AmrPicL
         area = gamma = wx = wy = np.zeros(0)
         nrm = np.zeros((0, 2))
         group = np.zeros(0, dtype=np.int64)
+    # 誘電体表面の小片 (固体の小片のうち Dirichlet グループを持たないもの。外周の壁は電極だけ、prompts/129)
+    diel = np.concatenate([np.zeros(p[0].size, dtype=bool) for p in walls[:n_side]]
+                          + [p[4] < 0 for p in walls[n_side:]] + [np.zeros(0, dtype=bool)])
     has_wall = np.zeros(N, dtype=bool)
     has_wall[node] = True
     o, orphan = merge_targets_graph(N, active, vg, has_wall, pa, pb)
@@ -290,7 +294,7 @@ def build_amr_fluid_graph(model: GeometryModel, hier: AmrHierarchy, lay: AmrPicL
     r = sub.row
     node = sub.col.astype(np.int64)
     area = two_pi * area[r] * sub.data
-    nrm, gamma, group, wx, wy = nrm[r], gamma[r], group[r], wx[r], wy[r]
+    nrm, gamma, group, wx, wy, diel = nrm[r], gamma[r], group[r], wx[r], wy[r], diel[r]
 
     # 壁向き電場のプローブ: W と、法線の逆向きに局所の格子幅 1 つ分入った A (合成格子の葉セルで双一次補間)
     from ..amr.locate import locate_fine, to_fine_index
@@ -331,6 +335,7 @@ def build_amr_fluid_graph(model: GeometryModel, hier: AmrHierarchy, lay: AmrPicL
         wall_normal=nrm,
         wall_gamma=gamma,
         wall_group=group,
+        wall_dielectric=diel,
         wall_w_idx=w_idx,
         wall_w_wt=w_wt,
         wall_a_idx=a_idx,
@@ -348,7 +353,11 @@ def build_amr_fluid_graph(model: GeometryModel, hier: AmrHierarchy, lay: AmrPicL
 
 
 def _side_walls_amr(model: GeometryModel, xy: np.ndarray, tri: np.ndarray, eps: float) -> list:
-    """外周の壁: 三角形分割の外周の辺ごとに、前半を始点・後半を終点の節点へ (気体に接する部分だけ)。"""
+    """外周の壁: 三角形分割の外周の辺ごとに、前半を始点・後半を終点の節点へ (気体に接する部分だけ)。
+
+    Dirichlet の辺だけを壁にする (symmetry・periodic・境界条件なし (Neumann) は自然境界 = 反射。
+    一様格子版 gfluid.geometry._side_walls と同じ、prompts/129)。
+    """
     dom = model.domain
     ridx = model.radial_axis()
     tol = model.tol
@@ -361,7 +370,7 @@ def _side_walls_amr(model: GeometryModel, xy: np.ndarray, tri: np.ndarray, eps: 
     out = []
     t_mid = (np.arange(N_SIDE) + 0.5) / N_SIDE
     for side, sbc in model.sides.items():
-        if sbc.kind in ("symmetry", "periodic"):
+        if sbc.kind != "dirichlet":
             continue
         if (ridx == 1 and side == "bottom" and abs(dom.y0) <= tol) or (ridx == 0 and side == "left" and abs(dom.x0) <= tol):
             continue

@@ -762,6 +762,10 @@ export default function Fluid2dPanel({
             <span>電離生成 (累計)</span>
             <span>{frame.counts.gen_total ?? "-"}</span>
           </div>
+          <div className="kv">
+            <span>誘電体の表面電荷 (合計)</span>
+            <span>{frame.counts.surf_q != null ? frame.counts.surf_q.toExponential(3) : "-"}</span>
+          </div>
         </>
       )}
       </>

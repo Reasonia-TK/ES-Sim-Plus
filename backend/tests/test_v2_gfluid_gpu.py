@@ -75,9 +75,9 @@ def _rel(a, b) -> float:
 
 
 def _assert_same(cpu, gpu, tol=1e-9) -> None:
-    for k in ("n_e", "n_i", "w", "phi"):
+    for k in ("n_e", "n_i", "w", "phi", "q_surf"):      # q_surf: 誘電体の表面電荷 (prompts/129)
         assert _rel(getattr(cpu, k), getattr(gpu, k)) < tol, k
-    for k in ("n_e_total", "n_i_total", "wall_e", "wall_i", "gen_total"):
+    for k in ("n_e_total", "n_i_total", "wall_e", "wall_i", "gen_total", "surf_q"):
         assert _rel(cpu.history[k], gpu.history[k]) < tol, k
     assert cpu.timing["solver_iters"] == gpu.timing["solver_iters"]
 
@@ -233,7 +233,8 @@ def test_dc_cathode_sheath_substeps_match_cpu():
 def test_substep_limit_raises_without_changing_device_state():
     sim = GpuCartesianFluid2dSimulation(_project(init_density_m3=1e15, gas_pressure_pa=50.0, dt=1e-9))
     sim.step()
-    before = {k: getattr(sim, k).copy() for k in ("n_e", "n_i", "w", "phi")}
+    before = {k: getattr(sim, k).copy() for k in ("n_e", "n_i", "w", "phi", "q_surf")}
+    assert np.any(before["q_surf"])                      # 誘電体ブロックが帯電している (prompts/129)
     wall = dict(sim.wall)
     sim._max_substeps = 1
     with pytest.raises(ValueError, match="上限 1 "):
@@ -253,8 +254,9 @@ def test_stop_between_substeps_rolls_back_device_state_and_continues_identically
     assert sim._g.poisson.direct
     sim.step()
     ref.step()
-    keys = ("n_e", "n_i", "w", "phi")
+    keys = ("n_e", "n_i", "w", "phi", "q_surf")          # q_surf: 誘電体の表面電荷 (prompts/129)
     before = {k: getattr(sim, k).copy() for k in keys}
+    assert np.any(before["q_surf"])
     for k in keys:                                       # ref も同じく読んで (ホスト → デバイスの戻し) 揃える
         getattr(ref, k)
     n_checks = 0

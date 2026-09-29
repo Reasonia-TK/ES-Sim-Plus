@@ -73,3 +73,14 @@ v1 fluid2d の暴走対策 (claude/quizzical-rosalind-96246c、4babddc・207896b
 - 検証 (tests/test_v2_gfluid_gpu.py): 健全な DC 放電 (100×50 mm、0/100 V) の 200 ステップでサブステップ数が
   ステップごとに CPU 版と一致 (除外を外すと step 144 で 1 ステップ 9 千万回を要求して ValueError)、上限超過で
   状態が変わらないこと、停止からの続きがビット一致すること、run_batch の停止がステップ途中でも効くこと。
+
+## 追記: 誘電体表面の帯電の反映 (prompts/129、2026-09-29)
+
+- q_surf (誘電体の表面電荷、全節点、2π 込み) はデバイスが正 (`_DeviceField`)。電子を解いた直後に
+  `fl_surf` が壁小片の CSR (wptr、節点順) を節点ごとに走り、帯電する小片 (誘電体表面・受け持つ節点が
+  Poisson の未知数) の e·dt·area·(c_i n_i (1+γ) − c_e n_e) を足す (原子演算なし、決定的)。
+- `fl_poisson_rhs` に q_surf/qdiv (rz は 2π) を足す。_EbPoisson・_AmrPoisson (全 0 のマスク) の両方に効く。
+- history の surf_q は `fl_sum` (固定木の部分和、ホストで順に合計) で集約する (stat の配置は変えない)。
+- サブステップの合間の停止では q_surf もデバイス上でその場で戻す。
+- 検証: CPU 版との突き合わせ (`_assert_same`) に q_surf と surf_q を加えて全ケース 1e-9 で一致、上限超過・
+  途中停止のテストも q_surf をビット単位で確かめる。

@@ -313,6 +313,32 @@ extern "C" __global__ void fl_gwe(const double* wde, const double* ne, const dou
     wdw[k] = (5.0 / 3.0) * g / fmax(ne[k], FL_FLOOR_N);
 }
 
+// dielectric surface charge (prompts/129): q_surf[node] += e dt sum over the node's charging wall pieces of
+// area (c_i n_i (1 + gamma) - (v_th,e / 4) n_e) with the new densities, the same fluxes as the wall losses.
+// Pieces of active node k are [wptr[k], wptr[k + 1]); chg[c] = 1 for dielectric pieces whose charge node is
+// a Poisson unknown, sarea[k] = their total area. Each node is written by one thread (no atomics).
+extern "C" __global__ void fl_surf(const double* ci, const double* area, const double* chg, const int* wptr,
+                                   const double* sarea, const double* ni, const double* ne, const double* gamma,
+                                   const double* ce, const int* gidx, int n, double qdt, double* qsurf)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    double sa = sarea[k];
+    if (sa == 0.0) return;
+    double s = 0.0;
+    for (int c = wptr[k]; c < wptr[k + 1]; ++c) s += chg[c] * area[c] * ci[c];
+    qsurf[gidx[k]] += qdt * (s * ni[k] * (1.0 + gamma[k]) - ce[k] * ne[k] * sa);
+}
+
+// fixed-tree partial sums of x (FL_NB partials, summed on the host in order). Launch with FL_NB x FL_NT.
+extern "C" __global__ void fl_sum(const double* x, int n, double* part)
+{
+    __shared__ double sh[FL_NT];
+    double s = 0.0;
+    FL_LOOP(k, n) s += x[k];
+    fl_store(s, sh, part, 0, 0);
+}
+
 // Joule heating per node: half of the edge power -F_e dphi_e to each end
 extern "C" __global__ void fl_joule(const double* ae, const double* be, const double* ne, const double* dphi,
                                     const int* ei, const int* ej, const int* rp, const int* ic, int n,
@@ -372,19 +398,20 @@ extern "C" __global__ void fl_wallgen(const double* gwi, const double* gwe, cons
 
 // ---- Poisson ---------------------------------------------------------------------------------------
 
-// b = q_static + e * (charge map @ (n_i - n_e)) + coupling @ V  (EB Poisson rhs, 2 pi-free);
-// 0 on nodes that are not unknowns (mask != 0), as GMGSolver.solve does
+// b = q_static + e * (charge map @ (n_i - n_e)) + q_surf / qdiv + coupling @ V  (EB Poisson rhs, 2 pi-free:
+// q_surf is the dielectric surface charge per node with 2 pi included in RZ, qdiv = 2 pi there, else 1;
+// prompts/129); 0 on nodes that are not unknowns (mask != 0), as GMGSolver.solve does
 extern "C" __global__ void fl_poisson_rhs(const double* qs, const int* cp, const int* cc, const double* cv,
                                           const double* ni, const double* ne, const int* gp, const int* gc,
                                           const double* gv, const double* vgrp, const unsigned char* mask,
-                                          int nn, double* b)
+                                          const double* qsurf, double qdiv, int nn, double* b)
 {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= nn) return;
     if (mask[k] != 0) { b[k] = 0.0; return; }
     double q = 0.0;
     for (int m = cp[k]; m < cp[k + 1]; ++m) q += cv[m] * (ni[cc[m]] - ne[cc[m]]);
-    double r = qs[k] + FL_QE * q;
+    double r = qs[k] + FL_QE * q + qsurf[k] / qdiv;
     double c = 0.0;
     for (int m = gp[k]; m < gp[k + 1]; ++m) c += gv[m] * vgrp[gc[m]];
     b[k] = r + c;

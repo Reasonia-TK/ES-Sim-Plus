@@ -64,6 +64,11 @@ class AmrFluid2dSimulation(CartesianFluid2dSimulation):
                          tri_cell=np.zeros(len(g.tris), dtype=np.int64))
         return g, dm
 
+    def _poisson_unknown(self) -> np.ndarray:
+        """合成格子の節点ごとに Poisson の未知数か (固定 = Dirichlet でない。ぶら下がり節点も含む:
+        その電荷は PTq が親の未知数へ配る)。"""
+        return self._lay.op.fixed_group < 0
+
     # ---- Poisson (合成格子) --------------------------------------------------------------
 
     def _init_poisson(self, project: Project) -> None:
@@ -74,14 +79,19 @@ class AmrFluid2dSimulation(CartesianFluid2dSimulation):
         self.poisson_iters = 0
 
     def _solve_phi(self, t: float) -> np.ndarray:
-        """b_c = PTq [q_all; V] を解き、全節点の電位 φ = PC [x_c; V] を返す。"""
+        """b_c = PTq [q_all; V] を解き、全節点の電位 φ = PC [x_c; V] を返す。
+
+        q_all は一様格子版の右辺 b と同じ 2π を落とした単位: 体積電荷 (charge_map) と誘電体の表面電荷
+        (q_surf は 2π 込みで持っているので軸対称では 2π で割る、prompts/129)。
+        """
         lay = self._lay
         op = lay.op
         v = group_voltages(self.model, t)
         self._v_now = v
         vK = np.zeros(lay.n_groups)
         vK[: v.size] = v
-        q_all = lay.q_static + QE * np.asarray(self.graph.charge_map @ (self.n_i - self.n_e)).ravel()
+        q_all = (lay.q_static + QE * np.asarray(self.graph.charge_map @ (self.n_i - self.n_e)).ravel()
+                 + (self.q_surf / (2.0 * np.pi) if self.rz else self.q_surf))
         b = lay.PTq @ np.concatenate([q_all, vK])
         if op.singular and b.size:
             b = b - b.mean()

@@ -41,15 +41,30 @@ symmetry・see_gamma・conductor/dielectric 領域) は既存のプロジェク�
   と全く同じ定義) を除いた領域。固体要素にしか属さない節点は「非輸送」節点として
   除外し (node_vol=0)、常に 0 のまま出力する (フロント側は mesh 情報から固体
   領域を判定してマスクできる想定)。
-- 壁 (吸収) 境界 = Dirichlet 電極エッジ・固体表面・domain 外周の非対称エッジ
-  (symmetry でも rz の対称軸でもない外周エッジ)。フラックス BC は fluid1d.py と
+- 壁 (吸収) 境界 = 電極 (Dirichlet の外周エッジ・導体領域 (メッシュの穴) の表面) と
+  固体 (dielectric) の表面。フラックス BC は fluid1d.py と
   同じ Hagelaar & Kroesen 系だが、2D では「壁エッジ」ごとに P1 境界質量重み
   (xy: L/2、rz: 2π·(L/6)(2r_i+r_j) — assemble() の rhs 公式の1D版) を計算し、
   それを節点へ配分した「壁コンダクタンス」を implicit 行列の対角に加える形で
   一般化する (1D の c_left/c_right をエッジ単位に分解して足し合わせたものに相当)。
-- 対称境界 (symmetry BC エッジ・rz の対称軸 r=0) は自然境界 (フラックス0、
-  何もしない)。periodic は未対応 (下記 __init__ で ValueError — 理由はそこに
-  コメント)。
+- 対称境界 (symmetry BC エッジ・rz の対称軸 r=0) と境界条件の無い (Neumann) 外周
+  エッジは自然境界 (フラックス0、何もしない = 反射壁)。periodic は未対応 (下記
+  __init__ で ValueError — 理由はそこにコメント)。Neumann の外周エッジは以前は
+  帯電しない吸収壁だったが、正の空間電荷と ∂φ/∂n=0 の組み合わせではその辺が
+  その方向の電位の山になって電子を押し返す電場ができず、電子だけが流出し続けて
+  電位が kV まで暴走した (UI の既定サンプルで再現) ため反射壁にした (prompts/129)。
+  外周で粒子を失わせたい辺は電極 (Dirichlet) として指定する。
+- 誘電体表面の帯電 (prompts/129): 誘電体の壁エッジへ入る電荷 e·(Γ_i + γΓ_i − Γ_e)
+  (Γ_e は入射電子、γΓ_i は SEE の放出電子で表面に正電荷を残す) を、壁コンダクタンス
+  と同じ節点配分 (P1 境界質量の集中化) のまま節点ごとの表面電荷 q_surf [C] (xy は
+  奥行き 1 m あたり、rz は 2π 込みのリング電荷 — pic.py の q_surf と同じ規約) に
+  サブステップごとに積算し、Poisson 右辺へ恒常的に加える (集中化した境界質量で
+  ∫σN_i ds ≈ σ_i∫N_i ds とした FEM の表面電荷項そのもの)。プラズマから壁へ出た電荷は
+  過不足なく表面へ移る (電荷保存: e(N_i − N_e) + Σq_surf + 電極へ流れた電荷 = 一定)。
+  誘電体の壁エッジでも Dirichlet 節点 (電極との接点) に落ちる分は電極へ流れる扱い。
+  電極 (Dirichlet・導体) の壁は外部回路へ流れるので帯電しない。表面電荷は陽的
+  (前サブステップまでの q_surf で Poisson を解く) だが、誘電緩和時間などによる
+  既存のサブステップ上限の範囲で安定に浮遊電位へ緩和する (prompts/129 に実測)。
 - Joule 加熱: 2D 非構造メッシュには 1D のような「隣接する2つの面」という自明な
   概念が無いため、エッジ単位の電力 P_ij = F_ij・Δφ_ij (電流×電圧降下、抵抗網の
   発熱と同じ発想) を計算し、両端の節点へ半分ずつ配分する (半導体デバイス
@@ -78,7 +93,8 @@ prompts/111 が「抽出せず同型再実装でも可」と明示的に許容�
 連続場として持つ節点密度 n_e/n_i に対して「集中質量近似」(電荷_i = e·(n_i−n_e)_i
 ・V_i、V_i は上記の輸送領域節点体積) を使う。これは本モジュールの EAFE/FVM
 スキーム全体で採用している質量集中の流儀と一貫しており、フル P1 質量行列を
-別途組む複雑さを避けられる。
+別途組む複雑さを避けられる。誘電体の表面電荷 q_surf も同じ集中化の流儀で
+節点に持つ (上記「誘電体表面の帯電」、pic.py の q_surf と同じ単位・2π 規約)。
 
 ## 時間積分
 
@@ -177,8 +193,9 @@ def _effective_fluid2d_threads(requested: int, cpu_count: int | None = None) -> 
 
 # history の列名 (毎ステップこの全キーを持つ、fluid1d._HISTORY_KEYS と同じ設計。
 # 2D は「壁」がドメイン外周・固体表面など多数になり得るため左右の区別をやめ、
-# 全壁合計の電子/イオン損失にまとめる (prompts/111 の history 定義どおり)
-_HISTORY_KEYS = ("step", "t", "n_e_total", "n_i_total", "wall_e", "wall_i", "gen_total")
+# 全壁合計の電子/イオン損失にまとめる (prompts/111 の history 定義どおり)。
+# surf_q は誘電体の表面電荷の合計 [C] (xy は奥行き 1 m あたり。pic.py の同名の列と同じ量、prompts/129)
+_HISTORY_KEYS = ("step", "t", "n_e_total", "n_i_total", "wall_e", "wall_i", "gen_total", "surf_q")
 
 
 class Fluid2dSimulation:
@@ -207,6 +224,11 @@ class Fluid2dSimulation:
         self.explicit = bool(explicit)
         s = self.s
         self.warnings: list[str] = []
+
+        # 帯電する壁端の表 (_set_surface_charge_ends) の既定は空 = 帯電なし。_init_geometry で
+        # 設定しない派生クラスでも _accumulate_surface_charge が素通りするようにしておく
+        self.surf_elem = self.surf_loc = self.surf_node = np.zeros(0, dtype=np.int64)
+        self.surf_area = np.zeros(0)
 
         # 輸送グラフ (節点体積・エッジ重み・壁) と Poisson の組み立ては派生クラス
         # (v2 直交格子版 es_sim.gfluid) が差し替えられるようにメソッドへ分けている
@@ -258,6 +280,9 @@ class Fluid2dSimulation:
         self.n_i[self.active_idx] = float(s.init_density_m3)
         self.w[self.active_idx] = 1.5 * float(s.init_density_m3) * float(s.init_te_ev)
         self.phi = np.zeros(self.n_nodes)
+        # 誘電体の表面電荷 [C] (節点ごと、モジュール docstring「誘電体表面の帯電」)。
+        # 状態変数なので続き実行 (prepare_continue) でも保持する (pic.py の q_surf と同じ)
+        self.q_surf = np.zeros(self.n_nodes)
 
         # ---- RF 周波数 (dt 自動決定・位相分解の両方に使う。pic.py._find_rf_freq と同じ) --
         self._cycle_freq = self._find_rf_freq()
@@ -336,7 +361,8 @@ class Fluid2dSimulation:
         設定する属性: ridx/rz、mesh・n_nodes・tris・_bc_b/_bc_c/_bc_det (表示用の要素 E)、
         node_vol_full・active_idx・n_active・_glob_to_loc・node_vol、i_idx/j_idx
         (アクティブ節点の局所番号)・w_ij・_edge_len、疎行列パターン、壁
-        (wall_n1/wall_n2/wall_w1/wall_w2/wall_nout/wall_tri・gamma_see)、h_min。
+        (wall_n1/wall_n2/wall_w1/wall_w2/wall_nout/wall_tri・gamma_see)、帯電する壁端
+        (surf_elem/surf_loc/surf_node/surf_area、_set_surface_charge_ends 参照)、h_min。
         """
         self.ridx = _radial_index(project.coord)
         self.rz = self.ridx is not None
@@ -441,9 +467,12 @@ class Fluid2dSimulation:
         """壁 (吸収境界) エッジの幾何 (法線・境界質量重み・SEE γ) を前計算する。
 
         壁エッジ = 輸送領域 (固体を除く) の要素境界のうち
-          (a) 隣接要素が無い (mesh 外周) かつ symmetry / rz 対称軸ではない、または
+          (a) 隣接要素が無い (mesh 外周) かつ symmetry / 境界条件なし (Neumann) /
+              rz 対称軸ではない (= Dirichlet の外周エッジか導体の穴の表面)、または
           (b) 隣接要素が固体 (dielectric) 要素
-        のいずれか (prompts/111 のドメイン定義そのもの)。
+        のいずれか (prompts/111 のドメイン定義。Neumann の外周エッジを (a) から外して
+        反射壁にしたのは prompts/129、モジュール docstring 参照)。(b) は帯電する
+        (_set_surface_charge_ends)。
         """
         tris = self.tris
         adjacency = _adjacency(tris)  # メッシュ全体で1回だけ (前処理、particles.py 参照)
@@ -458,19 +487,21 @@ class Fluid2dSimulation:
         solid_mask = ~self.fluid_mask
         is_solid_nb = (~is_outer) & solid_mask[safe_neighbor]
 
-        # symmetry BC エッジの分類 (particles._build_boundary_tables を再利用。
-        # reflect_edges には symmetry のみを渡す — pic.reflect_edges 相当の概念は
-        # fluid2d に無いので混ぜない)
-        symmetry_edges = sorted(
+        # 自然境界 (フラックス0) の外周エッジの分類 (particles._build_boundary_tables を
+        # 再利用): symmetry BC の辺と、どの境界条件にも指定されていない (Neumann の) 辺。
+        # 後者も反射壁にする (prompts/129、モジュール docstring 参照)。pic.reflect_edges
+        # 相当の概念は fluid2d に無いので混ぜない
+        polygon = project.geometry.domain.polygon
+        specified = {e for bc in project.geometry.boundaries for e in bc.edges}
+        natural_edges = sorted(
             {e for bc in project.geometry.boundaries if bc.type == "symmetry" for e in bc.edges}
+            | (set(range(len(polygon))) - specified)
         )
-        is_symmetry = np.zeros(len(t_rep), dtype=bool)
-        if symmetry_edges:
-            tables = _build_boundary_tables(
-                project.geometry.domain.polygon, mesh, adjacency, symmetry_edges, []
-            )
+        is_natural = np.zeros(len(t_rep), dtype=bool)
+        if natural_edges:
+            tables = _build_boundary_tables(polygon, mesh, adjacency, natural_edges, [])
             if tables is not None and tables.reflect is not None:
-                is_symmetry = tables.reflect[t_rep, loc_rep]
+                is_natural = tables.reflect[t_rep, loc_rep]
 
         # rz の対称軸 (r=0): 両端節点の r 座標が 0 とみなせる外周エッジは、symmetry
         # 指定の有無によらず自然境界として扱う (schema._check_rz が r=0 辺への
@@ -484,7 +515,7 @@ class Fluid2dSimulation:
             tol = 1.0e-9 * (scale if scale > 0.0 else 1.0)
             is_axis = is_outer & (np.abs(r_all[n1_all]) <= tol) & (np.abs(r_all[n2_all]) <= tol)
 
-        is_wall = (is_outer & ~is_symmetry & ~is_axis) | is_solid_nb
+        is_wall = (is_outer & ~is_natural & ~is_axis) | is_solid_nb
         wsel = np.nonzero(is_wall)[0]
         t_wall = t_rep[wsel]
         loc_wall = loc_rep[wsel]
@@ -542,6 +573,21 @@ class Fluid2dSimulation:
                 np.maximum.at(gamma_node, n2[solid_edges], g_edge)
         self.gamma_see = gamma_node[self.active_idx]
 
+        # ---- 帯電する壁端: 誘電体の壁エッジ ((b)、neighbor_wall >= 0) の両端のうち
+        #      Dirichlet でない節点 (Dirichlet 節点 = 電極との接点に落ちる分は電極へ流れる) --
+        fixed_node = np.zeros(self.n_nodes, dtype=bool)
+        fixed_node[np.fromiter(mesh.dirichlet.keys(), dtype=np.int64, count=len(mesh.dirichlet))] = True
+        diel = neighbor_wall >= 0
+        elem_l, node_l, area_l = [], [], []
+        for n_end, w_end in ((n1, w1), (n2, w2)):
+            sel = np.nonzero(diel & ~fixed_node[n_end] & (w_end > 0.0))[0]
+            elem_l.append(sel)
+            node_l.append(n_end[sel])
+            area_l.append(w_end[sel])
+        self._set_surface_charge_ends(
+            np.concatenate(elem_l), self._glob_to_loc[np.concatenate(node_l)], np.concatenate(area_l)
+        )
+
         # ---- 拡散 CFL 判定用の最小エッジ長 (流体要素のみ、fluid1d.py の dx に相当) ----
         ft = tris[self.fluid_mask]
         p = mesh.nodes[ft]
@@ -549,6 +595,36 @@ class Fluid2dSimulation:
         d1 = np.linalg.norm(p[:, 2] - p[:, 0], axis=1)
         d2 = np.linalg.norm(p[:, 0] - p[:, 1], axis=1)
         self.h_min = float(min(d0.min(), d1.min(), d2.min())) if len(ft) else 1.0
+
+    def _set_surface_charge_ends(self, elem, loc, area) -> None:
+        """帯電する壁端の表を設定する (v1 は _build_wall_geometry、v2 は es_sim.gfluid が呼ぶ)。
+
+        壁端 = 壁要素 (v1 の壁エッジ・v2 の壁小片) の片側で、そこへ入る電荷を、流束を
+        評価する輸送節点と同じ節点の表面電荷 q_surf に積む (_accumulate_surface_charge。
+        置き場所の理由は gfluid.geometry のモジュール docstring)。elem: 壁要素の番号 (壁要素
+        ごとのイオン係数を引く)、loc: その節点 (アクティブ節点の局所番号、壁コンダクタンスを
+        配分する節点と同じ)、area: 面積 (境界質量重み、xy は奥行き 1 m あたり、rz は 2π 込み)。
+        """
+        self.surf_elem = np.asarray(elem, dtype=np.int64)
+        self.surf_loc = np.asarray(loc, dtype=np.int64)
+        self.surf_node = self.active_idx[self.surf_loc]
+        self.surf_area = np.asarray(area, dtype=np.float64)
+
+    def _accumulate_surface_charge(self, dt, c_i_wall, v_th_e_node, n_i_new, n_e_new) -> None:
+        """誘電体表面へ入る電荷 e·(Γ_i + γΓ_i − Γ_e)·dt を q_surf に積む (モジュール docstring)。
+
+        流束は壁損失 (_step_once の gw_i・gw_e) と全く同じ係数・同じ新しい密度で評価する
+        (壁要素 k の壁端のイオン流束 = area·c_i[k]·n_i、入射電子 = area·(v̄_e/4)·n_e、
+        SEE = γ·イオン流束)。節点ごとに足し合わせると gw_i − gw_e に一致するので、
+        プラズマから誘電体へ出た電荷はそのまま表面に残る。
+        """
+        if self.surf_elem.size == 0 or self.debug_reflective_walls:
+            return
+        loc = self.surf_loc
+        gi = self.surf_area * c_i_wall[self.surf_elem] * n_i_new[loc]
+        ge = self.surf_area * (0.25 * v_th_e_node[loc]) * n_e_new[loc]
+        rate = gi * (1.0 + self.gamma_see[loc]) - ge
+        self.q_surf += (QE * dt) * np.bincount(self.surf_node, weights=rate, minlength=self.n_nodes)
 
     def _find_rf_freq(self) -> float | None:
         """boundaries / conductor 領域から位相分解の基本周波数を返す (pic.py._find_rf_freq と同じ)。"""
@@ -654,18 +730,19 @@ class Fluid2dSimulation:
         return v
 
     def _solve_phi(self, t: float) -> np.ndarray:
-        """Poisson 求解 (前分解済み LU で右辺のみ更新)。現在の self.n_e/self.n_i を使う。
+        """Poisson 求解 (前分解済み LU で右辺のみ更新)。現在の self.n_e/self.n_i/self.q_surf を使う。
 
         電荷ベクトルは「集中質量近似」(モジュール docstring 参照): charge_i =
         e·(n_i−n_e)_i・V_i (V_i は輸送領域の節点体積、非輸送節点は V_i=0 なので
-        n_e/n_i の値によらず寄与しない)。rz は fem.assemble() の「2π を後から
-        掛ける」規約に合わせるため、ここで 2π で割ってから足す
-        (node_vol_full 自体は 2π 込みの物理単位で持っているため)。
+        n_e/n_i の値によらず寄与しない) に誘電体の表面電荷 q_surf を足したもの。
+        rz は fem.assemble() の「2π を後から掛ける」規約に合わせるため、ここで 2π で
+        割ってから足す (node_vol_full・q_surf は 2π 込みの物理単位で持っているため。
+        pic.py の _solve_phi と同じ)。
         """
         v = np.zeros(self.n_nodes)
         vd = self._dirichlet_values(t)
         v[self.fixed] = vd
-        charge = QE * (self.n_i - self.n_e) * self.node_vol_full
+        charge = QE * (self.n_i - self.n_e) * self.node_vol_full + self.q_surf
         f_dep = charge / (2.0 * np.pi) if self.rz else charge
         f = self.f_static + f_dep
         rhs = f[self.free] - self.k_fd @ vd
@@ -874,6 +951,8 @@ class Fluid2dSimulation:
         n_e_new = solve(n_e_a, a_e, b_e, wall_diag_e, s_ion, see_source, dt)
         n_e_new = np.maximum(n_e_new, FLOOR_N)
         gw_e = 0.0 if self.debug_reflective_walls else (wall_diag_e * n_e_new - see_source)
+        # 誘電体の表面電荷 (壁損失と同じ流束。次のサブステップの Poisson から効く)
+        self._accumulate_surface_charge(dt, c_i_edge, v_th_e_node, n_i_new, n_e_new)
         t2 = time.perf_counter()
         self.timing["transport"] += t2 - t1
 
@@ -1010,20 +1089,22 @@ class Fluid2dSimulation:
     def _save_step_state(self):
         """サブステップ途中の停止でステップ開始時へ戻すための退避 (_restore_step_state と対)。
 
-        戻すのは n_e・n_i・w・φ と壁・生成の累計 (wall・gen_total)。t・step_count・history・
-        アキュムレータはサブステップを全部終えてから進めるので退避不要。timing・反復回数・
-        warnings は診断値なので戻さない。
+        戻すのは n_e・n_i・w・φ・誘電体の表面電荷 q_surf と壁・生成の累計 (wall・gen_total)。
+        t・step_count・history・アキュムレータはサブステップを全部終えてから進めるので退避不要。
+        timing・反復回数・warnings は診断値なので戻さない。
         """
-        return self.n_e.copy(), self.n_i.copy(), self.w.copy(), self.phi.copy(), dict(self.wall), self.gen_total
+        return (self.n_e.copy(), self.n_i.copy(), self.w.copy(), self.phi.copy(), dict(self.wall), self.gen_total,
+                self.q_surf.copy())
 
     def _restore_step_state(self, saved) -> None:
-        n_e, n_i, w, phi, wall, gen_total = saved
+        n_e, n_i, w, phi, wall, gen_total, q_surf = saved
         self.n_e[:] = n_e
         self.n_i[:] = n_i
         self.w[:] = w
         self.phi = phi
         self.wall.update(wall)
         self.gen_total = gen_total
+        self.q_surf[:] = q_surf
 
     def step(self, should_stop=None) -> np.ndarray | None:
         """流体1サイクル (fluid1d.Fluid1dSimulation.step と同じ設計)。
@@ -1077,6 +1158,7 @@ class Fluid2dSimulation:
         h["wall_e"].append(self.wall["electron"])
         h["wall_i"].append(self.wall["ion"])
         h["gen_total"].append(self.gen_total)
+        h["surf_q"].append(float(self.q_surf.sum()))
         return self.phi
 
     # ---- 時間平均・位相分解アキュムレータ (pic.py の averaged_fields/cycle_data と同じキー体系) --

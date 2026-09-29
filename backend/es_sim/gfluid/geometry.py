@@ -14,9 +14,21 @@ v1 fluid2d (EAFE/FEM-SG) と同じ「節点中心の有限体積 + エッジ重�
 - エッジ重み: 辺を挟む 2 つの半チューブ (EB Poisson と同じ) の面積重みのうち、辺に平行な
   標本線が端から端まで気体中を通る部分だけを開口として数える (薄い固体越しに漏れない)。
   全て非負なので行列は常に M 行列 (v1 の非 Delaunay メッシュで出る負の重みは起きない)。
-- 壁: domain 外周 (symmetry・rz 対称軸・periodic 以外) と固体 (導体・誘電体) の表面。表面は
+- 壁: domain 外周の Dirichlet の辺と固体 (導体・誘電体) の表面。外周の symmetry・境界条件なし
+  (Neumann)・rz 対称軸は自然境界 (反射、v1 と同じ。Neumann を反射にした理由は prompts/129)。表面は
   格子幅の 1/4 以下の小片に分け、気体側の点を含む双対セルの節点 (固体内部なら併合先) に
   面積 (軸対称は 2π r 倍)・法線 (気体 → 壁)・SEE γ を持たせる。
+- 誘電体表面の小片は帯電する (prompts/129、wall_dielectric)。表面電荷は小片を受け持つ輸送節点
+  (wall_node) に置く (v1 の「壁エッジの端点」と同じ)。壁の流束条件は壁の密度をその節点の密度で
+  代用する (Γ_e = n_e·v̄_e/4) ので、浮遊条件 (Γ_e = Γ_i) を満たすにはその節点の電位が下がる必要が
+  あり、電荷もその節点に置くのが整合する。界面を挟む 2 節点へ ε の直列比で分ける置き方は、静電場
+  としては格子に揃わない界面でも 1D 厳密だが、シースが格子で解像されない既定のような粗い格子
+  (h ≫ λ_D) では電荷の約 7 割が固体側の節点に載り、誘電体の内部が大きく負になった (UI の既定
+  サンプルの DC、1000 ステップ: 内部 −59 V、周りのプラズマ約 104 V・輸送節点 85〜97 V。表面電荷の
+  総量は流束の釣り合いで決まるのでどちらの置き方でもほぼ同じ −62 / −64 nC/m)。輸送節点に置くと
+  内部は 99〜105 V に留まる。W を含む双対セルの節点に置く場合も、その節点が固体内部 (併合元) の
+  小片では同じことが起きる。代わりに電荷の位置は界面から格子幅程度ずれる (与えた σ に対する静的な
+  電位の誤差は O(h)。浮遊電位そのものは流束の釣り合いで決まるので影響は小さい)。
 - 壁向きの電場 E·n: 壁上の点 W と、そこから法線の逆向きに 1 格子間隔 L だけ気体側へ入った
   点 A の電位差 (φ(A) − φ(W))/L (φ は節点値の双一次補間、導体の φ(W) は電極電位そのもの)。
   外周の辺では A はちょうど隣の節点になり、v1 の「壁に接する要素の E」と同じ量になる。
@@ -62,6 +74,7 @@ class FluidGraph:
     wall_normal: np.ndarray       # (W, 2) 単位法線 (気体 → 壁)
     wall_gamma: np.ndarray        # (W,) SEE γ
     wall_group: np.ndarray        # (W,) 導体表面なら Dirichlet グループ番号、それ以外 -1
+    wall_dielectric: np.ndarray   # (W,) 誘電体表面の小片か (帯電する、モジュール docstring)
     wall_w_idx: np.ndarray        # (W, 4) 壁上の点 W の双一次補間の節点
     wall_w_wt: np.ndarray         # (W, 4)
     wall_a_idx: np.ndarray        # (W, 4) 気体側の点 A = W − L·n の双一次補間の節点
@@ -258,7 +271,11 @@ def _edges(model: GeometryModel, grid: CartesianGrid, cell_state: np.ndarray, ac
 
 
 def _side_walls(model: GeometryModel, grid: CartesianGrid, eps: float):
-    """外周の壁 (節点ごとの辺の区間のうち気体に接する部分)。2π は掛けない。"""
+    """外周の壁 (Dirichlet の辺の、節点ごとの区間のうち気体に接する部分)。2π は掛けない。
+
+    symmetry・periodic・境界条件なし (Neumann) の辺は壁にしない (自然境界 = 反射。v1 と同じ、
+    Neumann を反射にした理由は prompts/129)。
+    """
     dom = model.domain
     ridx = model.radial_axis()
     tol = model.tol
@@ -266,7 +283,7 @@ def _side_walls(model: GeometryModel, grid: CartesianGrid, eps: float):
     t_lo = np.arange(N_SIDE) / N_SIDE
     out = []
     for side, sbc in model.sides.items():
-        if sbc.kind in ("symmetry", "periodic"):
+        if sbc.kind != "dirichlet":
             continue
         if (ridx == 1 and side == "bottom" and abs(dom.y0) <= tol) or (
             ridx == 0 and side == "left" and abs(dom.x0) <= tol
@@ -403,7 +420,9 @@ def build_fluid_graph(
     if not np.any(active):
         raise ValueError("流体輸送領域が空です (domain 全体が固体です)")
 
-    parts = _side_walls(model, grid, eps) + _solid_walls(model, grid, eps)
+    sides = _side_walls(model, grid, eps)
+    solids = _solid_walls(model, grid, eps)
+    parts = sides + solids
     if parts:
         node, area, nrm, gamma, group, wx, wy = (np.concatenate(a) for a in zip(*parts))
     else:
@@ -411,6 +430,9 @@ def build_fluid_graph(
         area = gamma = wx = wy = np.zeros(0)
         nrm = np.zeros((0, 2))
         group = np.zeros(0, dtype=np.int64)
+    # 誘電体表面の小片 (固体の小片のうち Dirichlet グループを持たないもの。外周の壁は電極だけ)
+    diel = np.concatenate([np.zeros(p[0].size, dtype=bool) for p in sides] + [p[4] < 0 for p in solids]
+                          + [np.zeros(0, dtype=bool)])
     has_wall = np.zeros(grid.n_nodes, dtype=bool)
     has_wall[node] = True
 
@@ -444,7 +466,7 @@ def build_fluid_graph(
     r = sub.row
     node = sub.col.astype(np.int64)
     area = two_pi * area[r] * sub.data
-    nrm, gamma, group, wx, wy = nrm[r], gamma[r], group[r], wx[r], wy[r]
+    nrm, gamma, group, wx, wy, diel = nrm[r], gamma[r], group[r], wx[r], wy[r], diel[r]
 
     # 壁向き電場のプローブ: W と、法線の逆向きに 1 格子間隔 (外周ではちょうど隣の節点) 入った A
     lw = 1.0 / np.sqrt((nrm[:, 0] / grid.dx) ** 2 + (nrm[:, 1] / grid.dy) ** 2) if nrm.size else np.zeros(0)
@@ -469,6 +491,7 @@ def build_fluid_graph(
         wall_normal=nrm,
         wall_gamma=gamma,
         wall_group=group,
+        wall_dielectric=diel,
         wall_w_idx=w_idx,
         wall_w_wt=w_wt,
         wall_a_idx=a_idx,

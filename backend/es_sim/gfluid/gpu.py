@@ -14,8 +14,9 @@ CartesianFluid2dSimulation (gfluid.simulation) と同じ輸送グラフ・物理
   制御量) と、BiCGSTAB・GMG の収束判定だけ。サブステップ数の上限 (超えたら ValueError)・サブステップの
   合間の停止要求 (デバイスの状態をその場でステップ開始時へ戻す)・Joule 緩和時間 (体積あたりの加熱率、
   電子がほぼ空の節点を除く) は v1 の step と同じ判定。
-- n_e / n_i / w / phi はデバイスが正。属性として読むとホストへ写し、代入 (または読んだ配列の
-  書き換え) は次のステップの前にデバイスへ戻す。フレーム・時間平均・位相分解は v1 と同じ形。
+- n_e / n_i / w / phi / q_surf (誘電体の表面電荷、prompts/129) はデバイスが正。属性として読むとホストへ
+  写し、代入 (または読んだ配列の書き換え) は次のステップの前にデバイスへ戻す。フレーム・時間平均・
+  位相分解は v1 と同じ形。
 
 離散化は CPU 版と同じなので結果は丸め誤差の範囲で一致する (総和の順序が違うのでビット一致は
 しない)。陽的検証経路 (explicit) と linear_solver="direct" は CPU 版を使う
@@ -60,12 +61,12 @@ _KERNELS = (
     "fl_coeffs", "fl_edges", "fl_nodes", "fl_wall_ci", "fl_wall_diag", "fl_diag", "fl_rhs", "fl_floor",
     "fl_see", "fl_gwe", "fl_joule", "fl_scale2", "fl_energy_off", "fl_wallgen", "fl_poisson_rhs",
     "fl_fixed", "bcg_init", "bcg_p", "bcg_v", "bcg_s", "bcg_t", "bcg_x", "fl_nemax", "fl_stats", "fl_accum",
-    "fl_tri_e",
+    "fl_tri_e", "fl_surf", "fl_sum",
 )
 
 
 class _DeviceField:
-    """GPU 版の状態変数 (n_e / n_i / w / phi) の属性。デバイスが正で、読むとホストへ写す。
+    """GPU 版の状態変数 (n_e / n_i / w / phi / q_surf) の属性。デバイスが正で、読むとホストへ写す。
 
     読んだ配列はその場で書き換えられるかもしれないので、読み書きのどちらでも「ホスト側が新しい
     かもしれない」印を付け、次のステップの前にデバイスへ戻す (_GpuFluid.push)。
@@ -103,6 +104,7 @@ class GpuCartesianFluid2dSimulation(CartesianFluid2dSimulation):
     n_i = _DeviceField()
     w = _DeviceField()
     phi = _DeviceField()
+    q_surf = _DeviceField()
 
     def __init__(self, project: Project, device: Device | str | None = None):
         dev = device if isinstance(device, Device) else get_device(device if device is not None else "cuda")
@@ -151,16 +153,17 @@ class GpuCartesianFluid2dSimulation(CartesianFluid2dSimulation):
         h["wall_e"].append(self.wall["electron"])
         h["wall_i"].append(self.wall["ion"])
         h["gen_total"].append(self.gen_total)
+        h["surf_q"].append(g.qsurf_total)   # 誘電体の表面電荷の合計 (デバイスで集約、属性を読まない)
         return g.phi
 
     def _state_finite(self, phi) -> bool:
         return self._g.n_bad == 0
 
     def _save_step_state(self):
-        """ステップ開始時のデバイスの状態 (n_e・n_i・w・φ と壁損失・生成の積算) の複製。"""
+        """ステップ開始時のデバイスの状態 (n_e・n_i・w・φ・誘電体の表面電荷と壁損失・生成の積算) の複製。"""
         g = self._g
         with g.stream:
-            return tuple(a.copy() for a in (g.ne, g.ni, g.w, g.phi, g.acc_wg))
+            return tuple(a.copy() for a in (g.ne, g.ni, g.w, g.phi, g.acc_wg, g.qsurf))
 
     def _restore_step_state(self, saved) -> None:
         """退避した状態へその場で戻す (CUDA Graph が配列のポインタを持つので差し替えない)。
@@ -169,7 +172,7 @@ class GpuCartesianFluid2dSimulation(CartesianFluid2dSimulation):
         """
         g = self._g
         with g.stream:
-            for dst, src in zip((g.ne, g.ni, g.w, g.phi, g.acc_wg), saved):
+            for dst, src in zip((g.ne, g.ni, g.w, g.phi, g.acc_wg, g.qsurf), saved):
                 dst[...] = src
             g.version += 1           # 途中のサブステップで読まれたホスト側の写しを無効にする
 
@@ -259,7 +262,7 @@ class _EbPoisson:
         sim = g.sim
         g.k["fl_poisson_rhs"](*g._g1(g.nn), (
             self.qs, g.cp_ptr, g.cp_idx, g.cp_val, g.ni, g.ne, self.g_ptr, self.g_idx, self.g_val,
-            g.vgrp, self.mask, np.int32(g.nn), g.b))
+            g.vgrp, self.mask, g.qsurf, np.float64(g.qdiv), np.int32(g.nn), g.b))
         solver = self.solver
         if solver.direct:
             solver.launch_solve(self.b2, self.x2, 1)            # 密な逆行列で厳密に (同期なし)
@@ -310,7 +313,7 @@ class _AmrPoisson:
         n = g.nn
         g.k["fl_poisson_rhs"](*g._g1(n), (
             self.qs, g.cp_ptr, g.cp_idx, g.cp_val, g.ni, g.ne, self.g_ptr, self.g_idx, self.g_val,
-            g.vgrp, self.mask, np.int32(n), self.ext[:n]))
+            g.vgrp, self.mask, g.qsurf, np.float64(g.qdiv), np.int32(n), self.ext[:n]))
         self.ext[n:] = g.vgrp[: self.K]
         self.bc[...] = self.PTq @ self.ext
         solver = self.solver
@@ -365,6 +368,7 @@ class _GpuFluid:
         self.ni = dev(d["_host_n_i"][act])
         self.w = dev(d["_host_w"][act])
         self.phi = dev(d["_host_phi"])
+        self.qsurf = dev(d["_host_q_surf"])      # 誘電体の表面電荷 (全節点、2π 込み、prompts/129)
         self.vol = dev(sim.node_vol)
 
         # ---- 辺と接続リスト ----
@@ -397,6 +401,17 @@ class _GpuFluid:
         self.wgrp = dev(g.wall_group[wo], i32)
         self.wlen = dev(g.wall_len[wo])
         self.gamma = dev(sim.gamma_see)
+        # 誘電体表面の帯電 (prompts/129): 帯電する小片の印 (節点順) と節点ごとのその面積の合計。
+        # 表面電荷は小片を受け持つ輸送節点 (の全節点番号 gidx) に置く (CPU 版 _set_surface_charge_ends と同じ)
+        chg = np.zeros(len(loc))
+        chg[sim.surf_elem] = 1.0
+        self.wchg = dev(chg[wo])
+        self.sarea = dev(np.bincount(sim.surf_loc, weights=sim.surf_area, minlength=n))
+        self.n_surf = int(sim.surf_elem.size)
+        self.gidx = dev(act, i32)
+        self.qdiv = 2.0 * math.pi if sim.rz else 1.0
+        self.qsum = cp.zeros(NB)
+        self.qsurf_total = 0.0
 
         # ---- Poisson (電荷の写像は共通、解き方は一様格子の EB / AMR の合成格子で別) ----
         cm = g.charge_map[:, act].tocsr()
@@ -464,6 +479,8 @@ class _GpuFluid:
         with self.stream:
             if name == "phi":
                 return self.phi.get()
+            if name == "q_surf":
+                return self.qsurf.get()
             out = np.zeros(self.nn)
             out[self.sim.active_idx] = getattr(self, {"n_e": "ne", "n_i": "ni", "w": "w"}[name]).get()
             return out
@@ -479,6 +496,8 @@ class _GpuFluid:
                 host = np.asarray(d["_host_" + name], dtype=np.float64)
                 if name == "phi":
                     self.phi.set(np.ascontiguousarray(host))
+                elif name == "q_surf":
+                    self.qsurf.set(np.ascontiguousarray(host))
                 else:
                     getattr(self, {"n_e": "ne", "n_i": "ni", "w": "w"}[name]).set(np.ascontiguousarray(host[act]))
                 d["_host_" + name + "_ver"] = self.version
@@ -655,6 +674,10 @@ class _GpuFluid:
         self._solve("e", self.ne, self.sion, 1.0, self.see, self.wde, dt)
         k["fl_floor"](*g1, (self.ne_new, np.float64(FLOOR_N), n))
         k["fl_gwe"](*g1, (self.wde, self.ne_new, self.see, n, reflective, self.gwe, self.wdw))
+        # 誘電体の表面電荷 (壁損失と同じ流束。次のサブステップの Poisson から効く、CPU 版と同じ)
+        if self.n_surf and not sim.debug_reflective_walls:
+            k["fl_surf"](*g1, (self.ci, self.warea, self.wchg, self.wptr, self.sarea, self.ni_new, self.ne_new,
+                               self.gamma, self.ce, self.gidx, n, np.float64(QE * dt), self.qsurf))
         t2 = time.perf_counter()
         sim.timing["transport"] += t2 - t1
 
@@ -722,7 +745,9 @@ class _GpuFluid:
         self.k["fl_nemax"]((NB,), (NT,), (self.ne, n, self.nemax))
         self.k["fl_stats"]((NB,), (NT,), (self.ne, self.ni, self.w, self.vol, self.mue, self.te, self.joule,
                                          n, self.phi, np.int32(self.nn), self.nemax, self.stat))
+        self.k["fl_sum"]((NB,), (NT,), (self.qsurf, np.int32(self.nn), self.qsum))
         h = self.stat.get()
+        self.qsurf_total = float(self.qsum.get().sum())
         self.ne_total = float(h[0:NB].sum())
         self.ni_total = float(h[NB:2 * NB].sum())
         self.n_bad = int(h[2 * NB:3 * NB].sum())

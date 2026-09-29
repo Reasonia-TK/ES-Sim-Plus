@@ -820,6 +820,7 @@ export interface Fluid2dHistoryDict {
   wall_e: number[]; // 全壁合計の電子吸収 (累計)
   wall_i: number[]; // 全壁合計のイオン吸収 (累計)
   gen_total: number[]; // 電離による累計生成数
+  surf_q?: number[]; // 誘電体の表面電荷の合計 [C/m] (軸対称は [C]、prompts/129。以前の結果には無い)
 }
 
 // 完了時の時間平均フィールド一式 (done メッセージの result.fields)。phi/n_e/n_i/t_e/ionization は

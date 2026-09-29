@@ -221,8 +221,9 @@ GUI のメッシュ設定で「直交格子+埋め込み境界 (v2・GPU)」を�
 - GPU (CuPy) は v2 エンジン (`mesh.mode: "cartesian"`) の静電場・PIC・DSMC・流体 2D のみ。v2 の PIC と
   DSMC は現状 GPU 専用 (CPU で回す場合は unstructured/structured の v1 エンジンを使う)。v2 の流体 2D は
   1,000 節点以上なら GPU、それ未満・陽的検証経路・`linear_solver: "direct"` は CPU。v2 は矩形 domain のみ対応
-- 流体 2D (v1・v2 共通) は誘電体表面と「なし (Neumann)」の外周辺を吸収壁として扱うが帯電させないため、
-  条件によっては電子だけが抜けて電位が上がり続ける (外周は symmetry か電極にするのが安全)
+- 流体 2D の外周の「なし (Neumann)」の辺は反射壁 (symmetry と同じ。PIC では吸収壁のまま) で、粒子を
+  失わせたい外周の辺は電極 (Dirichlet) にする。誘電体の表面は吸収した電荷を蓄積して浮遊電位へ緩和する
+  (v1・v2・AMR・GPU 共通、[prompts/129](prompts/129-fluid2d-surface-charge.md))
 - v2 の局所細分化 (AMR) は静電場・PIC・DSMC・流体 2D に対応 (軌道追跡は基本格子)。PIC・DSMC の動的
   再格子化は時間平均区間の前だけ、流体 2D は静的な細分化のみ。粗細界面には粒子の自己力が残る (大きさは
   PIC の粒子ノイズや壁際の鏡像力と同程度、[prompts/122](prompts/122-amr-gpu-pic.md))。解に基づく

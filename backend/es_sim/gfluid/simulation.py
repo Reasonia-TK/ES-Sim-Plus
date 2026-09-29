@@ -5,13 +5,14 @@ v1 ``fluid2d.Fluid2dSimulation`` と**同じ物理・同じ時間積分・同じ
 輸送グラフと Poisson だけを v2 のものに差し替える (mesh.mode="cartesian" のとき)。
 
 - 輸送グラフ: 直交格子の双対セル (気体部分) を制御体積とし、固体を埋め込み境界として扱う
-  (gfluid.geometry)。種ごとの SG フラックス・壁の流束条件・SEE・Joule 加熱・反応・半陰的な
-  サブステップ分割・反復ソルバーは v1 のコードをそのまま使う (節点番号の付け方が違うだけ)。
+  (gfluid.geometry)。種ごとの SG フラックス・壁の流束条件・SEE・誘電体表面の帯電・Joule 加熱・
+  反応・半陰的なサブステップ分割・反復ソルバーは v1 のコードをそのまま使う (節点番号の付け方が
+  違うだけ)。
 - Poisson: v2 の EB 静電場の離散化 (eb.build) をそのまま使う。格子の節点数が DIRECT_MAX 以下なら
   疎行列の LU を初期化時に 1 回だけ分解して毎ステップ前進後退代入 (v1 と同じ流儀。小さな格子
   では GPU の反復法よりずっと速い)、それより大きい・または特異 (Dirichlet 無し) なら GMG-PCG
   (GPU があれば GPU) を前ステップの解から解き直す。電荷は双対セルの気体体積 × e(n_i − n_e)
-  (v1 と同じ集中質量近似)。
+  (v1 と同じ集中質量近似) と誘電体の表面電荷 (小片を受け持つ輸送節点に置く、prompts/129)。
 - 結果・フレームは表示用メッシュ (セルの 2 三角形分割、導体内は穴) の節点値・要素値で返す
   (/mesh の直交格子の表示用メッシュと同じ節点番号。/ws/fluid2d の started にも載せる)。
   mesh.amr の局所細分化は AMR 版 (gfluid.amr.AmrFluid2dSimulation、prompts/128) が
@@ -150,6 +151,16 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
         self._wall_group = g.wall_group
         self._wall_is_cond = g.wall_group >= 0
 
+        # 帯電する壁端 (v1 の _set_surface_charge_ends と同じ表): 誘電体表面の小片のうち、受け持つ
+        # 輸送節点が Poisson の未知節点のもの (固定節点 = 電極に接した誘電体の縁に落ちる分は電極へ
+        # 流れる扱い、v1 と同じ)
+        sel = np.nonzero(g.wall_dielectric & (g.wall_area > 0.0) & self._poisson_unknown()[g.wall_node])[0]
+        self._set_surface_charge_ends(sel, loc[sel], g.wall_area[sel])
+
+    def _poisson_unknown(self) -> np.ndarray:
+        """節点ごとに Poisson の未知数か (表面電荷を置くと電位に効く節点。AMR 版は差し替える)。"""
+        return self._op.mask.ravel() == MASK_UNKNOWN
+
     # ---- Poisson (v1 の splu を v2 の GMG-PCG に差し替え) ----------------------------------
 
     def _init_poisson(self, project: Project) -> None:
@@ -163,10 +174,14 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
         self.poisson_iters = 0
 
     def _solve_phi(self, t: float) -> np.ndarray:
-        """現在の n_e・n_i と時刻 t の電極電位で φ を解く (LU なら前進後退代入、GMG なら warm start)。"""
+        """現在の n_e・n_i・q_surf と時刻 t の電極電位で φ を解く (LU なら前進後退代入、GMG なら warm start)。
+
+        右辺は 2π を落とした単位 (eb.build): 体積電荷は charge_map (2π なし)、表面電荷 q_surf は
+        2π 込みの物理単位で持っているので軸対称では 2π で割る (v1 と同じ)。
+        """
         v = group_voltages(self.model, t)
         q = QE * np.asarray(self.graph.charge_map @ (self.n_i - self.n_e)).ravel()
-        b = self._q_static + q
+        b = self._q_static + q + (self.q_surf / (2.0 * np.pi) if self.rz else self.q_surf)
         if self._n_groups:
             b = b + self._coupling @ v
         op = self._op
