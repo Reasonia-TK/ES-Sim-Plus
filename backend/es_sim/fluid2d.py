@@ -935,7 +935,8 @@ class Fluid2dSimulation:
         τ_J ~ w / (Joule 加熱率) 以下にサブステップを刻む必要がある
         (壁損失の陰的化だけでは解消しない不安定性だったことを実測で確認済み)。
         直近 (前ステップ終了時) の φ・Te・n_e から Joule 加熱率を見積もり、
-        加熱側 (正) のみを対象に w/heating の最小値を返す (冷却側は問題にならない)。
+        加熱側 (正) のみを対象に w/heating の最小値を返す (冷却側は問題にならない。
+        電子がほぼ空の節点も除外する — 下の heating の行のコメント参照)。
         一様プラズマ・一様電場 E なら τ_J = (3/2)Te/(μ_e E²) (test_fluid2d.py で検証)。
 
         注: 導入時 (prompts/111) から加熱率 (節点へ配分した外延量 [eV/s]) を節点体積で
@@ -960,6 +961,12 @@ class Fluid2dSimulation:
         np.add.at(joule, self.j_idx, 0.5 * p_edge)
         # joule は外延量 [eV/s] なので節点体積で割り、w と同じ体積あたり [eV/(m³·s)] にする
         heating = np.maximum(joule, 0.0) / self.node_vol
+        # 電子がほぼ空の節点 (n_e が最大の 1e-3 以下、シース内など) は除外する: w が下限値付近の
+        # ため隣のエッジの電力の半分を受けるだけで w/heating が 1e-18 s 級まで縮み、健全な DC 放電
+        # でも陰極シースで 1 ステップ 1 億回超を要求してサブステップ上限を誤って超える (除外前は
+        # 修正前の τ_J でも 1000 回超の突発的な刻みになっていた)。これらの節点はエネルギーを
+        # ほとんど持たず、除外しても結果の差は相対 1e-4 以下 (UI サンプル形状の DC/RF 1500 ステップ)
+        heating = np.where(n_e_a > 1.0e-3 * np.max(n_e_a), heating, 0.0)
         w_a = self.w[self.active_idx]
         if not np.any(heating > 0.0):
             return math.inf

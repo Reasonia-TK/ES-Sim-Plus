@@ -569,3 +569,35 @@ def test_joule_relaxation_time_is_intensive_and_matches_uniform_field():
     r_fine = _uniform_field_tau_ratio(0.0005)  # 節点体積は 1/16
     assert r_fine == pytest.approx(r_coarse, rel=1e-9)
     assert 0.5 < r_coarse <= 1.0 + 1e-9
+
+
+def test_dc_cathode_sheath_does_not_trip_substep_limit():
+    """健全な DC 放電 (100×50 mm、0 V/100 V、上下 symmetry、既定条件) でサブステップが突発的に増えない。
+
+    陰極シースのほぼ空の節点 (w が下限値付近) が τ_J の最小値を決めていたため、節点体積を
+    割る修正の後は step 124 前後で 1 ステップ 1 億回超を要求し、サブステップ上限で誤って
+    ValueError になっていた (修正前の τ_J でも step 101 で 4,228 回の突発的な刻み)。
+    """
+    geo = Geometry(
+        domain=Domain(polygon=[(0, 0), (0.1, 0), (0.1, 0.05), (0, 0.05)]),
+        boundaries=[
+            BoundaryCondition(edges=[3], type="dirichlet", voltage=0.0),
+            BoundaryCondition(edges=[1], type="dirichlet", voltage=100.0),
+            BoundaryCondition(edges=[0, 2], type="symmetry"),
+        ],
+    )
+    s = Fluid2dSettings(init_density_m3=1.0e15, gas_pressure_pa=50.0, n_steps=200, frame_every=200)
+    sim = Fluid2dSimulation(_project2d(geo, MeshSettings(size=0.002, mode="unstructured"), s))
+    n_sub: list[int] = []
+    step_once = sim._step_once
+
+    def counting_step_once(*args, **kwargs):
+        n_sub[-1] += 1
+        return step_once(*args, **kwargs)
+
+    sim._step_once = counting_step_once
+    for _ in range(200):
+        n_sub.append(0)
+        sim.step()
+    assert max(n_sub) <= 5
+    assert np.all(np.isfinite(sim.phi)) and float(np.max(sim.phi)) < 110.0

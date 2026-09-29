@@ -346,6 +346,30 @@ def test_joule_relaxation_time_matches_uniform_field_analytic(coord):
     assert sim._joule_relaxation_time(te0, mu_e0) == pytest.approx(expected, rel=1e-9)
 
 
+def test_dc_cathode_sheath_does_not_trip_substep_limit():
+    """健全な DC 放電で陰極シースのほぼ空の節点が τ_J を決めず、サブステップが突発的に増えない
+    (除外前は step 144 前後で 1 ステップ 9 千万回を要求して上限で ValueError)。"""
+    bnd = [{"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": 100.0},
+           {"edges": [0, 2], "type": "symmetry"}]
+    sim = CartesianFluid2dSimulation(
+        _project([], bnd, size=2e-3, w=0.1, h=0.05,
+                 fluid={"init_density_m3": 1e15, "init_te_ev": 2.0, "gas_pressure_pa": 50.0}),
+        device="cpu")
+    n_sub = []
+    step_once = sim._step_once
+
+    def counting_step_once(*args, **kwargs):
+        n_sub[-1] += 1
+        return step_once(*args, **kwargs)
+
+    sim._step_once = counting_step_once
+    for _ in range(200):
+        n_sub.append(0)
+        sim.step()
+    assert max(n_sub) <= 5
+    assert np.all(np.isfinite(sim.phi)) and float(np.max(sim.phi)) < 110.0
+
+
 def test_rejects_periodic_boundary():
     bnd = [{"edges": [0, 2], "type": "periodic"},
            {"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": 0.0}]
