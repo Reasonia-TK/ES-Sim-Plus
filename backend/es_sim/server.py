@@ -1098,7 +1098,8 @@ async def ws_fluid1d(ws: WebSocket) -> None:
 # 同じ project から生成されるメッシュを使う (Project.geometry/mesh が変わっていなければ
 # 節点番号・座標は /mesh のときと完全に一致する) ので、二重送信を避けてペイロードを削減する。
 # 例外: mesh.mode="cartesian" (v2 直交格子版、prompts/125) は started に表示用メッシュを載せる
-# (mesh.amr があると /mesh は細分化したメッシュを返すが、流体は基準格子で解くため)。
+# (mesh.amr があると流体の AMR 版はぶら下がり節点を含む適合三角形分割で解くので、/mesh の表示用
+# メッシュと節点・要素が違う。prompts/128)。
 
 _last_simfluid2d: Fluid2dSimulation | None = None
 _fluid2d_lock = asyncio.Lock()

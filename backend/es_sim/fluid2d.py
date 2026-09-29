@@ -1139,12 +1139,7 @@ class Fluid2dSimulation:
             if should_stop is not None and should_stop():
                 break
             phi = self.step()
-            if not (
-                np.all(np.isfinite(phi))
-                and np.all(np.isfinite(self.n_e))
-                and np.all(np.isfinite(self.n_i))
-                and np.all(np.isfinite(self.w))
-            ):
+            if not self._state_finite(phi):
                 raise ValueError(
                     f"数値発散を検出しました (step {self.step_count}: 電位・密度・"
                     "エネルギーのいずれかが非有限値)。dt を小さくする、メッシュを"
@@ -1160,6 +1155,15 @@ class Fluid2dSimulation:
         self.fields = self.averaged_fields()
         self.cycle = self.cycle_data()
         return self.history, frames
+
+    def _state_finite(self, phi: np.ndarray) -> bool:
+        """電位・密度・エネルギーが全て有限か (run_batch の発散検出。GPU 版は差し替える)。"""
+        return bool(
+            np.all(np.isfinite(phi))
+            and np.all(np.isfinite(self.n_e))
+            and np.all(np.isfinite(self.n_i))
+            and np.all(np.isfinite(self.w))
+        )
 
     def prepare_continue(
         self,

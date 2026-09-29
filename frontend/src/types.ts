@@ -38,6 +38,10 @@ export interface AmrSettings {
   // セルを細かくする (時間平均区間の前だけ、max_level まで)。0/未指定 = 静的
   pic_regrid_every?: number;
   pic_h_over_debye?: number;
+  // DSMC の動的再格子化 (prompts/127): この間隔 [ステップ] ごとに 格子幅/平均自由行程 > dsmc_h_over_mfp の
+  // セルを細かくする (時間平均区間の前だけ、max_level まで)。0/未指定 = 静的
+  dsmc_regrid_every?: number;
+  dsmc_h_over_mfp?: number;
 }
 
 // 円領域のパラメトリック形状 (中心+半径)。メッシュ生成時にバックエンド側で多角形化する
@@ -1375,7 +1379,7 @@ export interface Project {
     // "cartesian" (prompts/119): v2 エンジン (直交格子 + 埋め込み境界)。静電場は GMG-PCG、PIC は GPU
     mode?: "unstructured" | "structured" | "cartesian";
     // cartesian モードの局所細分化 (prompts/121, 122)。null/undefined = 細分化なし。静電場 (Solve・
-    // プロファイル) と PIC に適用 (軌道追跡・DSMC・流体は基本格子)。適応細分化は静電場のみ
+    // プロファイル)・PIC・DSMC・流体 2D に適用 (軌道追跡は基本格子)。適応細分化は静電場のみ
     amr?: AmrSettings | null;
   };
   solver?: { backend: "numpy" | "cupy" | "auto" };

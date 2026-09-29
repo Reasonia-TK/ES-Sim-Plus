@@ -153,17 +153,21 @@ def debye_tags(lay: "AmrPicLayout", kappa: np.ndarray, hier: AmrHierarchy, h_ove
     return tags
 
 
-def _block_tables(hier: AmrHierarchy, op: CompositeOperator):
+def block_index(hier: AmrHierarchy):
+    """葉セルの所属判定 (kernels の es_locate / ds_leaf_cell) のブロック表。
+
+    戻り値: (di, refined, blockid, n_blocks, block_of_level)。di = [L, bf, nx0, ny0, (offset_l, nbx_l)...]、
+    refined / blockid はレベルごとのブロック解像度の配列を連結したもの、block_of_level[l] はレベル l の
+    ブロック解像度の配列 (領域外は -1)。セル番号 = ブロック番号·bf² + 局所番号。
+    """
     L = hier.max_level
     bf = hier.bf
     b = hier.base
-    ref_parts, bid_parts, tabs = [], [], []
+    ref_parts, bid_parts = [], []
     di = [L, bf, b.nx, b.ny]
     off = 0
     n_blocks = 0
     block_of_level = []
-    s1 = bf + 1
-    loc = np.arange(s1)
     for lvl in range(hier.n_levels):
         region = hier.region_blocks[lvl]
         nby, nbx = region.shape
@@ -172,19 +176,38 @@ def _block_tables(hier: AmrHierarchy, op: CompositeOperator):
         bj, bi = np.nonzero(region)
         bid[bj, bi] = n_blocks + np.arange(bj.size)
         block_of_level.append(bid)
+        ref_parts.append(refined.astype(np.uint8).ravel())
+        bid_parts.append(bid.astype(np.int32).ravel())
+        di += [off, nbx]
+        off += nbx * nby
+        n_blocks += bj.size
+    return (np.asarray(di, dtype=np.int64), np.concatenate(ref_parts), np.concatenate(bid_parts), n_blocks,
+            block_of_level)
+
+
+def cell_id(hier: AmrHierarchy, block_of_level: list[np.ndarray], lvl: int, ci: np.ndarray, cj: np.ndarray) -> np.ndarray:
+    """レベル lvl のセル (ci, cj) のセル番号 (ブロック番号·bf² + 局所番号)。"""
+    bf = hier.bf
+    return block_of_level[lvl][cj // bf, ci // bf] * bf * bf + (cj % bf) * bf + (ci % bf)
+
+
+def _block_tables(hier: AmrHierarchy, op: CompositeOperator):
+    di, refined, blockid, n_blocks, block_of_level = block_index(hier)
+    L = hier.max_level
+    bf = hier.bf
+    s1 = bf + 1
+    loc = np.arange(s1)
+    tabs = []
+    for lvl in range(hier.n_levels):
+        bj, bi = np.nonzero(hier.region_blocks[lvl])
         # ブロックの (bf+1)² 格子点 → 最細添字 → 節点番号
         s = L - lvl
         I = ((bi[:, None, None] * bf + loc[None, None, :]) << s) * np.ones((1, s1, 1), dtype=np.int64)
         J = ((bj[:, None, None] * bf + loc[None, :, None]) << s) * np.ones((1, 1, s1), dtype=np.int64)
         keys = _canon_key(hier, I.ravel(), J.ravel())
         tabs.append(op.node_index(keys).astype(np.int32))
-        ref_parts.append(refined.astype(np.uint8).ravel())
-        bid_parts.append(bid.astype(np.int32).ravel())
-        di += [off, nbx]
-        off += nbx * nby
-        n_blocks += bj.size
-    return (np.asarray(di, dtype=np.int64), np.concatenate(ref_parts), np.concatenate(bid_parts),
-            np.concatenate(tabs) if tabs else np.zeros(0, dtype=np.int32), n_blocks, block_of_level)
+    return (di, refined, blockid, np.concatenate(tabs) if tabs else np.zeros(0, dtype=np.int32), n_blocks,
+            block_of_level)
 
 
 def build_pic_layout(model: GeometryModel, hier: AmrHierarchy, op: CompositeOperator | None = None) -> AmrPicLayout:

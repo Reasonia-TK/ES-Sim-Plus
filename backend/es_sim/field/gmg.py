@@ -133,24 +133,29 @@ class _CudaBackend:
                               i(fx), i(fy), i(lf.px), i(lf.py)))
 
 
-def dense_inverse(a: np.ndarray, singular: bool) -> np.ndarray:
+def dense_inverse(a, singular: bool, xp=np):
     """対称な密行列の逆行列。特異 (零空間 = 定数、全周期/Neumann) なら擬似逆行列。
 
     擬似逆行列は SVD (4096 元で ~20 s) の代わりに、零空間 u = 1/√n を持ち上げた正則行列の逆から
     A⁺ = (A + α u uᵀ)⁻¹ − u uᵀ/α で求める (A u = 0 の対称半正定値行列で厳密)。零空間が定数で
     ない場合 (想定外) は SVD にフォールバックする。
+
+    xp: 配列モジュール (numpy / cupy)。GPU で使う逆行列は cupy (cuSOLVER) で求める — 開発機の
+    マルチスレッド OpenBLAS は LAPACK の呼び出しに行列の大きさによらず ~1.5 s かかるため
+    (750 元の逆行列: OpenBLAS 1.5 s、1 スレッド 0.03 s、cuSOLVER 0.006 s)。
     """
+    a = xp.asarray(a, dtype=xp.float64)
     if not singular:
-        return np.linalg.inv(a)
+        return xp.linalg.inv(a)
     n = a.shape[0]
     if n == 0:
-        return np.zeros((0, 0))
-    u = np.full(n, 1.0 / np.sqrt(n))
-    scale = float(np.max(np.abs(np.diag(a)))) or 1.0
-    if np.max(np.abs(a @ u)) > 1e-9 * scale:
-        return np.linalg.pinv(a)
-    uu = np.outer(u, u)
-    return np.linalg.inv(a + scale * uu) - uu / scale
+        return xp.zeros((0, 0))
+    u = xp.full(n, 1.0 / np.sqrt(n))
+    scale = float(xp.max(xp.abs(xp.diag(a)))) or 1.0
+    if float(xp.max(xp.abs(a @ u))) > 1e-9 * scale:
+        return xp.linalg.pinv(a)
+    uu = xp.outer(u, u)
+    return xp.linalg.inv(a + scale * uu) - uu / scale
 
 
 def _dense_operator(op: LevelOperator) -> tuple[np.ndarray, np.ndarray]:
@@ -237,7 +242,7 @@ class GMGSolver:
         idx, a = _dense_operator(ops[-1])
         self._bottom_idx = dev.asarray(idx, dtype=np.int64)
         if idx.size:
-            inv = dense_inverse(a, self.singular)
+            inv = dense_inverse(a, self.singular, xp=dev.xp)
         else:
             inv = np.zeros((0, 0))
         self._bottom_inv = dev.asarray(inv, dtype=np.float64)
@@ -303,9 +308,8 @@ class GMGSolver:
         self.direct = self.finest.n_unknowns <= DENSE_DIRECT_MAX
         if self.direct:
             idx, a = _dense_operator(self.finest)
-            inv = dense_inverse(a, self.singular)
             self._direct_idx = cp.asarray(idx.astype(np.int64))
-            self._direct_inv = cp.asarray(inv)
+            self._direct_inv = dense_inverse(a, self.singular, xp=cp)
 
     def _launch_dot(self, a, b, slot: int) -> None:
         n = a.size

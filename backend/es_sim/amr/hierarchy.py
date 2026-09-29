@@ -95,6 +95,9 @@ class AmrSpec:
     # PIC の動的再格子化 (prompts/123): 間隔 [ステップ] (0 = 静的) と 格子幅/λ_D の上限
     pic_regrid_every: int = 0
     pic_h_over_debye: float = 1.0
+    # DSMC の動的再格子化 (prompts/127): 間隔 [ステップ] (0 = 静的) と 格子幅/平均自由行程 の上限
+    dsmc_regrid_every: int = 0
+    dsmc_h_over_mfp: float = 0.5
 
     @classmethod
     def from_settings(cls, amr) -> "AmrSpec":
@@ -116,6 +119,8 @@ class AmrSpec:
             adapt_iters=int(getattr(amr, "adapt_iters", 3)),
             pic_regrid_every=int(getattr(amr, "pic_regrid_every", 0)),
             pic_h_over_debye=float(getattr(amr, "pic_h_over_debye", 1.0)),
+            dsmc_regrid_every=int(getattr(amr, "dsmc_regrid_every", 0)),
+            dsmc_h_over_mfp=float(getattr(amr, "dsmc_h_over_mfp", 0.5)),
         )
 
 

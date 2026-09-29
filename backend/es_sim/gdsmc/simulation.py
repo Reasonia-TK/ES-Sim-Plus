@@ -17,6 +17,12 @@ step_count / timing / DsmcResult) を持ち、server の /dsmc・/ws/dsmc から
 - 乱数は Philox (カウンタ方式)。統計的には等価だがビット一致はしない。
 - 平滑化 (smoothing_passes) は 4 近傍の体積重み対称拡散 (θ = 0.2、総量保存・正値)。
 - threads 設定は無視 (GPU)。mesh_scale は格子幅 × mesh_scale の DSMC 専用格子。
+
+## AMR (mesh.amr、prompts/127)
+
+mesh.amr で細分化が起きる (境界近傍・指定矩形) なら、衝突・サンプリングのセルを AMR 階層の葉セルに
+する (kernels/dsmc.cu の -DES_AMR 変種が移動の終点の葉セルをブロック表で求める)。時間刻みの既定は
+最細レベルの格子幅で決める。結果は葉セルを 2 三角形に分けた表示用メッシュ (/mesh と同じ)。
 """
 
 from __future__ import annotations
@@ -26,11 +32,13 @@ import time
 
 import numpy as np
 
+from ..amr.cell_layout import AmrCellLayout, build_cell_layout, cell_of_points, mfp_tags, smooth_cells
+from ..amr.hierarchy import AmrHierarchy, AmrSpec
 from ..device import Device, get_device
 from ..dsmc import AMU, KB, MAX_CALLBACK_PARTICLES, SCCM_TO_PER_S, DsmcResult
 from ..eb.grid import make_grid
 from ..geom.model import GeometryModel
-from ..gpic.geometry import ParticleGeometry, cell_gas_volume
+from ..gpic.geometry import DisplayMesh, ParticleGeometry, cell_gas_volume
 from ..schema import DsmcSettings, Project
 
 _B_WALL, _B_SYM, _B_RES, _B_VAC = 0, 1, 2, 3
@@ -39,6 +47,8 @@ _SIDES = ("left", "right", "bottom", "top")
 _SIDE_EDGE = {"bottom": 0, "right": 1, "top": 2, "left": 3}   # 矩形 domain の外周エッジ番号
 #: 進捗コールバック・walk 診断の間隔 [ステップ] (v1 と同じ)
 PROGRESS_EVERY = 100
+#: 動的再格子化 (prompts/127) のためにセルの密度・温度を積算する間隔 [ステップ]
+TAG_EVERY = 4
 
 
 def _grid1(n: int) -> tuple[int]:
@@ -78,21 +88,39 @@ class GpuDsmcSimulation:
             raise ValueError("v2 DSMC は周期境界に未対応です")
         self.grid = grid = make_grid(model.domain, float(project.mesh.size) * float(s.mesh_scale))
         self.pgeo = pg = ParticleGeometry(model, grid)
-        self.n_cells = grid.nx * grid.ny
-        vol = cell_gas_volume(model, grid, pg.cell_state).ravel()
+        # AMR (prompts/127): 細分化が起きる (または平均自由行程での動的再格子化が有効) なら葉セルを
+        # 計算セルにする
+        self.lay: AmrCellLayout | None = None
+        self._regrid_every = 0
+        self.regrid_log: list[dict] = []
+        amr = project.mesh.amr
+        if amr is not None and (amr.max_level > 0 or amr.regions):
+            spec = AmrSpec.from_settings(amr)
+            hier = AmrHierarchy(model, grid, spec)
+            dynamic = spec.dsmc_regrid_every > 0 and spec.max_level > 0
+            if hier.max_level > 0 or dynamic:
+                self.lay = build_cell_layout(model, hier)
+                self._regrid_every = spec.dsmc_regrid_every if dynamic else 0
+        if self.lay is not None:
+            lay = self.lay
+            self.n_cells = lay.n_cells
+            vol = lay.cell_vol_gas
+            dm = self._display_of(lay)
+            # 動的再格子化でも時間刻みを変えなくてよいよう、到達しうる最細レベルの格子幅で決める
+            top = max(lay.hier.max_level, lay.hier.spec.max_level if self._regrid_every else 0)
+            h_cell = min(grid.dx, grid.dy) / (1 << top)
+        else:
+            self.n_cells = grid.nx * grid.ny
+            vol = cell_gas_volume(model, grid, pg.cell_state).ravel()
+            dm = pg.display_mesh()
+            h_cell = min(grid.dx, grid.dy)
         self.cell_vol = vol
         gas_volume = float(vol.sum())
         if gas_volume <= 0.0:
             raise ValueError("気体の領域がありません")
 
         # ---- 表示用メッシュ (v1 UI 互換、要素 = セルの 2 分割) ------------------------------
-        dm = pg.display_mesh()
-        self.mesh = dm
-        self.tris = dm.triangles
-        self._tri_cell = dm.tri_cell
-        # 要素の重み (v1 テストの面積重み平均と同じ使い方ができるよう、セルの気体体積を 2 等分)
-        self.area = vol[self._tri_cell] * 0.5
-        self.vol = self.area
+        self._set_display(dm)
 
         # ---- 境界 (外周の区間表・流入口) ------------------------------------------------
         self._build_boundaries()
@@ -102,19 +130,22 @@ class GpuDsmcSimulation:
         self.w = n_init * gas_volume / s.n_particles
         t_hot = max([s.init_temperature_k, s.wall_temperature_k] + [bc.temperature_k for bc in s.boundaries])
         v_mp = math.sqrt(2.0 * KB * t_hot / self.m)
-        self.dt = float(s.dt) if s.dt is not None else 0.25 * min(grid.dx, grid.dy) / v_mp
+        self.dt = float(s.dt) if s.dt is not None else 0.25 * h_cell / v_mp
 
         # ---- VHS -----------------------------------------------------------------------
         self._sig_coef = (math.pi * gas.d_ref_m**2 / math.gamma(2.5 - gas.omega)
                           * (2.0 * KB * gas.t_ref_k / self.mu) ** (gas.omega - 0.5))
         self._sig_pow = 1.0 - 2.0 * gas.omega
         cr0 = 2.0 * v_mp
-        self._sigcr_max = cp.full(self.n_cells, self._sig_coef * cr0 ** self._sig_pow * cr0)
+        self._sigcr0 = self._sig_coef * cr0 ** self._sig_pow * cr0
+        self._sigcr_max = cp.full(self.n_cells, self._sigcr0)
         self._coll_frac = cp.zeros(self.n_cells)
 
         # ---- GPU の表・カーネル -----------------------------------------------------------
-        self._k = {name: load_module("dsmc").get_function(name)
-                   for name in ("dsmc_move", "dsmc_ncand", "dsmc_pairs", "dsmc_sample", "dsmc_inject")}
+        mod = load_module("dsmc", ("ES_AMR",) if self.lay is not None else ())
+        names = ("dsmc_move", "dsmc_ncand", "dsmc_pairs", "dsmc_sample", "dsmc_inject")
+        self._k = {name: mod.get_function(name) for name in names + (("dsmc_relocate",) if self.lay else ())}
+        self._set_amr_args()
         self._ncand = cp.zeros(self.n_cells, dtype=np.int64)
         self._cand_start = cp.zeros(self.n_cells + 1, dtype=np.int64)
         solids_type, solids_off, pxy, circ = [], [0], [], []
@@ -135,7 +166,7 @@ class GpuDsmcSimulation:
         self._side_off = cp.asarray(np.asarray(self._side_off_h, dtype=np.int32))
         self._iv = f64(self._iv_h)
         self._vol_d = cp.asarray(vol)
-        self._delta = 1e-3 * min(grid.dx, grid.dy)
+        self._delta = 1e-3 * h_cell
         self._seed = np.uint64(int(s.seed) & 0xFFFFFFFFFFFFFFFF)
         self._cnt = cp.zeros(4, dtype=np.uint64)   # 0: 吸収数 (累計), 1: 衝突数 (累計)
 
@@ -155,13 +186,44 @@ class GpuDsmcSimulation:
         self.outflow = 0.0
         self.step_count = 0
         self.timing: dict[str, float] = {"inject": 0.0, "move": 0.0, "collide": 0.0, "sample": 0.0, "other": 0.0}
-        h = min(grid.dx, grid.dy)
-        self.timing.update({"h_mean_m": h, "h_min_m": h, "walk_cells_est": 0.0})
+        self.timing.update({"h_mean_m": h_cell, "h_min_m": h_cell, "walk_cells_est": 0.0})
         self._walk_diag_sum = 0.0
         self._walk_diag_n = 0
         self._start = cp.zeros(self.n_cells + 1, dtype=np.int32)
         self._count = cp.zeros(self.n_cells + 1, dtype=np.int32)
+        self._alloc_tags()
         self._sort()
+
+    # ---- 表示・AMR の表 -------------------------------------------------------------------
+
+    @staticmethod
+    def _display_of(lay: AmrCellLayout) -> DisplayMesh:
+        return DisplayMesh(nodes=lay.disp_nodes, triangles=lay.disp_tris, tri_region=lay.disp_tri_region,
+                           tri_cell=lay.tri_cell)
+
+    def _set_display(self, dm: DisplayMesh) -> None:
+        self.mesh = dm
+        self.tris = dm.triangles
+        self._tri_cell = dm.tri_cell
+        # 要素の重み (v1 テストの面積重み平均と同じ使い方ができるよう、セルの気体体積を 2 等分)
+        self.area = self.cell_vol[self._tri_cell] * 0.5
+        self.vol = self.area
+
+    def _set_amr_args(self) -> None:
+        cp = self.cp
+        if self.lay is None:
+            self._amr_args = ()
+            return
+        lay = self.lay
+        self._amr_args = (cp.asarray(lay.dd), cp.asarray(lay.di), cp.asarray(lay.refined), cp.asarray(lay.blockid),
+                          np.int32(lay.n_cells))
+
+    def _alloc_tags(self) -> None:
+        cp = self.cp
+        self._tag_cnt = cp.zeros(self.n_cells)
+        self._tag_v = cp.zeros(3 * self.n_cells)
+        self._tag_v2 = cp.zeros(self.n_cells)
+        self._tag_samples = 0
 
     # ---- 境界 ---------------------------------------------------------------------------
 
@@ -303,10 +365,16 @@ class GpuDsmcSimulation:
             p[k][:n0] = cp.asarray(v[:, c])
         self.n = n0
         # 所属セル (移動前の初期位置)
+        self._key[:n0] = cp.asarray(self._cell_of(p["x"][:n0].get(), p["y"][:n0].get()).astype(np.int32))
+
+    def _cell_of(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """点の所属セル (ホスト。一様格子は floor、AMR は葉セル)。"""
+        if self.lay is not None:
+            return cell_of_points(self.lay, x, y)
         g = self.grid
-        i = np.clip(np.floor((p["x"][:n0].get() - g.x0) / g.dx).astype(np.int64), 0, g.nx - 1)
-        j = np.clip(np.floor((p["y"][:n0].get() - g.y0) / g.dy).astype(np.int64), 0, g.ny - 1)
-        self._key[:n0] = cp.asarray((j * g.nx + i).astype(np.int32))
+        i = np.clip(np.floor((x - g.x0) / g.dx).astype(np.int64), 0, g.nx - 1)
+        j = np.clip(np.floor((y - g.y0) / g.dy).astype(np.int64), 0, g.ny - 1)
+        return j * g.nx + i
 
     @property
     def x(self) -> np.ndarray:
@@ -362,7 +430,7 @@ class GpuDsmcSimulation:
             np.float64(1.0 / g.dx), np.float64(1.0 / g.dy), np.int32(g.nx), np.int32(g.ny), self._cell_state,
             self._side_off, self._iv, np.float64(self.s.wall_temperature_k), np.float64(self.m),
             np.int32(self._n_solid), self._s_type, self._s_off, self._s_pxy, self._s_circ,
-            np.float64(self._delta), np.uint64(self.step_count), self._seed, self._cnt))
+            np.float64(self._delta), np.uint64(self.step_count), self._seed, self._cnt, *self._amr_args))
 
     def _sort(self) -> None:
         """セル番号で安定ソートし (吸収された分子は末尾)、生存数・セルごとの開始位置と個数を得る。"""
@@ -415,6 +483,86 @@ class GpuDsmcSimulation:
             np.int32(self.n_cells)))
         self._samples += 1
 
+    def _sample_tags(self) -> None:
+        p = self._p
+        self._k["dsmc_sample"](_grid1(self.n_cells), (_BLOCK,), (
+            p["vx"], p["vy"], p["vz"], self._start, self._count, self._tag_cnt, self._tag_v, self._tag_v2,
+            np.int32(self.n_cells)))
+        self._tag_samples += 1
+
+    def _mean_free_path(self) -> np.ndarray:
+        """積算した密度・温度からセルごとの平均自由行程 λ = 1 / (√2 n σ(T)) (VHS、分子の居ないセルは inf)。"""
+        gas = self.s.gas
+        cnt = self._tag_cnt.get()
+        v = self._tag_v.get().reshape(-1, 3)
+        v2 = self._tag_v2.get()
+        vol = self.cell_vol
+        ok = (cnt > 0.0) & (vol > 0.0)
+        lam = np.full(self.n_cells, np.inf)
+        if not np.any(ok) or self._tag_samples == 0:
+            return lam
+        n = cnt[ok] * self.w / (self._tag_samples * vol[ok])
+        u = v[ok] / cnt[ok, None]
+        t = np.maximum(self.m / (3.0 * KB) * (v2[ok] / cnt[ok] - np.sum(u * u, axis=1)), 1.0)
+        sigma = math.pi * gas.d_ref_m**2 * (gas.t_ref_k / t) ** (gas.omega - 0.5)
+        lam[ok] = 1.0 / (math.sqrt(2.0) * n * sigma)
+        return lam
+
+    def _regrid(self) -> bool:
+        """区間平均の平均自由行程で AMR 階層を作り直し、分子のセル番号を付け直す (ここで同期)。
+
+        分子は座標・速度のまま。セルごとの (σc_r)_max は新しいセルの中心を含む旧セルの値を引き継ぎ、
+        NTC の端数は 0 に戻す。平均区間の前だけ呼ぶ (サンプリングの積算は空)。戻り値: 格子が変わったか。
+        """
+        def same(h1, h2) -> bool:
+            return h1.max_level == h2.max_level and all(np.array_equal(a, b) for a, b in zip(h1.refined, h2.refined))
+
+        cp = self.cp
+        lay = self.lay
+        spec = lay.hier.spec
+        lam = self._mean_free_path()
+        self._alloc_tags()
+        if not np.any(np.isfinite(lam)):
+            return False
+        cand = lay.hier
+        for _ in range(spec.max_level + 1):
+            nxt = AmrHierarchy(self.model, self.grid, spec,
+                               extra_tags=mfp_tags(lay, lam, cand, spec.dsmc_h_over_mfp, keep=lay.hier))
+            if same(nxt, cand):
+                break
+            cand = nxt
+        if same(cand, lay.hier):
+            return False
+        t0 = time.perf_counter()
+        new = build_cell_layout(self.model, cand)
+        old_ids = cell_of_points(lay, new.cell_xy[:, 0], new.cell_xy[:, 1])
+        sig_new = self._sigcr_max.get()[old_ids]
+        sig_new[new.cell_level < 0] = self._sigcr0
+        self.lay = new
+        self.n_cells = new.n_cells
+        self.cell_vol = new.cell_vol_gas
+        self._set_display(self._display_of(new))
+        self._set_amr_args()
+        self._sigcr_max = cp.asarray(sig_new)
+        self._coll_frac = cp.zeros(self.n_cells)
+        self._ncand = cp.zeros(self.n_cells, dtype=np.int64)
+        self._cand_start = cp.zeros(self.n_cells + 1, dtype=np.int64)
+        self._vol_d = cp.asarray(self.cell_vol)
+        self._acc_cnt = cp.zeros(self.n_cells)
+        self._acc_v = cp.zeros(3 * self.n_cells)
+        self._acc_v2 = cp.zeros(self.n_cells)
+        self._start = cp.zeros(self.n_cells + 1, dtype=np.int32)
+        self._count = cp.zeros(self.n_cells + 1, dtype=np.int32)
+        self._alloc_tags()
+        if self.n:
+            p = self._p
+            self._k["dsmc_relocate"](_grid1(self.n), (_BLOCK,), (p["x"], p["y"], self._key, np.int64(self.n),
+                                                                 *self._amr_args))
+        self._sort()
+        self.regrid_log.append({"step": self.step_count, "levels": new.hier.n_levels,
+                                "leaf_cells": new.hier.n_leaf_cells(), "setup_s": time.perf_counter() - t0})
+        return True
+
     def step(self) -> None:
         t0 = time.perf_counter()
         self._inject()
@@ -437,6 +585,12 @@ class GpuDsmcSimulation:
         passes = int(self.s.smoothing_passes)
         if passes <= 0:
             return acc_cnt, acc_v, acc_v2
+        if self.lay is not None:
+            vol = self.cell_vol
+            safe = np.where(vol > 0.0, vol, 1.0)[:, None]
+            q = np.concatenate([acc_cnt[:, None], acc_v.reshape(-1, 3), acc_v2[:, None]], axis=1) / safe
+            q = smooth_cells(self.lay, q, passes) * vol[:, None]
+            return q[:, 0], q[:, 1:4].reshape(-1), q[:, 4]
         g = self.grid
         vol = self.cell_vol.reshape(g.ny, g.nx)
         gas = vol > 0.0
@@ -514,6 +668,12 @@ class GpuDsmcSimulation:
             t_s0 = time.perf_counter()
             if i >= avg_start:
                 self._sample()
+            elif self._regrid_every:
+                # 平均区間の前だけ: 密度・温度を積算し、間隔ごとに平均自由行程で格子を作り直す
+                if (i + 1) % TAG_EVERY == 0:
+                    self._sample_tags()
+                if (i + 1) % self._regrid_every == 0 and i + 1 < avg_start:
+                    self._regrid()
             t_s1 = time.perf_counter()
             if (i + 1) % PROGRESS_EVERY == 0 or i == n_steps - 1:
                 self._accum_walk_diag()

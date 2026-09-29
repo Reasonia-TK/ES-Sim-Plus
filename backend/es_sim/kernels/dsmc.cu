@@ -129,6 +129,60 @@ __device__ __forceinline__ unsigned char ds_cell_state(double px, double py, dou
 }
 
 // ---------------------------------------------------------------------------
+// AMR variant (-DES_AMR, prompts/127): the collision / sampling cells are the leaf
+// cells of the block-structured hierarchy. The leaf cell of a point is found by
+// walking the block tables from level 0 (same tables and rules as es_locate in
+// pic.cu): cell = block * bf^2 + local index. cell_state stays the level-0 map
+// (only used to skip the exact solid test when both ends are in pure-gas cells).
+//   amr_dd : x0, y0, 1/dx0, 1/dy0      amr_di : L, bf, nx0, ny0, (offset_l, nbx_l)...
+//   amr_ref: per level, per block: refined flag   amr_bid: per level, per block: block id
+// ---------------------------------------------------------------------------
+#ifdef ES_AMR
+#define DS_AMR_PARAMS , const double* __restrict__ amr_dd, const long long* __restrict__ amr_di,     const unsigned char* __restrict__ amr_ref, const int* __restrict__ amr_bid, const int amr_ncells
+
+__device__ __forceinline__ int ds_leaf_cell(double px, double py, const double* __restrict__ amr_dd,
+                                            const long long* __restrict__ amr_di,
+                                            const unsigned char* __restrict__ amr_ref,
+                                            const int* __restrict__ amr_bid)
+{
+    const int L = (int)amr_di[0], bf = (int)amr_di[1];
+    int nx = (int)amr_di[2], ny = (int)amr_di[3];
+    double fx = (px - amr_dd[0]) * amr_dd[2];
+    double fy = (py - amr_dd[1]) * amr_dd[3];
+    int lvl = 0;
+    for (;;) {
+        int i = (int)floor(fx), j = (int)floor(fy);
+        i = i < 0 ? 0 : (i > nx - 1 ? nx - 1 : i);
+        j = j < 0 ? 0 : (j > ny - 1 ? ny - 1 : j);
+        const long long off = amr_di[4 + 2 * lvl];
+        const int nbx = (int)amr_di[5 + 2 * lvl];
+        const int bi = i / bf, bj = j / bf;
+        const long long bk = off + (long long)bj * nbx + bi;
+        if (lvl < L && amr_ref[bk]) {
+            ++lvl;
+            fx *= 2.0;
+            fy *= 2.0;
+            nx *= 2;
+            ny *= 2;
+            continue;
+        }
+        const int b = amr_bid[bk];
+        return b * bf * bf + (j - bj * bf) * bf + (i - bi * bf);
+    }
+}
+// leaf cell of every molecule (after a regrid; molecules keep their positions)
+extern "C" __global__ void dsmc_relocate(const double* __restrict__ x, const double* __restrict__ y,
+                                         int* __restrict__ key, const long long n DS_AMR_PARAMS)
+{
+    const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= n) return;
+    key[p] = ds_leaf_cell(x[p], y[p], amr_dd, amr_di, amr_ref, amr_bid);
+}
+#else
+#define DS_AMR_PARAMS
+#endif
+
+// ---------------------------------------------------------------------------
 // Free flight + boundaries (multi-leg: a reflected / re-emitted molecule completes
 // the remaining time, up to MAX_LEGS legs, as in v1). rz: exact 3D straight flight
 // projected on the meridian plane (r' = sqrt((r+vr t)^2 + (vt t)^2), velocity
@@ -146,7 +200,7 @@ extern "C" __global__ void dsmc_move(
     const int n_solid, const int* __restrict__ s_type, const int* __restrict__ s_off,
     const double* __restrict__ pxy, const double* __restrict__ circ,
     const double delta, const unsigned long long step, const unsigned long long seed,
-    unsigned long long* __restrict__ cnt)
+    unsigned long long* __restrict__ cnt DS_AMR_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (p >= n) return;
@@ -155,7 +209,11 @@ extern "C" __global__ void dsmc_move(
     double t_rem = dt;
     EsRng rng;
     rng.init((unsigned long long)p, step, 8u, seed);
+#ifdef ES_AMR
+    const int n_cells = amr_ncells;
+#else
     const int n_cells = nx * ny;
+#endif
     bool removed = false;
     for (int leg = 0; leg < MAX_LEGS && t_rem > 0.0; ++leg) {
         // end point of the free flight over t_rem (and the rotated velocity for rz)
@@ -246,11 +304,15 @@ extern "C" __global__ void dsmc_move(
         atomicAdd(cnt, 1ull);
         return;
     }
+#ifdef ES_AMR
+    key[p] = ds_leaf_cell(ox, oy, amr_dd, amr_di, amr_ref, amr_bid);
+#else
     int i = (int)floor((ox - X0) * inv_dx);
     int j = (int)floor((oy - Y0) * inv_dy);
     i = i < 0 ? 0 : (i > nx - 1 ? nx - 1 : i);
     j = j < 0 ? 0 : (j > ny - 1 ? ny - 1 : j);
     key[p] = j * nx + i;
+#endif
 }
 
 // ---------------------------------------------------------------------------

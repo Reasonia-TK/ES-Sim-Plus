@@ -5,6 +5,7 @@
     .venv\\Scripts\\python benchmarks\\v2_bench.py poisson
     .venv\\Scripts\\python benchmarks\\v2_bench.py dsmc
     .venv\\Scripts\\python benchmarks\\v2_bench.py fluid2d --size 1e-4
+    .venv\\Scripts\\python benchmarks\\v2_bench.py fluid2d --size 2e-4 --amr 2 --no-v1
 
 pic:     eduPIC Ar の CCP ストリップ (上下反射で 1D 相当、RF 250 V / 13.56 MHz / 10 Pa)。
          v1 (構造格子 + numba) と v2 (GPU) を同じ粒子数・ステップ数で回し ms/step を比べる。
@@ -14,7 +15,9 @@ poisson: 同軸円筒の静電場を v1 FEM (gmsh + splu) と v2 (EB + GMG-PCG�
 dsmc:    50×20 mm の圧力駆動チャネル (20 → 5 Pa、円柱障害物) を v1 (構造格子 + numba) と
          v2 GPU DSMC で回す (prompts/124)。
 fluid2d: 20×10 mm の CCP (RF 100 V、円形導体ピン + 誘電体ブロック) を v1 (非構造) と
-         v2 (直交格子 + EB) で回す (prompts/125)。サブステップ数も表示する。
+         v2 (直交格子 + EB、CPU と GPU) で回す (prompts/125, 126)。サブステップ数も表示する。
+         --amr L: 固体のまわりを L レベル細分化した AMR 版 (基本格子 --size) と、最細レベルと同じ幅の
+         一様格子版を比べる (prompts/128)。
 """
 
 from __future__ import annotations
@@ -165,7 +168,7 @@ def bench_dsmc(args) -> None:
         print(f"  speedup: {ms['v1 CPU'] / ms['v2 GPU']:.1f}x")
 
 
-def _fluid_project(mode: str, steps: int, size: float) -> Project:
+def _fluid_project(mode: str, steps: int, size: float, amr: dict | None = None) -> Project:
     return Project.model_validate({
         "geometry": {"domain": {"polygon": [[0, 0], [0.02, 0], [0.02, 0.01], [0, 0.01]]},
                      "boundaries": [
@@ -178,38 +181,62 @@ def _fluid_project(mode: str, steps: int, size: float) -> Project:
                           "polygon": [[0.008, 0], [0.012, 0], [0.012, 0.003], [0.008, 0.003]]},
                          {"id": "pin", "type": "conductor", "voltage": 0.0, "see_gamma": 0.05,
                           "shape": {"kind": "circle", "center": [0.0137, 0.0068], "radius": 0.0011}}]},
-        "mesh": {"size": size, "mode": mode},
+        "mesh": {"size": size, "mode": mode, **({"amr": amr} if amr else {})},
         "fluid2d": {"init_density_m3": 5e14, "init_te_ev": 3.0, "gas_pressure_pa": 30.0,
                     "n_steps": steps, "frame_every": 10**9, "avg_steps": 10},
     })
 
 
 def bench_fluid2d(args) -> None:
+    from es_sim.device import cuda_available
     from es_sim.fluid2d import Fluid2dSimulation
     from es_sim.gfluid import CartesianFluid2dSimulation
+    from es_sim.gfluid.amr import AmrFluid2dSimulation
 
-    print(f"fluid2d CCP: size={args.size * 1e3} mm, steps={args.steps}")
+    lv = args.amr
+    size = args.size / (1 << lv)                  # 一様格子版の幅 (AMR のときは最細レベルと同じ)
+    amr = {"max_level": lv, "buffer_cells": 2} if lv else None
+    print(f"fluid2d CCP: size={size * 1e3} mm, steps={args.steps}"
+          + (f", AMR: base {args.size * 1e3} mm + {lv} levels" if lv else ""))
+    rows = []
+    if lv:
+        if cuda_available():
+            from es_sim.gfluid.amr import GpuAmrFluid2dSimulation
+
+            rows.append(("v2 GPU AMR", lambda p: GpuAmrFluid2dSimulation(p), "cartesian", args.size, amr))
+        rows.append(("v2 CPU AMR", lambda p: AmrFluid2dSimulation(p, device="cpu"), "cartesian", args.size, amr))
+    if cuda_available():
+        from es_sim.gfluid import GpuCartesianFluid2dSimulation
+
+        rows.append(("v2 GPU", lambda p: GpuCartesianFluid2dSimulation(p), "cartesian", size, None))
+    rows.append(("v2 CPU", lambda p: CartesianFluid2dSimulation(p, device="cpu"), "cartesian", size, None))
+    if args.v1:
+        rows.append(("v1", lambda p: Fluid2dSimulation(p), "unstructured", size, None))
     ms = {}
-    for name, cls, mode in (("v2", CartesianFluid2dSimulation, "cartesian"), ("v1", Fluid2dSimulation, "unstructured")):
+    for name, make, mode, sz, am in rows:
         t = time.perf_counter()
-        sim = cls(_fluid_project(mode, args.steps, args.size))
+        sim = make(_fluid_project(mode, args.steps, sz, am))
         setup = time.perf_counter() - t
         n_sub = [0]
-        step_once = sim._step_once
+        owner = sim._g if hasattr(sim, "_g") else sim
+        attr = "substep" if hasattr(sim, "_g") else "_step_once"
+        orig = getattr(owner, attr)
 
-        def counted(dt, t_now, implicit, _f=step_once, _n=n_sub):
+        def counted(*a, _f=orig, _n=n_sub, **kw):
             _n[0] += 1
-            return _f(dt, t_now, implicit)
+            return _f(*a, **kw)
 
-        sim._step_once = counted
+        setattr(owner, attr, counted)
         t = time.perf_counter()
         sim.run_batch(store_frames=False)
         run = time.perf_counter() - t
         ms[name] = run / args.steps * 1e3
-        poisson = "LU" if getattr(sim, "_lu", None) is not None else ("GMG" if name == "v2" else "splu")
-        print(f"  {name}: {sim.n_active:6d} active nodes, setup {setup:5.2f} s, {ms[name]:8.2f} ms/step "
-              f"({n_sub[0] / args.steps:.1f} substeps/step, {run / n_sub[0] * 1e3:.2f} ms/substep, Poisson {poisson})")
-    print(f"  speedup: {ms['v1'] / ms['v2']:.1f}x")
+        print(f"  {name}: {sim.n_active:7d} active nodes, setup {setup:5.2f} s, {ms[name]:9.2f} ms/step "
+              f"({n_sub[0] / args.steps:.1f} substeps/step, {run / n_sub[0] * 1e3:.2f} ms/substep), "
+              f"n_e total {sim.history['n_e_total'][-1]:.4e}")
+    base = ms.get("v1", ms["v2 CPU"])
+    for name, v in ms.items():
+        print(f"  {name}: {base / v:.1f}x")
 
 
 def main() -> None:
@@ -229,6 +256,8 @@ def main() -> None:
     pf = sub.add_parser("fluid2d")
     pf.add_argument("--steps", type=int, default=100)
     pf.add_argument("--size", type=float, default=0.5e-3)
+    pf.add_argument("--v1", action=argparse.BooleanOptionalAction, default=True, help="v1 (非構造) も回す")
+    pf.add_argument("--amr", type=int, default=0, help="AMR の最大レベル (0 = AMR 版を回さない)")
     args = ap.parse_args()
     {"pic": bench_pic, "poisson": bench_poisson, "dsmc": bench_dsmc, "fluid2d": bench_fluid2d}[args.cmd](args)
 

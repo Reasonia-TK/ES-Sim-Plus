@@ -1413,7 +1413,7 @@ export default function App() {
       setFluid2dStarted(msg);
       setFluid2dFrame(null); // ライブ表示を新しい実行区間の内容に自然に切り替える
       // v2 直交格子版 (mesh.mode="cartesian"、prompts/125) は流体が実際に使う表示用メッシュを
-      // 送ってくる (mesh.amr があると /mesh は細分化したメッシュを返すが、流体は基準格子で解く)
+      // 送ってくる (mesh.amr があると流体の AMR 版は /mesh と違う適合三角形分割で解く、prompts/128)
       if (msg.mesh) setMeshResult(msg.mesh);
     },
     onFrame: (msg) => {

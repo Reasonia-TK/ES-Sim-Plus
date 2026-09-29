@@ -232,6 +232,11 @@ class AmrSettings(BaseModel):
     # (max_level まで。時間平均区間の前だけ。0 = 静的)
     pic_regrid_every: int = Field(0, ge=0)
     pic_h_over_debye: float = Field(1.0, gt=0.0, le=100.0)
+    # DSMC の動的再格子化 (prompts/127)。dsmc_regrid_every ステップごとに、その区間で平均した密度・温度の
+    # 平均自由行程 λ に対し 格子幅/λ > dsmc_h_over_mfp のセルを細かくする (max_level まで。時間平均区間の
+    # 前だけ。0 = 静的)
+    dsmc_regrid_every: int = Field(0, ge=0)
+    dsmc_h_over_mfp: float = Field(0.5, gt=0.0, le=100.0)
 
 
 class MeshSettings(BaseModel):

@@ -358,13 +358,44 @@ function AmrEditor({
           </div>
         </>
       )}
+      <div className="field">
+        <Toggle
+          label="DSMC の動的再格子化 (平均自由行程)"
+          checked={(cur.dsmc_regrid_every ?? 0) > 0}
+          onChange={(v) => update({ dsmc_regrid_every: v ? 500 : 0 })}
+        />
+      </div>
+      {(cur.dsmc_regrid_every ?? 0) > 0 && (
+        <>
+          <div className="field">
+            <span className="label">再格子化の間隔 [step]</span>
+            <CommitNumberInput
+              value={cur.dsmc_regrid_every ?? 500}
+              onCommit={(v) => {
+                if (Number.isInteger(v) && v >= 1) update({ dsmc_regrid_every: v });
+              }}
+            />
+          </div>
+          <div className="field">
+            <span className="label">格子幅/平均自由行程 の上限</span>
+            <CommitNumberInput
+              value={cur.dsmc_h_over_mfp ?? 0.5}
+              onCommit={(v) => {
+                if (v > 0 && v <= 100) update({ dsmc_h_over_mfp: v });
+              }}
+            />
+          </div>
+        </>
+      )}
       <div className="hint">
         境界近傍は最大レベルまで、下の矩形は指定レベルまで格子幅を 1/2 ずつ細かくします
         (隣り合うセルのレベル差は 1 以下)。静電場は代数マルチグリッド (GPU があれば GPU) で、
         PIC も同じ細分化格子の上で解きます。適応細分化は Solve 時に誤差の大きい所を最大レベルまで
         自動で細かくします (静電場のみ。Mesh ボタンの表示は適応前の格子です)。PIC の動的再格子化は
         実行中に電子の密度・温度から求めたデバイ長 λ_D に合わせて格子を作り直します (時間平均区間の
-        前だけ。ライブ表示の格子も更新されます)。
+        前だけ。ライブ表示の格子も更新されます)。DSMC は葉セルを衝突・サンプリングのセルにし、動的
+        再格子化では区間平均の密度・温度の平均自由行程に合わせます (時間刻みの既定は最細レベルで決まります)。
+        流体 2D も同じ細分化格子 (静的な細分化のみ) の上で解きます。
       </div>
       <div className="collector-list">
         {regions.length === 0 && <div className="muted">(細分化矩形なし)</div>}
@@ -677,10 +708,10 @@ export default function FieldPanel({
             <>
               <div className="hint">
                 v2 エンジン (矩形domainのみ)。導体・誘電体の境界は格子と厳密に交差させる埋め込み境界
-                (2次精度) で、静電場はマルチグリッド (CPU/GPU)、PIC は GPU (CUDA) で高速に解きます。
-                格子はマルチグリッド向けに指定サイズより最大 ~12% 細かくなります。表示は各セルを
-                三角形2分割したものです。粒子注入・FN放出・粒子マージ・DSMC連成は未対応
-                (軌道追跡・DSMC・流体2Dは同じ解像度の構造格子で実行されます)。
+                (2次精度) で、静電場はマルチグリッド (CPU/GPU)、PIC・DSMC は GPU (CUDA)、流体2D は
+                CPU/GPU で高速に解きます。格子はマルチグリッド向けに指定サイズより最大 ~12% 細かく
+                なります。表示は各セルを三角形2分割したものです。粒子注入・FN放出・粒子マージ・DSMC連成は
+                未対応 (軌道追跡は同じ解像度の構造格子で実行されます)。
               </div>
               <AmrEditor
                 amr={project.mesh.amr}

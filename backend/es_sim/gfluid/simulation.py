@@ -13,8 +13,9 @@ v1 ``fluid2d.Fluid2dSimulation`` と**同じ物理・同じ時間積分・同じ
   (GPU があれば GPU) を前ステップの解から解き直す。電荷は双対セルの気体体積 × e(n_i − n_e)
   (v1 と同じ集中質量近似)。
 - 結果・フレームは表示用メッシュ (セルの 2 三角形分割、導体内は穴) の節点値・要素値で返す
-  (/mesh の直交格子の表示用メッシュと同じ節点番号)。mesh.amr の局所細分化は未対応で、
-  基準格子 (mesh.size) で解く (/ws/fluid2d の started に表示用メッシュを載せる)。
+  (/mesh の直交格子の表示用メッシュと同じ節点番号。/ws/fluid2d の started にも載せる)。
+  mesh.amr の局所細分化は AMR 版 (gfluid.amr.AmrFluid2dSimulation、prompts/128) が
+  _build_graph / Poisson を差し替えて解く (make_fluid2d_simulation が振り分ける)。
 - v1 と同じく periodic 境界は未対応。
 """
 
@@ -33,7 +34,7 @@ from ..field.electrostatic import fill_fixed, group_voltages
 from ..field.gmg import GMGSolver
 from ..fluid2d import Fluid2dSimulation
 from ..geom.model import GeometryModel
-from ..gpic.geometry import ParticleGeometry
+from ..gpic.geometry import DisplayMesh, ParticleGeometry
 from ..particles import QE, _barycentric_coeffs
 from ..schema import Project
 from .geometry import FluidGraph, build_fluid_graph
@@ -70,6 +71,9 @@ def _sparse_operator(op: LevelOperator) -> tuple[np.ndarray, sp.csc_matrix]:
 class CartesianFluid2dSimulation(Fluid2dSimulation):
     """直交格子 EB 版の 2D/軸対称 ドリフト拡散流体 (v1 Fluid2dSimulation の派生)。"""
 
+    #: Poisson を CPU の疎行列 LU で解いてよいか (GPU 版は常に GPU の GMG を使う)
+    _allow_lu = True
+
     def __init__(self, project: Project, explicit: bool = False, device: Device | str | None = None):
         self._device = device if isinstance(device, Device) else get_device(device)
         super().__init__(project, explicit=explicit)
@@ -84,12 +88,24 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
         self.rz = self.ridx is not None
         grid = make_grid(model.domain, float(project.mesh.size))
         self.grid = grid
+        g, dm = self._build_graph(project, model, grid)
+        self.mesh = dm
+        self.n_nodes = len(dm.nodes)
+        self.tris = dm.triangles
+        _, self._bc_b, self._bc_c, self._bc_det = _barycentric_coeffs(dm.nodes, dm.triangles)
+        self.graph = g
+        self.warnings.extend(g.warnings)
+        self._adopt_graph(g)
+        self.h_min = float(getattr(g, "h_min", 0.0) or min(grid.dx, grid.dy))
+        self.setup_s = time.perf_counter() - t0
 
+    def _build_graph(self, project: Project, model: GeometryModel, grid) -> tuple[FluidGraph, DisplayMesh]:
+        """輸送グラフと表示用メッシュを組み、Poisson の前処理を用意する (AMR 版が差し替える)。"""
         # Poisson: 中小規模は疎行列 LU (前分解)、大規模・特異 (Dirichlet 無し) は GMG-PCG
         self._lu = None
         self._gmg = None
         op = None
-        if grid.n_nodes <= DIRECT_MAX and model.groups:
+        if self._allow_lu and grid.n_nodes <= DIRECT_MAX and model.groups:
             op = build_level(model, grid, full=True)
             if np.any(op.mask == MASK_FIXED):
                 self._lu_idx, a = _sparse_operator(op)
@@ -101,23 +117,11 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
             op = self._gmg.finest
         self._op = op
         self.warnings.extend(op.warnings)
-
         pg = ParticleGeometry(model, grid)
-        dm = pg.display_mesh()
-        self.mesh = dm
-        self.n_nodes = grid.n_nodes
-        self.tris = dm.triangles
-        _, self._bc_b, self._bc_c, self._bc_det = _barycentric_coeffs(dm.nodes, dm.triangles)
+        return build_fluid_graph(model, grid, pg.cell_state, op.vol_gas), pg.display_mesh()
 
-        g: FluidGraph = build_fluid_graph(model, grid, pg.cell_state, op.vol_gas)
-        self.graph = g
-        self.warnings.extend(g.warnings)
-        amr = project.mesh.amr
-        if amr is not None and (amr.max_level > 0 or amr.regions):
-            self.warnings.append(
-                "流体 2D は mesh.amr (局所細分化) に未対応のため、基準格子 (mesh.size) で解きます"
-            )
-
+    def _adopt_graph(self, g: FluidGraph) -> None:
+        """輸送グラフを v1 Fluid2dSimulation の属性 (アクティブ節点・辺・壁) に写す。"""
         self.node_vol_full = g.node_vol
         self.active_idx = np.nonzero(g.active)[0]
         self.n_active = len(self.active_idx)
@@ -145,9 +149,6 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
         self.gamma_see = gamma_node[self.active_idx]
         self._wall_group = g.wall_group
         self._wall_is_cond = g.wall_group >= 0
-
-        self.h_min = float(min(grid.dx, grid.dy))
-        self.setup_s = time.perf_counter() - t0
 
     # ---- Poisson (v1 の splu を v2 の GMG-PCG に差し替え) ----------------------------------
 

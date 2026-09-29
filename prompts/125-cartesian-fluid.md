@@ -31,7 +31,7 @@ Poisson をそのまま使う版を作る。
 - Poisson: EB の離散化 (eb.build) をそのまま使う。節点数 6 万以下は疎行列 LU を 1 回だけ分解
   (小さな格子で GPU の反復法より速い: 42 節点の 1D 比較で GPU GMG 8.0 s → LU 1.3 s)、それより
   大きいか Dirichlet の無い特異な問題は GMG-PCG (GPU があれば GPU、前ステップの解から)。
-- mesh.amr は未対応 (警告して基準格子で解く)。/ws/fluid2d の started とバッチの ResultsBundle に
+- mesh.amr は未対応 (警告して基準格子で解く。→ prompts/128 で対応)。/ws/fluid2d の started とバッチの ResultsBundle に
   表示用メッシュを載せ、フロントはそれを描画用メッシュにする (AMR 設定時に `/mesh` と食い違わない)。
 - server・batch は `make_fluid2d_simulation` で mesh.mode により振り分ける。
 

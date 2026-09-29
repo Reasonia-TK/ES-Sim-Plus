@@ -49,10 +49,11 @@ def _lam_max(A: sp.csr_matrix, dinv: np.ndarray, iters: int = 15, seed: int = 0)
     return lam
 
 
-def _dense_inverse(A: sp.spmatrix, singular: bool) -> np.ndarray:
+def _dense_inverse(A: sp.spmatrix, singular: bool, cp):
+    """密な逆行列 (GPU の cuSOLVER で。field.gmg.dense_inverse 参照)。"""
     from ..field.gmg import dense_inverse
 
-    return dense_inverse(A.toarray(), singular)
+    return dense_inverse(A.toarray(), singular, xp=cp)
 
 
 @dataclass
@@ -114,7 +115,7 @@ class AmgGpuSolver:
         if n == 0:
             self._inv = None
         elif self.direct:
-            self._inv = cp.asarray(_dense_inverse(A, self.singular))
+            self._inv = _dense_inverse(A, self.singular, cp)
         else:
             import pyamg
 
@@ -142,7 +143,7 @@ class AmgGpuSolver:
                     dinv=cp.asarray(dinv), theta_inv=1.0 / theta, coefs=coefs,
                     x=cp.zeros(nl), b=cp.zeros(nl), r=cp.zeros(nl), d=cp.zeros(nl),
                 ))
-            self._inv = cp.asarray(_dense_inverse(mats[-1], self.singular))
+            self._inv = _dense_inverse(mats[-1], self.singular, cp)
         self.n_levels = len(self.levels)
         self._A0 = self.levels[0].A if self.levels else (_Csr.of(A, cp) if n else None)
         self._w = {name: cp.zeros(max(n, 1)) for name in ("r", "z", "p", "ap")}

@@ -180,6 +180,46 @@ def _merge_targets(
     return o, orphan
 
 
+def merge_targets_graph(
+    n: int, active: np.ndarray, vol_gas: np.ndarray, need: np.ndarray, nb_a: np.ndarray, nb_b: np.ndarray
+) -> tuple[sp.csr_matrix, np.ndarray]:
+    """_merge_targets の一般のグラフ版 (AMR 用): 近傍 = 辺 (nb_a, nb_b) で隣り合う節点。
+
+    固体内部の節点のうち気体の小片か壁を持つもの (vol_gas > 0 または need) を、隣のアクティブ節点
+    (無ければ 2 つ先) へ気体体積に比例して配分する。戻り値: (O (n, n), 併合先の無い節点のマスク)。
+    """
+    rows = [np.nonzero(active)[0]]
+    cols = [rows[0]]
+    vals = [np.ones(rows[0].size)]
+    sliver = np.nonzero(~active & ((vol_gas > 0.0) | need))[0]
+    orphan = np.zeros(n, dtype=bool)
+    if sliver.size:
+        adj = sp.csr_matrix((np.ones(2 * nb_a.size), (np.concatenate([nb_a, nb_b]), np.concatenate([nb_b, nb_a]))),
+                            shape=(n, n))
+        adj.data[:] = 1.0
+        ring = adj[sliver]
+        remaining = np.ones(sliver.size, dtype=bool)
+        for _ in range(2):
+            coo = ring.tocoo()
+            ok = remaining[coo.row] & active[coo.col]
+            r, c = coo.row[ok], coo.col[ok]
+            if r.size:
+                wv = vol_gas[c]
+                tot = np.bincount(r, weights=wv, minlength=sliver.size)
+                rows.append(sliver[r])
+                cols.append(c)
+                vals.append(wv / tot[r])
+                remaining[np.unique(r)] = False
+            if not remaining.any():
+                break
+            ring = ring @ adj
+            ring.data[:] = 1.0
+        orphan[sliver[remaining]] = True
+    o = sp.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(n, n))
+    o.sum_duplicates()
+    return o, orphan
+
+
 # ---- エッジ ------------------------------------------------------------------------
 
 
@@ -275,11 +315,14 @@ def _side_walls(model: GeometryModel, grid: CartesianGrid, eps: float):
     return out
 
 
-def _solid_walls(model: GeometryModel, grid: CartesianGrid, eps: float):
-    """固体 (導体・誘電体) の表面の小片。2π は掛けない (r 重みのみ)。"""
+def solid_pieces(model: GeometryModel, seg_max: float, eps: float):
+    """固体 (導体・誘電体) の表面を長さ seg_max 以下の小片に分ける (気体に面した部分だけ)。
+
+    戻り値: 固体ごとの (中点 (n, 2), 面積 (2π なし、r 重みのみ), 法線 (気体 → 固体), SEE γ,
+    Dirichlet グループ (導体、誘電体は -1), 気体側の点 (中点 − eps·法線)) のリスト。
+    """
     dom = model.domain
     ridx = model.radial_axis()
-    seg_max = SEG_FRAC * min(grid.dx, grid.dy)
     solids = []
     for k, c in enumerate(model.conductors):
         g = model.conductor_group[k]
@@ -325,10 +368,18 @@ def _solid_walls(model: GeometryModel, grid: CartesianGrid, eps: float):
             continue
         mid, length, n_in, pg = mid[keep], length[keep], n_in[keep], pg[keep]
         area = length if ridx is None else length * mid[:, ridx]
+        out.append((mid, area, n_in, float(gamma), int(group), pg))
+    return out
+
+
+def _solid_walls(model: GeometryModel, grid: CartesianGrid, eps: float):
+    """固体の表面の小片を、気体側の点を含む双対セルの節点に割り当てる。2π は掛けない (r 重みのみ)。"""
+    out = []
+    for mid, area, n_in, gamma, group, pg in solid_pieces(model, SEG_FRAC * min(grid.dx, grid.dy), eps):
         i = np.clip(np.rint((pg[:, 0] - grid.x0) / grid.dx).astype(np.int64), 0, grid.nx)
         j = np.clip(np.rint((pg[:, 1] - grid.y0) / grid.dy).astype(np.int64), 0, grid.ny)
         node = j * (grid.nx + 1) + i
-        out.append((node, area, n_in, np.full(node.size, float(gamma)),
+        out.append((node, area, n_in, np.full(node.size, gamma),
                     np.full(node.size, group, dtype=np.int64), mid[:, 0], mid[:, 1]))
     return out
 

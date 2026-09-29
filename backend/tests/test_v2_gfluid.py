@@ -37,8 +37,7 @@ W, H = 0.02, 0.01
 RF = {"amplitude": 100.0, "freq_hz": 13.56e6}
 
 
-def _project(regions=(), boundaries=None, coord="xy", size=0.5e-3, w=W, h=H, fluid=None, mode="cartesian",
-             amr=None) -> Project:
+def _project(regions=(), boundaries=None, coord="xy", size=0.5e-3, w=W, h=H, fluid=None, mode="cartesian") -> Project:
     if boundaries is None:
         boundaries = [
             {"edges": [3], "type": "dirichlet", "voltage": 0.0, "voltage_rf": RF, "see_gamma": 0.05},
@@ -49,8 +48,6 @@ def _project(regions=(), boundaries=None, coord="xy", size=0.5e-3, w=W, h=H, flu
          "frame_every": 100000}
     f.update(fluid or {})
     mesh = {"size": size, "mode": mode}
-    if amr is not None:
-        mesh["amr"] = amr
     return Project.model_validate({
         "coord": coord,
         "geometry": {"domain": {"polygon": [[0, 0], [w, 0], [w, h], [0, h]]},
@@ -353,14 +350,6 @@ def test_wall_field_is_one_sided_difference_at_electrodes():
 
 
 # ---- 設定・配線 ------------------------------------------------------------------------
-
-
-def test_amr_setting_runs_on_base_grid_with_warning():
-    amr = {"max_level": 1, "regions": [{"p1": [0.008, 0.003], "p2": [0.012, 0.007], "level": 1}]}
-    sim = make_fluid2d_simulation(_project([], amr=amr))
-    assert isinstance(sim, CartesianFluid2dSimulation)
-    assert sim.n_nodes == (sim.grid.nx + 1) * (sim.grid.ny + 1)
-    assert any("mesh.amr" in w for w in sim.warnings)
 
 
 def test_make_fluid2d_simulation_routes_by_mesh_mode():

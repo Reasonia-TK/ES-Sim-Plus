@@ -339,7 +339,7 @@ def _worker(
             bundle = {"version": 1, "fluid2d": build_fluid2d_result(simf2, elapsed_s)}
             if hasattr(simf2, "mesh_payload"):
                 # v2 直交格子版は結果の節点番号が表示用メッシュ (ResultsBundle.mesh) に対応する
-                # (mesh.amr があっても流体は基準格子で解くため、/mesh の結果と食い違わないよう同梱する)
+                # (AMR 版の流体は適合三角形分割の表示用メッシュで /mesh の結果と違うため同梱する)
                 bundle["mesh"] = simf2.mesh_payload()
         else:
             raise ValueError(
