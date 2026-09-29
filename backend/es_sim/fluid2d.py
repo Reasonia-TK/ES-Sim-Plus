@@ -88,6 +88,8 @@ fluid1d.py と全く同じ2段構え (陽的検証経路・半陰的既定経路
 エッジ長基準、非構造メッシュなので dx の代わりに輸送領域内の最小辺長 h_min を
 使う) の小さい方を超えたら内部でサブステップ分割する (fluid1d.py のコメント
 参照。ロジックは同一、格子間隔だけ 1D の dx → 2D の h_min に置き換えている)。
+必要なサブステップ数が MAX_SUBSTEPS を超えたら発散の兆候として ValueError にし、
+停止要求 (run_batch の should_stop) はサブステップの合間にも確認する (step 参照)。
 
 ## 陰的線形ソルバー (prompts/111 → 115 で並列反復法へ置換)
 
@@ -147,6 +149,13 @@ from .schema import Fluid2dSettings, Project, VoltageWaveform, rf_components
 # 位置づけ)。build_fluid2d_result の timing.total 集計・フロントの内訳表示 (%計算・合計)
 # からはこのキー集合を除外する
 FLUID2D_DIAG_KEYS = frozenset({"solver_iters"})
+
+# 半陰的経路で 1 ステップを刻むサブステップ数の上限。通常の実行 (テスト・CCP ベンチマーク) は
+# 高々数回だが、解が暴走すると (UI 既定のサンプル形状で実測: 電位が kV〜数百 kV・Te が
+# 数百 eV〜keV まで増大) 安定条件の目安が縮み続け、必要数が際限なく増える (1 ステップで
+# 1e12 回へ跳ね上がった例もある) — 上限が無いと 1 回の step() が数分〜際限なく終わらない。
+# これを超えたら発散の兆候として ValueError にする (run_batch の非有限値チェックと同じ扱い)
+MAX_SUBSTEPS = 1000
 
 
 def _effective_fluid2d_threads(requested: int, cpu_count: int | None = None) -> int:
@@ -263,6 +272,9 @@ class Fluid2dSimulation:
             self.dt = min(1.0 / self._cycle_freq / 2000.0, 1.0e-10)
         else:
             self.dt = 1.0e-10
+        # 半陰的経路のサブステップ数の上限 (MAX_SUBSTEPS 参照)。テストで上限超過の経路を
+        # 試す際は直接書き換えればよい (_solver_max_iter と同じ位置づけ)
+        self._max_substeps = MAX_SUBSTEPS
 
         # ---- 安定性の目安警告 (陽的経路のみ) --------------------------------------
         if self.explicit:
@@ -923,7 +935,15 @@ class Fluid2dSimulation:
         τ_J ~ w / (Joule 加熱率) 以下にサブステップを刻む必要がある
         (壁損失の陰的化だけでは解消しない不安定性だったことを実測で確認済み)。
         直近 (前ステップ終了時) の φ・Te・n_e から Joule 加熱率を見積もり、
-        加熱側 (正) のみを対象に w/heating の最小値を返す (冷却側は問題にならない)。
+        加熱側 (正) のみを対象に w/heating の最小値を返す (冷却側は問題にならない。
+        電子がほぼ空の節点も除外する — 下の heating の行のコメント参照)。
+        一様プラズマ・一様電場 E なら τ_J = (3/2)Te/(μ_e E²) (test_fluid2d.py で検証)。
+
+        注: 導入時 (prompts/111) から加熱率 (節点へ配分した外延量 [eV/s]) を節点体積で
+        割らずにエネルギー密度 w [eV/m³] と比を取っており、τ_J が 1/V_i 倍 (SI の数値で
+        通常 1e4〜1e8 倍) 過大で、この上限は解が暴走した末期にしか効いていなかった
+        (上の「実測で確認済み」はその状態での記録)。修正後も既存テスト・CCP ベンチマーク
+        の条件ではほぼ効かない (効くのは強い電場で電子が加熱される領域)。
         """
         phi_a = self.phi[self.active_idx]
         dphi = phi_a[self.i_idx] - phi_a[self.j_idx]
@@ -939,7 +959,14 @@ class Fluid2dSimulation:
         joule = np.zeros(self.n_active)
         np.add.at(joule, self.i_idx, 0.5 * p_edge)
         np.add.at(joule, self.j_idx, 0.5 * p_edge)
-        heating = np.maximum(joule, 0.0)
+        # joule は外延量 [eV/s] なので節点体積で割り、w と同じ体積あたり [eV/(m³·s)] にする
+        heating = np.maximum(joule, 0.0) / self.node_vol
+        # 電子がほぼ空の節点 (n_e が最大の 1e-3 以下、シース内など) は除外する: w が下限値付近の
+        # ため隣のエッジの電力の半分を受けるだけで w/heating が 1e-18 s 級まで縮み、健全な DC 放電
+        # でも陰極シースで 1 ステップ 1 億回超を要求してサブステップ上限を誤って超える (除外前は
+        # 修正前の τ_J でも 1000 回超の突発的な刻みになっていた)。これらの節点はエネルギーを
+        # ほとんど持たず、除外しても結果の差は相対 1e-4 以下 (UI サンプル形状の DC/RF 1500 ステップ)
+        heating = np.where(n_e_a > 1.0e-3 * np.max(n_e_a), heating, 0.0)
         w_a = self.w[self.active_idx]
         if not np.any(heating > 0.0):
             return math.inf
@@ -950,8 +977,63 @@ class Fluid2dSimulation:
             ratio = np.where(heating > 0.0, w_a / np.maximum(heating, 1.0e-300), math.inf)
         return float(np.min(ratio))
 
-    def step(self) -> np.ndarray:
-        """流体1サイクル (fluid1d.Fluid1dSimulation.step と同じ設計)。"""
+    # ---- サブステップ数の上限・停止要求での巻き戻し (step の下請け。step を丸ごと差し替える
+    #      派生クラスもここを呼べば同じ判定・同じ状態の扱いになる) ---------------------------
+
+    def _substep_count(self, dt: float, bounds) -> int:
+        """dt を安定条件の目安 bounds ((名前, 上限時間 [s]) の列) の最小値で刻むサブステップ数。
+
+        必要数が上限 (_max_substeps、MAX_SUBSTEPS 参照) を超える場合は発散の兆候として
+        ValueError を送出する (目安が 0・NaN になった場合 — 係数の桁溢れ — も上限超過扱い)。
+        """
+        dt_bound = min(b for _, b in bounds)
+        n_req = dt / dt_bound if dt_bound > 0.0 else math.inf
+        if n_req > self._max_substeps:
+            limiting = min(bounds, key=lambda nb: nb[1])[0]
+            finite = math.isfinite(n_req)
+            n_txt = f"{math.ceil(n_req):,}" if finite else "∞"
+            dt_hint = f" (目安 {dt_bound * self._max_substeps:.3g}s 以下)" if finite else ""
+            raise ValueError(
+                f"数値発散の兆候を検出しました (step {self.step_count + 1}: 必要なサブステップ数 "
+                f"{n_txt} が上限 {self._max_substeps} を超えています。dt={dt:.3g}s に対し"
+                f"安定条件の目安が {dt_bound:.3g}s [{limiting}]、{self._state_summary()})。"
+                f"dt を小さくする{dt_hint}、メッシュを細かくする、境界条件を見直す等を検討してください"
+            )
+        return max(1, math.ceil(n_req))
+
+    def _state_summary(self) -> str:
+        """エラーメッセージ用の状態の要約 (Te の最大・電位の範囲)。"""
+        n_e_a = np.maximum(self.n_e[self.active_idx], FLOOR_N)
+        te_max = float(np.max((2.0 / 3.0) * self.w[self.active_idx] / n_e_a))
+        return f"Te 最大 {te_max:.3g} eV・電位 {float(np.min(self.phi)):.4g}〜{float(np.max(self.phi)):.4g} V"
+
+    def _save_step_state(self):
+        """サブステップ途中の停止でステップ開始時へ戻すための退避 (_restore_step_state と対)。
+
+        戻すのは n_e・n_i・w・φ と壁・生成の累計 (wall・gen_total)。t・step_count・history・
+        アキュムレータはサブステップを全部終えてから進めるので退避不要。timing・反復回数・
+        warnings は診断値なので戻さない。
+        """
+        return self.n_e.copy(), self.n_i.copy(), self.w.copy(), self.phi.copy(), dict(self.wall), self.gen_total
+
+    def _restore_step_state(self, saved) -> None:
+        n_e, n_i, w, phi, wall, gen_total = saved
+        self.n_e[:] = n_e
+        self.n_i[:] = n_i
+        self.w[:] = w
+        self.phi = phi
+        self.wall.update(wall)
+        self.gen_total = gen_total
+
+    def step(self, should_stop=None) -> np.ndarray | None:
+        """流体1サイクル (fluid1d.Fluid1dSimulation.step と同じ設計)。
+
+        半陰的経路で必要なサブステップ数が上限 (_max_substeps、MAX_SUBSTEPS 参照) を
+        超える場合は、状態を変えずに ValueError を送出する。should_stop (引数なしで bool を
+        返す callable、run_batch と同じもの) を渡すとサブステップの合間にも停止要求を確認し、
+        要求があれば状態 (n_e・n_i・w・φ・壁/生成の累計) をステップ開始時に戻して None を
+        返す (t・step_count・history も進めないので、続きから実行しても整合する)。
+        """
         dt = self.dt
         t = self.t
         accumulating = self._accum_start is not None and self.step_count + 1 >= self._accum_start
@@ -969,10 +1051,16 @@ class Fluid2dSimulation:
             d_e_max = max(float(np.max(mu_e0 * te0)), 1.0e-300)
             dt_diff_bound = 0.5 * self.h_min**2 / d_e_max
             tau_joule = self._joule_relaxation_time(te0, mu_e0)
-            dt_bound = min(0.5 * tau_d, dt_diff_bound, 0.5 * tau_joule)
-            n_sub = max(1, math.ceil(dt / dt_bound))
+            n_sub = self._substep_count(
+                dt, (("誘電緩和時間", 0.5 * tau_d), ("拡散 CFL", dt_diff_bound), ("Joule 加熱", 0.5 * tau_joule))
+            )
             dt_sub = dt / n_sub
+            # 停止要求でステップ途中から戻すための退避 (サブステップの合間があるときだけ)
+            saved = self._save_step_state() if should_stop is not None and n_sub > 1 else None
             for k in range(n_sub):
+                if saved is not None and k > 0 and should_stop():
+                    self._restore_step_state(saved)
+                    return None
                 self._step_once(dt_sub, t + k * dt_sub, implicit=True)
 
         self.t = t + dt
@@ -1126,7 +1214,11 @@ class Fluid2dSimulation:
         }
 
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
-        """n_steps 回実行して (history, フレーム列) を返す (fluid1d.run_batch と同じ設計)。"""
+        """n_steps 回実行して (history, フレーム列) を返す (fluid1d.run_batch と同じ設計)。
+
+        should_stop はステップ間に加えてサブステップの合間にも確認する (step 参照。
+        発散しかけた解では 1 ステップが上限近くまで刻まれて長くなるため)。
+        """
         if self._accum_start is None:
             avg = self.s.avg_steps if self.s.avg_steps is not None else max(1, self.s.n_steps // 4)
             avg = min(avg, self.s.n_steps)
@@ -1138,7 +1230,9 @@ class Fluid2dSimulation:
         for _ in range(n_steps_total):
             if should_stop is not None and should_stop():
                 break
-            phi = self.step()
+            phi = self.step(should_stop)
+            if phi is None:  # サブステップの途中で停止 (状態はステップ開始時に戻してある)
+                break
             if not self._state_finite(phi):
                 raise ValueError(
                     f"数値発散を検出しました (step {self.step_count}: 電位・密度・"

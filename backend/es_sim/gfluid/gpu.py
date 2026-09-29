@@ -110,7 +110,8 @@ class GpuCartesianFluid2dSimulation(CartesianFluid2dSimulation):
 
     # ---- 1 ステップ (v1 Fluid2dSimulation.step と同じサブステップ分割) ---------------------------
 
-    def step(self):
+    def step(self, should_stop=None):
+        """1 ステップ。戻り値は φ のデバイス配列 (run_batch は None を途中停止と見なす)。"""
         g = self._g
         g.push()
         dt = self.dt
@@ -138,7 +139,7 @@ class GpuCartesianFluid2dSimulation(CartesianFluid2dSimulation):
         h["wall_e"].append(self.wall["electron"])
         h["wall_i"].append(self.wall["ion"])
         h["gen_total"].append(self.gen_total)
-        return None
+        return g.phi
 
     def _state_finite(self, phi) -> bool:
         return self._g.n_bad == 0

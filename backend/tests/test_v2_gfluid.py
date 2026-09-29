@@ -301,6 +301,72 @@ def test_explicit_matches_semi_implicit_at_small_dt():
     np.testing.assert_allclose(ex.phi, im.phi, rtol=1e-3, atol=1e-5)
 
 
+def test_stop_between_substeps_rolls_back_and_continues_identically():
+    """サブステップの合間の停止要求 (v1 の step を継承): ステップ開始時の状態に戻り、続きは中断なしとビット一致。"""
+    proj = _project([PIN, BLOCK], size=0.5e-3, fluid={"init_density_m3": 1e15, "gas_pressure_pa": 50.0, "dt": 1e-9})
+    sim = CartesianFluid2dSimulation(proj, device="cpu")
+    ref = CartesianFluid2dSimulation(proj.model_copy(deep=True), device="cpu")
+    sim.step()
+    ref.step()
+    keys = ("n_e", "n_i", "w", "phi")
+    before = {k: getattr(sim, k).copy() for k in keys}
+    n_checks = 0
+
+    def stop_at_third_check():
+        nonlocal n_checks
+        n_checks += 1
+        return n_checks >= 3
+
+    assert sim.step(stop_at_third_check) is None           # dt は安定条件の目安の数倍 → 6 回以上に刻む
+    assert n_checks == 3 and sim.step_count == 1
+    for k in keys:
+        assert np.array_equal(getattr(sim, k), before[k]), k
+    sim.step()
+    ref.step()
+    for k in keys:
+        assert np.array_equal(getattr(sim, k), getattr(ref, k)), k
+    assert sim.wall == ref.wall and sim.gen_total == ref.gen_total
+
+
+@pytest.mark.parametrize("coord", ["xy", "rz"])
+def test_joule_relaxation_time_matches_uniform_field_analytic(coord):
+    """一様プラズマ・一様電場 E では τ_J = (3/2)Te/(μ_e E²) (双対セルの体積と面の重みが整合し、全節点で厳密)。"""
+    v0 = 50.0
+    bnd = [{"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": v0},
+           {"edges": [0, 2], "type": "symmetry"}]
+    sim = CartesianFluid2dSimulation(
+        _project([], bnd, coord=coord, size=1e-3, fluid={"init_density_m3": 1e15, "gas_pressure_pa": 50.0}),
+        device="cpu")
+    sim.phi = sim._solve_phi(0.0)                          # 空間電荷 0 → φ は電極間で線形
+    te0, mu_e0, *_ = sim._te_and_coeffs(sim.n_e[sim.active_idx], sim.w[sim.active_idx])
+    expected = 1.5 * float(te0[0]) / (float(mu_e0[0]) * (v0 / W) ** 2)
+    assert sim._joule_relaxation_time(te0, mu_e0) == pytest.approx(expected, rel=1e-9)
+
+
+def test_dc_cathode_sheath_does_not_trip_substep_limit():
+    """健全な DC 放電で陰極シースのほぼ空の節点が τ_J を決めず、サブステップが突発的に増えない
+    (除外前は step 144 前後で 1 ステップ 9 千万回を要求して上限で ValueError)。"""
+    bnd = [{"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": 100.0},
+           {"edges": [0, 2], "type": "symmetry"}]
+    sim = CartesianFluid2dSimulation(
+        _project([], bnd, size=2e-3, w=0.1, h=0.05,
+                 fluid={"init_density_m3": 1e15, "init_te_ev": 2.0, "gas_pressure_pa": 50.0}),
+        device="cpu")
+    n_sub = []
+    step_once = sim._step_once
+
+    def counting_step_once(*args, **kwargs):
+        n_sub[-1] += 1
+        return step_once(*args, **kwargs)
+
+    sim._step_once = counting_step_once
+    for _ in range(200):
+        n_sub.append(0)
+        sim.step()
+    assert max(n_sub) <= 5
+    assert np.all(np.isfinite(sim.phi)) and float(np.max(sim.phi)) < 110.0
+
+
 def test_rejects_periodic_boundary():
     bnd = [{"edges": [0, 2], "type": "periodic"},
            {"edges": [3], "type": "dirichlet", "voltage": 0.0}, {"edges": [1], "type": "dirichlet", "voltage": 0.0}]
