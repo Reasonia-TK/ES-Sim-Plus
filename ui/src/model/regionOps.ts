@@ -2,7 +2,7 @@
 // 種類を変えても形と対応する値は保ち、RF・CSV 波形・γ は外す)。
 
 import type { Draft } from "immer";
-import { polygonBounds, uniqueRegionId, type Project, type Region, type RegionType } from "./project";
+import { polygonBounds, tidy, tidyPoint, uniqueRegionId, type Point, type Project, type Region, type RegionType } from "./project";
 
 type P = Draft<Project>;
 
@@ -100,4 +100,52 @@ export function validateRegionId(p: Project, from: string, to: string): "setting
   if (!s) return "settings.idEmpty";
   if (s !== from && p.geometry.regions.some((r) => r.id === s)) return "settings.idDuplicate";
   return null;
+}
+
+// ---- キャンバスでの作図・編集 (v1 CadCanvas と同じ規則) ----
+
+/** 多角形の領域を足す (導体・0 V、v1 と同じ)。3 点未満は足さない */
+export function addPolygonRegion(p: P, polygon: Point[]): string | null {
+  if (polygon.length < 3) return null;
+  const id = uniqueRegionId(p as Project);
+  p.geometry.regions.push({ id, type: "conductor", voltage: 0, polygon: polygon.map(tidyPoint) });
+  return id;
+}
+
+/** 円の領域を足す (半径 0 は足さない) */
+export function addCircleRegionAt(p: P, center: Point, radius: number): string | null {
+  if (!(radius > 0)) return null;
+  const id = uniqueRegionId(p as Project);
+  p.geometry.regions.push({ id, type: "conductor", voltage: 0, shape: { kind: "circle", center: tidyPoint(center), radius: tidy(radius) } });
+  return id;
+}
+
+/** 平行移動 (多角形は全頂点、円は中心) */
+export function moveRegion(p: P, id: string, dx: number, dy: number): void {
+  const r = p.geometry.regions.find((x) => x.id === id);
+  if (!r || (dx === 0 && dy === 0)) return;
+  if (r.shape) r.shape.center = tidyPoint([r.shape.center[0] + dx, r.shape.center[1] + dy]);
+  else if (r.polygon) r.polygon = r.polygon.map(([x, y]) => tidyPoint([x + dx, y + dy]));
+}
+
+/** 多角形を置き換える (頂点のドラッグ・辺の中点からの追加。3 点未満は無視) */
+export function setRegionPolygon(p: P, id: string, polygon: Point[]): void {
+  const r = p.geometry.regions.find((x) => x.id === id);
+  if (!r || !r.polygon || polygon.length < 3) return;
+  r.polygon = polygon.map(tidyPoint);
+}
+
+/** 円の半径 (正の値だけ) */
+export function setCircleRadius(p: P, id: string, radius: number): void {
+  const r = p.geometry.regions.find((x) => x.id === id);
+  if (!r?.shape || !(radius > 0)) return;
+  r.shape.radius = tidy(radius);
+}
+
+/** 頂点を消す (3 点より多いときだけ) */
+export function removeRegionVertex(p: P, id: string, index: number): boolean {
+  const r = p.geometry.regions.find((x) => x.id === id);
+  if (!r?.polygon || r.polygon.length <= 3 || index < 0 || index >= r.polygon.length) return false;
+  r.polygon.splice(index, 1);
+  return true;
 }

@@ -15,6 +15,7 @@ import { CommitText, Field } from "../inputs";
 import { Hint } from "../widgets/common";
 import { ListEditor } from "../widgets/ListEditor";
 import { StudyShell } from "./StudyShell";
+import { useSelection } from "../../model/selection";
 
 interface DsmcBoundary {
   edges: number[];
@@ -104,6 +105,7 @@ export function DsmcPage() {
   const project = useDocument((s) => s.project);
   const d = (project.dsmc ?? {}) as { n_particles?: number; mesh_scale?: number };
   const ppc = dsmcParticlesPerCell(project, d.n_particles ?? 50000, d.mesh_scale ?? 1);
+  const sel = useSelection((s) => s.selectedPlacement);
   const P = ["dsmc"] as const;
   return (
     <StudyShell settingsKey="dsmc" defaults={defaultDsmc} description={t("dsmcPage.description")}>
@@ -120,6 +122,8 @@ export function DsmcPage() {
           label={t("dsmcPage.boundaries")}
           title={(b, i) => `G${i + 1} · ${t(`dsmcPage.type.${b.type}`)}`}
           emptyText={t("dsmcPage.boundariesEmpty")}
+          selected={sel?.kind === "gasbc" ? sel.index : null}
+          onSelect={(i) => useSelection.getState().selectPlacement({ kind: "gasbc", index: i })}
           create={() => structuredClone(DEFAULT_DSMC_BOUNDARY) as DsmcBoundary}
           render={(b, i) => <DsmcBoundaryRow i={i} b={b} />}
         />

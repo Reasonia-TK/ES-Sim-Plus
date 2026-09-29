@@ -60,12 +60,4 @@ export function ListEditor<T>({ path, label, title, render, create, max, emptyTe
   );
 }
 
-/** 既存のラベル (C1, C2, …) の最大番号 + 1 (v1 と同じく欠番は詰めない) */
-export function nextLabel(prefix: string, items: { label?: string }[]): string {
-  let max = 0;
-  for (const it of items) {
-    const m = new RegExp(`^${prefix}(\\d+)$`).exec(it.label ?? "");
-    if (m) max = Math.max(max, Number(m[1]));
-  }
-  return `${prefix}${max + 1}`;
-}
+export { nextLabel } from "../../model/placements";

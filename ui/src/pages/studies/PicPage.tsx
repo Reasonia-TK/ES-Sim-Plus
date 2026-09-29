@@ -15,6 +15,7 @@ import { ListEditor, nextLabel } from "../widgets/ListEditor";
 import { ProcessList } from "../widgets/ProcessList";
 import { PhaseBinHint, RfCycleHint } from "../widgets/RunHints";
 import { StudyShell } from "./StudyShell";
+import { useSelection } from "../../model/selection";
 
 interface Pic {
   dt?: number | null;
@@ -67,6 +68,8 @@ export function PicPage() {
   const injLine = (pic.injection?.emitter?.kind ?? "line") === "line";
   const b = polygonBounds(project.geometry.domain.polygon);
   const reflect = pic.reflect_edges ?? [];
+  const sel = useSelection((s) => s.selectedPlacement);
+  const selectPlacement = useSelection((s) => s.selectPlacement);
   return (
     <StudyShell settingsKey="pic" defaults={() => structuredClone(DEFAULT_PIC)} description={t("picPage.description")}>
       <OptionalBlock path={[...P, "initial_plasma"]} title={t("picPage.initialPlasma")} defaults={() => ({ ...DEFAULT_INITIAL_PLASMA })}>
@@ -130,6 +133,8 @@ export function PicPage() {
           max={8}
           title={(c, i) => c.label || `C${i + 1}`}
           emptyText={t("picPage.collectorsEmpty")}
+          selected={sel?.kind === "collector" ? sel.index : null}
+          onSelect={(i) => selectPlacement({ kind: "collector", index: i })}
           create={(items) => ({ ...segment(project, 0.05), tol: null, label: nextLabel("C", items) })}
           render={(_, i) => (
             <>
@@ -148,6 +153,8 @@ export function PicPage() {
           max={4}
           title={(r, i) => r.label || `E${i + 1}`}
           emptyText={t("picPage.eedfEmpty")}
+          selected={sel?.kind === "eedf" ? sel.index : null}
+          onSelect={(i) => selectPlacement({ kind: "eedf", index: i })}
           create={(items) => {
             const cx = (b.x0 + b.x1) / 2;
             const cy = (b.y0 + b.y1) / 2;
@@ -173,6 +180,8 @@ export function PicPage() {
           max={4}
           title={(s, i) => s.label || `S${i + 1}`}
           emptyText={t("picPage.sheathEmpty")}
+          selected={sel?.kind === "sheath" ? sel.index : null}
+          onSelect={(i) => selectPlacement({ kind: "sheath", index: i })}
           create={(items) => {
             const cy = (b.y0 + b.y1) / 2;
             return { p1: [b.x0, cy] as Point, p2: [b.x0 + 0.5 * (b.x1 - b.x0), cy] as Point, label: nextLabel("S", items) };

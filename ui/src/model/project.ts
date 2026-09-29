@@ -136,6 +136,15 @@ export function regionOutline(r: Region, n = 64): Point[] {
   return r.polygon ?? [];
 }
 
+/** 座標の端数 (0.1 + 0.2 の類) を 1 pm で丸める (保存する JSON を読みやすく保つ) */
+export function tidy(v: number): number {
+  return Math.round(v * 1e12) / 1e12;
+}
+
+export function tidyPoint([x, y]: Point): Point {
+  return [tidy(x), tidy(y)];
+}
+
 export function polygonArea(poly: Point[]): number {
   let s = 0;
   for (let i = 0; i < poly.length; i++) {

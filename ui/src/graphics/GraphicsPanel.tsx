@@ -1,21 +1,14 @@
-// グラフィックス欄 (タブで複数のビュー。P6a はジオメトリの表示のみ、場・プロット・CAD は P6c 以降)
+// グラフィックス欄: 2D ビューア (ジオメトリ・メッシュ・場・作図) とその下のラインプロファイル。
+// P6e で結果のビュー (1D のグラフなど) をタブで足す。
 
-import { Tabs } from "radix-ui";
-import { useTranslation } from "react-i18next";
-import { GeometryView } from "./GeometryView";
+import { ProfilePanel } from "./ProfilePanel";
+import { Viewer } from "./Viewer";
 
 export function GraphicsPanel() {
-  const { t } = useTranslation();
   return (
-    <Tabs.Root className="graphics-panel" defaultValue="geometry">
-      <Tabs.List className="tabs-list" aria-label={t("graphics.geometry")}>
-        <Tabs.Trigger className="tabs-trigger" value="geometry">
-          {t("graphics.geometry")}
-        </Tabs.Trigger>
-      </Tabs.List>
-      <Tabs.Content className="tabs-content" value="geometry">
-        <GeometryView />
-      </Tabs.Content>
-    </Tabs.Root>
+    <div className="graphics-panel">
+      <Viewer />
+      <ProfilePanel />
+    </div>
   );
 }

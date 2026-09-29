@@ -11,6 +11,8 @@ import { formatNumber, lengthUnitLabel, toDisplayLength } from "../util/format";
 import { usePrefs } from "../prefs/prefs";
 import { Hint } from "./widgets/common";
 import { ListEditor } from "./widgets/ListEditor";
+import { MeshBuild } from "./widgets/StaticRun";
+import { useSelection } from "../model/selection";
 
 interface Amr {
   max_level?: number;
@@ -87,6 +89,7 @@ function AmrEditor() {
 function EdgeSizes() {
   const { t } = useTranslation();
   const unit = usePrefs((s) => s.lengthUnit);
+  const sel = useSelection((s) => s.selectedPlacement);
   const fmt = (p: Point) => `(${formatNumber(toDisplayLength(p[0], unit))}, ${formatNumber(toDisplayLength(p[1], unit))}) ${lengthUnitLabel(unit)}`;
   return (
     <ListEditor<{ p1: Point; p2: Point }>
@@ -94,6 +97,8 @@ function EdgeSizes() {
       label={t("mesh.edgeSizes")}
       title={(e, i) => `M${i + 1} · ${fmt(e.p1)} – ${fmt(e.p2)}`}
       emptyText={t("mesh.edgeSizesEmpty")}
+      selected={sel?.kind === "edgeSize" ? sel.index : null}
+      onSelect={(i) => useSelection.getState().selectPlacement({ kind: "edgeSize", index: i })}
       render={(_, i) => (
         <>
           <SchemaField path={["mesh", "local_edge_sizes", i, "size"]} />
@@ -113,6 +118,7 @@ export function MeshPage() {
       <SchemaField path={["mesh", "size"]} />
       <SchemaField path={["mesh", "mode"]} />
       <Hint>{t(`mesh.modeHint.${mode}`)}</Hint>
+      <MeshBuild />
       {mode === "cartesian" && <AmrEditor />}
       <div className="subsection-title">{t("mesh.edgeSizes")}</div>
       {mode !== "unstructured" && <Hint tone="warn">{t("mesh.edgeSizesIgnored")}</Hint>}

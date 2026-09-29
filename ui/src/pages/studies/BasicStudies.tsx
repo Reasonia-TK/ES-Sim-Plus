@@ -9,6 +9,7 @@ import { formatNumber } from "../../util/format";
 import { defaultParticles } from "../../schema/defaults";
 import { Hint } from "../widgets/common";
 import { FnSection } from "../widgets/FnSection";
+import { SolveSummary } from "../widgets/StaticRun";
 import { StudyShell } from "./StudyShell";
 
 export function FemPage() {
@@ -34,7 +35,8 @@ export function FemPage() {
         <Hint tone="warn">{t("femPage.noElectrodes")}</Hint>
       )}
       <SchemaField path={["solver", "backend"]} />
-      <Hint>{t("femPage.runLater")}</Hint>
+      <Hint>{t("femPage.computeHint")}</Hint>
+      <SolveSummary />
     </>
   );
 }
@@ -78,7 +80,7 @@ export function TracePage() {
                 <SchemaField path={[...e, "seed"]} />
               </>
             )}
-            <Hint>{t("tracePage.emitterCanvasLater")}</Hint>
+            <Hint>{t("tracePage.emitterCanvasHint")}</Hint>
           </Section>
         </>
       )}

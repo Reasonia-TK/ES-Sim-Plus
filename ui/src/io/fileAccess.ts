@@ -140,6 +140,25 @@ export async function pickAndWrite(suggestedName: string, text: string): Promise
   return { name: suggestedName };
 }
 
+/** バイナリ (PNG など) を保存する (Tauri は保存先を選ぶ、ブラウザはダウンロード。キャンセルは false) */
+export async function saveBinaryFile(suggestedName: string, data: Blob, ext: string, description: string): Promise<boolean> {
+  if (isTauri()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({ defaultPath: suggestedName, filters: [{ name: description, extensions: [ext] }] });
+    if (!path) return false;
+    const { writeFile } = await import("@tauri-apps/plugin-fs");
+    await writeFile(path, new Uint8Array(await data.arrayBuffer()));
+    return true;
+  }
+  const url = URL.createObjectURL(data);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = suggestedName;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return true;
+}
+
 /** 任意のテキスト (CSV など) を保存する (v1 saveFile.ts と同じ振る舞い、キャンセルは false) */
 export async function saveTextFile(suggestedName: string, text: string, ext: string, description: string): Promise<boolean> {
   if (isTauri()) {

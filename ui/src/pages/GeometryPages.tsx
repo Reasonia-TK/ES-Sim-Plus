@@ -166,7 +166,7 @@ export function RegionsPage() {
           {t("tree.addCircle")}
         </button>
       </div>
-      <Hint>{t("settings.regionsCanvasLater")}</Hint>
+      <Hint>{t("settings.regionsCanvasHint")}</Hint>
     </>
   );
 }

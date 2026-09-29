@@ -1,0 +1,265 @@
+// ビューアの道具の帯: 作図 (選択・折れ線・矩形・円)、配置 (プロファイル線・エミッタ・コレクタ・ガス境界・EEDF 領域・
+// 辺のメッシュ幅・シース評価線)、調べる (プローブ・計測)、スナップ・全体表示、表示の設定、書き出し。
+
+import { DropdownMenu, Popover } from "radix-ui";
+import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import { Toggle } from "../forms/SchemaField";
+import { useDocument } from "../model/documentStore";
+import { MAX_COLLECTORS, MAX_EEDF_REGIONS, MAX_SHEATH_LINES } from "../model/placements";
+import type { Project } from "../model/project";
+import { CommitText } from "../pages/inputs";
+import { useStatic } from "../results/staticResults";
+import { formatNumber, parseNumber } from "../util/format";
+import { colormapCss, COLORMAP_KEYS, type ColormapKey } from "./colormaps";
+import {
+  IconChevron,
+  IconCircle,
+  IconDisplay,
+  IconExport,
+  IconFit,
+  IconMeasure,
+  IconPlace,
+  IconPolyline,
+  IconProbe,
+  IconRect,
+  IconSelect,
+  IconSnap,
+} from "./icons";
+import type { Scene } from "./scene";
+import { PLACE_TOOLS, RULER_FONTS, useViewer, type OverlayKey, type PlaceTool, type RulerFont, type Tool } from "./viewerStore";
+
+function ToolButton({ tool, icon, label, disabled, title }: { tool: Tool; icon: ReactNode; label: string; disabled?: boolean; title?: string }) {
+  const active = useViewer((s) => s.tool === tool);
+  const setTool = useViewer((s) => s.setTool);
+  return (
+    <button
+      type="button"
+      className={`tool-button${active ? " active" : ""}`}
+      aria-pressed={active}
+      aria-label={label}
+      title={title ?? label}
+      disabled={disabled}
+      onClick={() => setTool(tool)}
+    >
+      {icon}
+    </button>
+  );
+}
+
+function listLength(p: Project, key: string): number {
+  const v = (p.pic as Record<string, unknown> | null | undefined)?.[key];
+  return Array.isArray(v) ? v.length : 0;
+}
+
+/** 配置の道具の上限の表示 (n / 上限) */
+function placeCount(p: Project, tool: PlaceTool): [number, number] | null {
+  if (tool === "collector") return [listLength(p, "collectors"), MAX_COLLECTORS];
+  if (tool === "eedfbox") return [listLength(p, "eedf_regions"), MAX_EEDF_REGIONS];
+  if (tool === "sheathline") return [listLength(p, "sheath_lines"), MAX_SHEATH_LINES];
+  return null;
+}
+
+function PlaceMenu() {
+  const { t } = useTranslation();
+  const tool = useViewer((s) => s.tool);
+  const setTool = useViewer((s) => s.setTool);
+  const project = useDocument((s) => s.project);
+  const active = (PLACE_TOOLS as Tool[]).includes(tool);
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button type="button" className={`tool-button with-label${active ? " active" : ""}`} title={t("viewer.placeHint")}>
+          <IconPlace />
+          <span>{active ? t(`viewer.tool.${tool as PlaceTool}`) : t("viewer.place")}</span>
+          <IconChevron />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="menu-content" align="start" sideOffset={4}>
+          {PLACE_TOOLS.map((pt) => {
+            const count = placeCount(project, pt);
+            return (
+              <DropdownMenu.Item key={pt} className="menu-item" onSelect={() => setTool(pt)} title={t(`viewer.toolHint.${pt}`)}>
+                {tool === pt && <span className="menu-indicator">●</span>}
+                {t(`viewer.tool.${pt}`)}
+                {count && (
+                  <span className="menu-shortcut">
+                    {count[0]} / {count[1]}
+                  </span>
+                )}
+              </DropdownMenu.Item>
+            );
+          })}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+/** 配色の見本 (横長のグラデーション) */
+export function ColormapSwatch({ cmap }: { cmap: ColormapKey }) {
+  const stops = Array.from({ length: 9 }, (_, i) => `${colormapCss(cmap, i / 8)} ${(i / 8) * 100}%`).join(", ");
+  return <span className="colormap-swatch" style={{ background: `linear-gradient(to right, ${stops})` }} aria-hidden="true" />;
+}
+
+function RangeInput({ value, onCommit, label }: { value: number | null; onCommit: (v: number | null) => void; label: string }) {
+  const { t } = useTranslation();
+  return (
+    <CommitText
+      className="input range-input"
+      inputMode="decimal"
+      aria-label={label}
+      placeholder={t("viewer.auto")}
+      value={value === null ? "" : formatNumber(value)}
+      validate={(s) => (s.trim() === "" || parseNumber(s) !== null ? null : t("input.notNumber"))}
+      onCommit={(s) => onCommit(s.trim() === "" ? null : parseNumber(s))}
+    />
+  );
+}
+
+const FIELD_OVERLAYS: OverlayKey[] = ["mesh", "isolines", "vectors"];
+const PLACEMENT_OVERLAYS: OverlayKey[] = ["emitter", "collectors", "gasBoundaries", "eedf", "edgeSizes", "sheathLines", "amr"];
+const CANVAS_OVERLAYS: OverlayKey[] = ["grid", "rulers", "legend"];
+
+function DisplayPopover({ scene }: { scene: Scene }) {
+  const { t } = useTranslation();
+  const vs = useViewer();
+  const hasSolve = useStatic((s) => s.solve !== null);
+  const overlay = (k: OverlayKey) => (
+    <div key={k} className="display-toggle">
+      <Toggle checked={vs.overlays[k]} onChange={(v) => vs.setOverlay(k, v)} label={t(`viewer.overlay.${k}`)} />
+    </div>
+  );
+  return (
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button type="button" className="tool-button with-label" title={t("viewer.display")}>
+          <IconDisplay />
+          <span>{t("viewer.display")}</span>
+          <IconChevron />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content className="popover-content viewer-display" align="end" sideOffset={4} collisionPadding={8}>
+          {hasSolve && (
+            <div className="display-row">
+              <span className="display-label">{t("viewer.quantity")}</span>
+              <div className="segmented" role="radiogroup" aria-label={t("viewer.quantity")}>
+                {(["v", "e_abs"] as const).map((q) => (
+                  <button key={q} type="button" role="radio" aria-checked={vs.quantity === q} className={vs.quantity === q ? "active" : ""} onClick={() => vs.setQuantity(q)}>
+                    {t(`viewer.quantity_${q}`)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="display-row">
+            <label className="display-label" htmlFor="viewer-colormap">
+              {t("viewer.colormapLabel")}
+            </label>
+            <select id="viewer-colormap" className="input" value={vs.colormap} onChange={(e) => vs.setColormap(e.target.value as ColormapKey)}>
+              {COLORMAP_KEYS.map((k) => (
+                <option key={k} value={k}>
+                  {t(`viewer.colormap.${k}`)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="display-row">
+            <span className="display-label" />
+            <ColormapSwatch cmap={vs.colormap} />
+          </div>
+          <div className="display-row">
+            <span className="display-label">{t("viewer.range")}</span>
+            <div className="range-row">
+              <RangeInput label={t("viewer.rangeMin")} value={vs.range.min} onCommit={(v) => vs.setRange({ ...vs.range, min: v })} />
+              <span>–</span>
+              <RangeInput label={t("viewer.rangeMax")} value={vs.range.max} onCommit={(v) => vs.setRange({ ...vs.range, max: v })} />
+              <span className="field-unit">{scene.field?.unit ?? ""}</span>
+            </div>
+          </div>
+          <div className="display-row">
+            <span className="display-label" />
+            <div className="range-row">
+              <button type="button" className="button small" disabled={vs.range.min === null && vs.range.max === null} onClick={() => vs.setRange({ min: null, max: null })}>
+                {t("viewer.auto")}
+              </button>
+              <Toggle checked={vs.log} onChange={vs.setLog} label={t("viewer.log")} />
+            </div>
+          </div>
+          <div className="display-group">{t("viewer.groupField")}</div>
+          {FIELD_OVERLAYS.map(overlay)}
+          <div className="display-group">{t("viewer.groupPlacements")}</div>
+          {PLACEMENT_OVERLAYS.map(overlay)}
+          <div className="display-group">{t("viewer.groupCanvas")}</div>
+          {CANVAS_OVERLAYS.map(overlay)}
+          <div className="display-row">
+            <span className="display-label">{t("viewer.rulerFont")}</span>
+            <div className="segmented" role="radiogroup" aria-label={t("viewer.rulerFont")}>
+              {(Object.keys(RULER_FONTS) as RulerFont[]).map((f) => (
+                <button key={f} type="button" role="radio" aria-checked={vs.rulerFont === f} className={vs.rulerFont === f ? "active" : ""} onClick={() => vs.setRulerFont(f)}>
+                  {t(`viewer.rulerFont_${f}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
+function ExportMenu({ scene, onExportPng, onExportCsv }: { scene: Scene; onExportPng: () => void; onExportCsv: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button type="button" className="tool-button" aria-label={t("viewer.export")} title={t("viewer.export")}>
+          <IconExport />
+          <IconChevron />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="menu-content" align="end" sideOffset={4}>
+          <DropdownMenu.Item className="menu-item" onSelect={onExportPng}>
+            {t("viewer.exportPng")}
+          </DropdownMenu.Item>
+          <DropdownMenu.Item className="menu-item" disabled={!scene.field} onSelect={onExportCsv}>
+            {t("viewer.exportCsv")}
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+export function ViewerToolbar({ scene, onExportPng, onExportCsv }: { scene: Scene; onExportPng: () => void; onExportCsv: () => void }) {
+  const { t } = useTranslation();
+  const snap = useViewer((s) => s.snap);
+  const setSnap = useViewer((s) => s.setSnap);
+  const requestFit = useViewer((s) => s.requestFit);
+  return (
+    <div className="viewer-toolbar" role="toolbar" aria-label={t("viewer.toolbar")}>
+      <ToolButton tool="select" icon={<IconSelect />} label={t("viewer.tool.select")} />
+      <ToolButton tool="polyline" icon={<IconPolyline />} label={t("viewer.tool.polyline")} title={`${t("viewer.tool.polyline")} — ${t("viewer.clipHint")}`} />
+      <ToolButton tool="rect" icon={<IconRect />} label={t("viewer.tool.rect")} title={`${t("viewer.tool.rect")} — ${t("viewer.clipHint")}`} />
+      <ToolButton tool="circle" icon={<IconCircle />} label={t("viewer.tool.circle")} title={`${t("viewer.tool.circle")} — ${t("viewer.clipHint")}`} />
+      <span className="toolbar-sep" />
+      <PlaceMenu />
+      <span className="toolbar-sep" />
+      <ToolButton tool="probe" icon={<IconProbe />} label={t("viewer.tool.probe")} disabled={!scene.field} title={scene.field ? t("viewer.tool.probe") : t("viewer.probeNeedsField")} />
+      <ToolButton tool="measure" icon={<IconMeasure />} label={t("viewer.tool.measure")} />
+      <span className="toolbar-sep" />
+      <button type="button" className={`tool-button${snap ? " active" : ""}`} aria-pressed={snap} aria-label={t("viewer.snap")} title={t("viewer.snap")} onClick={() => setSnap(!snap)}>
+        <IconSnap />
+      </button>
+      <button type="button" className="tool-button" aria-label={t("viewer.fit")} title={`${t("viewer.fit")} (F)`} onClick={requestFit}>
+        <IconFit />
+      </button>
+      <span className="spacer" />
+      <DisplayPopover scene={scene} />
+      <ExportMenu scene={scene} onExportPng={onExportPng} onExportCsv={onExportCsv} />
+    </div>
+  );
+}
