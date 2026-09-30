@@ -10,6 +10,7 @@ import { chamferCorner, chainToPath, extendEnd, filletCorner, filletLines, neare
 import { bulgeOf, closestPoint, intersections, pathSegs, segFromBulge, type LineSeg, type Seg, type Vec } from "../cad/geom";
 import { applyAffine, bulgesOf, determinant, packBulges, rotation, scaling, signedArea, transformPath, translation, type Affine, type PathData } from "../cad/path";
 import { applyDomainEdit, type EdgeRemapReport } from "./domainOps";
+import { keepLayer, visibleRegions, visibleSketch } from "./layers";
 import { boundaryOfEdge, domainPath, edgeIdsOf, nextEdgeId, regionHoles, regionPath, regionRings, tidy, tidyPoint, uniqueRegionId, type Loop, type Point, type Project, type Region } from "./project";
 import { setRegionHole, setRegionPath } from "./regionOps";
 import type { PickRef } from "./selection";
@@ -77,7 +78,7 @@ interface LocalSize {
 
 /** 領域のコピー (値と局所メッシュ幅も写す)。新しい ID */
 function copyRegion(d: P, src: Region, shape: RegionGeom): string {
-  const copy = JSON.parse(JSON.stringify(src)) as Region; // Immer の draft は structuredClone できない
+  const copy = keepLayer(src, JSON.parse(JSON.stringify(src)) as Region); // Immer の draft は structuredClone できない
   copy.id = uniqueRegionId(d as Project, `${src.id}_`);
   delete copy.polygon;
   delete copy.bulges;
@@ -114,7 +115,7 @@ export function transformItems(d: P, picked: PickRef[], m: Affine, copy: boolean
       void _id;
       const next = transformSketch(rest as NewSketch, m);
       if (copy) {
-        const nid = addSketch(d, next);
+        const nid = addSketch(d, keepLayer(e, next));
         if (nid) out.push({ kind: "sketch", id: nid });
       } else {
         replaceSketch(d, it.id, next);
@@ -256,7 +257,7 @@ export function filletSketchLines(d: P, id1: string, pick1: Point, id2: string, 
   replaceSketch(d, id1, { kind: "line", a: res.value.line1.a as Point, b: res.value.line1.b as Point });
   replaceSketch(d, id2, { kind: "line", a: res.value.line2.a as Point, b: res.value.line2.b as Point });
   const arc = res.value.arc;
-  return { ok: true, value: arc ? addSketch(d, { kind: "arc", a: arc.a as Point, b: arc.b as Point, bulge: arc.bulge }) : null };
+  return { ok: true, value: arc ? addSketch(d, keepLayer<NewSketch>(e1, { kind: "arc", a: arc.a as Point, b: arc.b as Point, bulge: arc.bulge })) : null };
 }
 
 // ---- オフセット ----
@@ -347,7 +348,7 @@ export function offsetItem(d: P, item: PickRef, dist: number, side: Point): Edit
     const inside = Math.hypot(side[0] - e.center[0], side[1] - e.center[1]) < e.r;
     const rad = e.r + (inside ? -dist : dist);
     if (!(rad > 0)) return { ok: false, error: "tooLarge" };
-    const id = addSketch(d, { kind: "circle", center: e.center, r: rad });
+    const id = addSketch(d, keepLayer<NewSketch>(e, { kind: "circle", center: e.center, r: rad }));
     return id ? { ok: true, value: { kind: "sketch", id } } : { ok: false, error: "tooLarge" };
   }
   const segs = sketchSegs(e);
@@ -368,7 +369,7 @@ export function offsetItem(d: P, item: PickRef, dist: number, side: Point): Edit
     const b = v.bulges[0] ?? 0;
     next = b ? { kind: "arc", a: v.points[0] as Point, b: v.points[1] as Point, bulge: b } : { kind: "line", a: v.points[0] as Point, b: v.points[1] as Point };
   } else next = { kind: "polyline", points: v.points as Point[], bulges: closed ? v.bulges : [...v.bulges, 0], closed };
-  const id = addSketch(d, next);
+  const id = addSketch(d, keepLayer(e, next));
   return id ? { ok: true, value: { kind: "sketch", id } } : { ok: false, error: "tooLarge" };
 }
 
@@ -406,7 +407,7 @@ export function trimSketch(d: P, id: string, click: Point, cutters: Seg[]): Edit
   replaceSketch(d, id, chainToSketch(chains[0]));
   const ids = [id];
   for (const c of chains.slice(1)) {
-    const nid = addSketch(d, chainToSketch(c));
+    const nid = addSketch(d, keepLayer(e, chainToSketch(c)));
     if (nid) ids.push(nid);
   }
   return { ok: true, value: ids };
@@ -442,8 +443,8 @@ export function cutterSegs(p: Project, exclude: string | null): Seg[] {
   const out: Seg[] = [];
   const dp = domainPath(p);
   out.push(...pathSegs(dp.polygon, bulgesOf(dp)));
-  for (const r of p.geometry.regions) for (const rp of regionRings(r)) out.push(...pathSegs(rp.polygon, bulgesOf(rp)));
-  for (const e of sketchOf(p)) if (e.id !== exclude) out.push(...sketchSegs(e));
+  for (const r of visibleRegions(p)) for (const rp of regionRings(r)) out.push(...pathSegs(rp.polygon, bulgesOf(rp)));
+  for (const e of visibleSketch(p)) if (e.id !== exclude) out.push(...sketchSegs(e));
   return out;
 }
 

@@ -10,7 +10,7 @@ import { saveBinaryFile, saveTextFile } from "../io/fileAccess";
 import { useDocument } from "../model/documentStore";
 import { useSelection } from "../model/selection";
 import { coordOf, domainBounds, edgeIndexOf, type Point, type Project } from "../model/project";
-import { sketchOf } from "../model/sketch";
+import { visibleSketch } from "../model/layers";
 import { usePrefs } from "../prefs/prefs";
 import { formatNumber, lengthUnitLabel, toDisplayLength } from "../util/format";
 import { fitCamera, toScreen, toWorld, zoomAt, ZOOM_STEP, type Camera } from "./camera";
@@ -222,7 +222,8 @@ export function Viewer({ active }: { active: ActiveScene }) {
     t,
   });
   const { cursor, hover, preview } = tools;
-  const sketch = useMemo(() => sketchOf(project), [project]);
+  // 表示しているレイヤのスケッチ (P7f)
+  const sketch = useMemo(() => visibleSketch(project), [project]);
 
   // ---- 描く ----
 

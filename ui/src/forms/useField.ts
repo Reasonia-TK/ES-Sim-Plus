@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { useDocument } from "../model/documentStore";
+import { paramValues } from "../model/params";
 import { coordOf } from "../model/project";
 import { usePrefs } from "../prefs/prefs";
 import { fieldInfo, getIn, setIn, useProjectSchema, type FieldInfo, type Path } from "../schema/schema";
@@ -11,7 +12,8 @@ import { fieldLabel } from "./labels";
 export function useUnitContext(): UnitContext {
   const lengthUnit = usePrefs((s) => s.lengthUnit);
   const axisymmetric = useDocument((s) => coordOf(s.project) !== "xy");
-  return useMemo(() => ({ lengthUnit, axisymmetric }), [lengthUnit, axisymmetric]);
+  const vars = useDocument((s) => paramValues(s.project).values);
+  return useMemo(() => ({ lengthUnit, axisymmetric, vars }), [lengthUnit, axisymmetric, vars]);
 }
 
 /** 文書の path の値を書き換える (label は元に戻すメニューに出る名前) */

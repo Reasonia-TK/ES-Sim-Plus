@@ -4,7 +4,7 @@
 import { create } from "zustand";
 import { useDocument } from "./documentStore";
 import { edgeIndexOf } from "./project";
-import { sketchOf } from "./sketch";
+import { pickableRegions, pickableSketch } from "./layers";
 
 /**
  * ツリーのノード ID:
@@ -124,8 +124,9 @@ useDocument.subscribe((s, prev) => {
     if (sel.activeNode === `region:${sel.selectedRegion}`) patch.activeNode = "regions";
   }
   if (sel.picked.length) {
-    const regions = new Set(s.project.geometry.regions.map((r) => r.id));
-    const sketch = new Set(sketchOf(s.project).map((e) => e.id));
+    // 消えたもの・選べないレイヤ (非表示・ロック、P7f) のものは外す
+    const regions = new Set(pickableRegions(s.project).map((r) => r.id));
+    const sketch = new Set(pickableSketch(s.project).map((e) => e.id));
     const kept = sel.picked.filter((x) => (x.kind === "region" ? regions.has(x.id) : sketch.has(x.id)));
     if (kept.length !== sel.picked.length) patch.picked = kept;
   }

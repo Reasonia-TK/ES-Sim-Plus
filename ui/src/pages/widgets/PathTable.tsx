@@ -7,7 +7,7 @@ import { angleFromBulge, bulgeFromAngle, bulgesOf, removeVertex, type PathData }
 import { QuantityInput } from "../../forms/SchemaField";
 import { useUnitContext } from "../../forms/useField";
 import type { Point } from "../../model/project";
-import type { FieldInfo } from "../../schema/schema";
+import type { FieldInfo, Path } from "../../schema/schema";
 import { displayUnit } from "../../schema/units";
 
 const LENGTH: FieldInfo = {
@@ -50,7 +50,8 @@ function angleDeg(b: number): number {
   return Math.round(deg * 1e9) / 1e9;
 }
 
-export function PathTable({ path, label, ops, closed = true }: { path: PathData; label: string; ops: PathTableOps; closed?: boolean }) {
+/** docPath: 頂点の列の文書の場所 (座標の欄に式を束縛する、P7f) */
+export function PathTable({ path, label, ops, closed = true, docPath }: { path: PathData; label: string; ops: PathTableOps; closed?: boolean; docPath?: Path }) {
   const { t } = useTranslation();
   const ctx = useUnitContext();
   const unit = displayUnit("m", true, ctx);
@@ -76,6 +77,7 @@ export function PathTable({ path, label, ops, closed = true }: { path: PathData;
                 <QuantityInput
                   info={LENGTH}
                   ctx={ctx}
+                  bindPath={docPath ? [...docPath, i, k] : undefined}
                   aria-label={`${k === 0 ? "x" : "y"} ${i + 1}`}
                   value={p[k]}
                   onCommit={(v) => {

@@ -1,6 +1,7 @@
 // 単位の表示と、単位付きの入力 ("13.56 MHz"、"5 mm"、"2 ns"、"10 mTorr" など) の解析。
 // 保存値は常に SI (スキーマの x-unit)。幾何の長さ (x-geom) は表示単位 (mm / µm) で出す。
 
+import { evaluateExpr, ExprError, namesIn } from "../model/expr";
 import { formatNumber, type LengthUnit } from "../util/format";
 
 /** スキーマの x-unit → 表示 */
@@ -43,6 +44,8 @@ export interface UnitContext {
   lengthUnit: LengthUnit;
   /** 軸対称では「奥行き 1 m あたり」の単位を全体の量に読み替える (A/m → A など、v1 と同じ) */
   axisymmetric: boolean;
+  /** パラメータの値 (SI、P7f)。式にパラメータの名前があれば SI で計算する */
+  vars?: Readonly<Record<string, number>>;
 }
 
 /** 入出力に使う単位の記号 (幾何の長さは表示単位) */
@@ -74,13 +77,40 @@ export function formatQuantity(v: number | null | undefined, geom: boolean, ctx:
 
 const NUMBER_RE = /^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(.*)$/;
 
-export type ParseResult = { ok: true; value: number | null } | { ok: false; error: "number" | "unit" };
+/** 読んだ値 (SI)。expr はパラメータを使った式 (欄に束縛する、P7f) */
+export type ParseResult = { ok: true; value: number | null; expr?: string } | { ok: false; error: "number" | "unit" | "param"; message?: string };
 
 /**
  * 入力を解析して保存値 (SI) にする。単位を省けば表示単位 (幾何は mm/µm、ほかは SI の基本単位)。
  * 単位を書くときは同じ次元の単位だけ受け付ける (例: 周波数の欄に "13.56 MHz"、長さの欄に "0.5 cm")。
  */
 export function parseQuantity(text: string, unit: string | undefined, geom: boolean, ctx: UnitContext): ParseResult {
+  const r = parsePlainQuantity(text, unit, geom, ctx);
+  if (r.ok || !/[A-Za-z_]/.test(text)) return r;
+  return parseParamExpr(text, ctx) ?? r;
+}
+
+/**
+ * パラメータを使った式 (P7f): 名前があれば SI で計算する (数だけの項は SI、単位を付けて書ける: gap + 1 mm)。
+ * 名前が無ければ null (ふつうの入力として読む)。パラメータの値は ctx.vars
+ */
+export function parseParamExpr(text: string, ctx: UnitContext): ParseResult | null {
+  const s = text.trim();
+  let names: Set<string>;
+  try {
+    names = namesIn(s);
+  } catch {
+    return null;
+  }
+  if (names.size === 0) return null;
+  try {
+    return { ok: true, value: evaluateExpr(s, ctx.vars ?? {}), expr: s };
+  } catch (e) {
+    return { ok: false, error: "param", message: e instanceof ExprError ? e.message : String(e) };
+  }
+}
+
+function parsePlainQuantity(text: string, unit: string | undefined, geom: boolean, ctx: UnitContext): ParseResult {
   const s = text.trim();
   if (s === "") return { ok: true, value: null };
   const m = NUMBER_RE.exec(s);

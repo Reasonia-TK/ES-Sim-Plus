@@ -1872,6 +1872,103 @@
    "title": "MeshSettings",
    "type": "object"
   },
+  "Param": {
+   "description": "名前付きの式 (P7f、params.py の文法。値は SI)。",
+   "properties": {
+    "name": {
+     "title": "Name",
+     "type": "string"
+    },
+    "expr": {
+     "title": "Expr",
+     "type": "string"
+    },
+    "value": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "式を計算した値 (SI)。UI とスイープが書く",
+     "title": "Value",
+     "x-unit": "1"
+    },
+    "description": {
+     "default": "",
+     "title": "Description",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "expr"
+   ],
+   "title": "Param",
+   "type": "object"
+  },
+  "ParamBinding": {
+   "description": "設定の数値の欄に付けた式 (path は文書の中の道筋: キー・番号・{\"id\": …}・{\"edge\": 辺の ID})。",
+   "properties": {
+    "path": {
+     "items": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "additionalProperties": {
+         "type": "string"
+        },
+        "type": "object"
+       }
+      ]
+     },
+     "minItems": 1,
+     "title": "Path",
+     "type": "array"
+    },
+    "expr": {
+     "title": "Expr",
+     "type": "string"
+    }
+   },
+   "required": [
+    "path",
+    "expr"
+   ],
+   "title": "ParamBinding",
+   "type": "object"
+  },
+  "Params": {
+   "description": "パラメータと式の束縛 (P7f、prompts/132)。欄には計算した数値も入れておき、ソルバーはそれを使う",
+   "properties": {
+    "vars": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/Param"
+     },
+     "title": "Vars",
+     "type": "array"
+    },
+    "bindings": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/ParamBinding"
+     },
+     "title": "Bindings",
+     "type": "array"
+    }
+   },
+   "title": "Params",
+   "type": "object"
+  },
   "ParticleSettings": {
    "properties": {
     "species": {
@@ -2457,6 +2554,19 @@
      "title": "Holes",
      "type": "array"
     },
+    "layer": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "UI のレイヤ (project.cad.layers の id)。ソルバーは使わない",
+     "title": "Layer"
+    },
     "shape": {
      "anyOf": [
       {
@@ -3016,8 +3126,19 @@
     }
    ],
    "default": null,
-   "description": "UI の CAD の状態 (スケッチなど)。ソルバーは使わない",
+   "description": "UI の CAD の状態 (スケッチ・レイヤなど)。ソルバーは使わない",
    "title": "Cad"
+  },
+  "params": {
+   "anyOf": [
+    {
+     "$ref": "#/$defs/Params"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null
   }
  },
  "required": [

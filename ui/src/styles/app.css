@@ -511,6 +511,73 @@ select {
   border-color: var(--accent);
 }
 
+/* 式を束縛した欄 (P7f): 左に印、式は title と編集中の文 */
+.input.bound {
+  border-left: 3px solid var(--accent);
+  padding-left: 4px;
+}
+
+/* レイヤの表: 今のレイヤ・色・名前・表示・ロック・数・削除 */
+.layers-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.layers-table th {
+  white-space: nowrap;
+}
+
+.layers-table th:nth-child(1),
+.layers-table th:nth-child(4),
+.layers-table th:nth-child(5) {
+  width: 3.6em;
+}
+
+.layers-table th:nth-child(2) {
+  width: 5em;
+}
+
+.layers-table th:nth-child(6),
+.layers-table th:last-child {
+  width: 2.6em;
+}
+
+.layers-table td .input {
+  height: 22px;
+}
+
+.color-swatch {
+  width: 26px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: none;
+  vertical-align: middle;
+}
+
+/* パラメータの表: 名前・式・値・説明・削除 */
+.params-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.params-table th:nth-child(1) {
+  width: 22%;
+}
+
+.params-table th:nth-child(3) {
+  width: 18%;
+}
+
+.params-table th:last-child {
+  width: 2.4em;
+}
+
+.params-table td .input {
+  height: 22px;
+}
+
 .hint {
   color: var(--text-muted);
   font-size: 12px;

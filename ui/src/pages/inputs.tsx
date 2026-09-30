@@ -2,9 +2,12 @@
 // フォーカスが外れたときに確定 (履歴 1 件)、Esc か不正な値で元に戻す、編集中は外からの変更で上書きしない。
 // (単位付き入力・スキーマからの生成は P6b)
 
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { useDocument } from "../model/documentStore";
+import { bindingAt, paramValues, stageBinding } from "../model/params";
 import { usePrefs } from "../prefs/prefs";
+import type { Path } from "../schema/schema";
 import { parseQuantity } from "../schema/units";
 import { formatNumber, lengthUnitLabel, parseNumber, toDisplayLength } from "../util/format";
 
@@ -42,6 +45,9 @@ export function Field({ label, unit, hint, children }: FieldProps) {
 interface CommitTextProps {
   id?: string;
   value: string;
+  /** 編集を始めたときに出す文 (束縛した欄の式など。無ければ value) */
+  editText?: string;
+  title?: string;
   onCommit: (v: string) => void;
   /** 不正ならエラー文、正しければ null */
   validate?: (v: string) => string | null;
@@ -55,10 +61,19 @@ interface CommitTextProps {
   "aria-label"?: string;
 }
 
-export function CommitText({ id, value, onCommit, validate, onError, className, placeholder, inputMode, autoFocus, onCancel, disabled, ...rest }: CommitTextProps) {
+export function CommitText({ id, value, editText, title, onCommit, validate, onError, className, placeholder, inputMode, autoFocus, onCancel, disabled, ...rest }: CommitTextProps) {
   const [draft, setDraft] = useState(value);
   const [editing, setEditing] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
+  // 編集を始めたときの文 (変えなければ確定しない)
+  const initial = useRef(value);
+  // フォーカスで文を式に切り替えたら全選択し直す (選択が外れて打った文字が後ろに付かないように)
+  const reselect = useRef(false);
+  useLayoutEffect(() => {
+    if (!reselect.current) return;
+    reselect.current = false;
+    ref.current?.select();
+  });
   // Esc で抜けたときは確定しない (blur が先に走るので印を付けておく。v1 は Esc でも確定していた)
   const cancelled = useRef(false);
   useEffect(() => {
@@ -77,7 +92,8 @@ export function CommitText({ id, value, onCommit, validate, onError, className, 
       setDraft(value);
       return;
     }
-    if (draft !== value) onCommit(draft);
+    if (draft !== initial.current) onCommit(draft);
+    else setDraft(value);
   };
   return (
     <input
@@ -90,9 +106,14 @@ export function CommitText({ id, value, onCommit, validate, onError, className, 
       autoFocus={autoFocus}
       disabled={disabled}
       spellCheck={false}
+      title={title}
       aria-label={rest["aria-label"]}
       onFocus={() => {
         cancelled.current = false;
+        const start = editText ?? value;
+        initial.current = start;
+        if (start !== draft) reselect.current = true;
+        setDraft(start);
         setEditing(true);
       }}
       onChange={(e) => setDraft(e.target.value)}
@@ -155,13 +176,17 @@ export function NumberInput({ value, onCommit, nullable, min, max, exclusive, in
 type LengthInputProps = Omit<NumberInputProps, "nullable" | "value" | "onCommit"> & {
   value: number;
   onCommit: (m: number) => void;
+  /** 式を束縛する文書の場所 (P7f。無ければパラメータは 1 回だけ計算して値にする) */
+  bindPath?: Path;
 };
 
 /** 長さの欄: 値は m、表示・入力は設定の単位 (mm/µm)。単位を付けても入れられる ("0.5 cm"・"5 µm") */
-export function LengthInput({ id, value, onCommit, min, max, exclusive, onError, placeholder, "aria-label": ariaLabel }: LengthInputProps) {
+export function LengthInput({ id, value, onCommit, min, max, exclusive, onError, placeholder, "aria-label": ariaLabel, bindPath }: LengthInputProps) {
   const { t } = useTranslation();
   const unit = usePrefs((s) => s.lengthUnit);
-  const ctx = { lengthUnit: unit, axisymmetric: false };
+  const vars = useDocument((s) => paramValues(s.project).values);
+  const bound = useDocument((s) => (bindPath ? bindingAt(s.project, bindPath) : null));
+  const ctx = { lengthUnit: unit, axisymmetric: false, vars };
   const parse = (text: string) => parseQuantity(text, undefined, true, ctx);
   const shown = (m: number) => `${formatNumber(toDisplayLength(m, unit))} ${lengthUnitLabel(unit)}`;
   return (
@@ -170,11 +195,14 @@ export function LengthInput({ id, value, onCommit, min, max, exclusive, onError,
       aria-label={ariaLabel}
       placeholder={placeholder}
       inputMode="decimal"
+      className={bound ? "input bound" : undefined}
+      title={bound ? `= ${bound}` : undefined}
+      editText={bound ?? undefined}
       value={formatNumber(toDisplayLength(value, unit))}
       onError={onError}
       validate={(text) => {
         const r = parse(text);
-        if (!r.ok) return r.error === "unit" ? t("input.badUnit", { unit: lengthUnitLabel(unit) }) : t("input.notNumber");
+        if (!r.ok) return r.error === "param" ? (r.message ?? t("input.notNumber")) : r.error === "unit" ? t("input.badUnit", { unit: lengthUnitLabel(unit) }) : t("input.notNumber");
         if (r.value === null) return t("input.notNumber");
         if (min !== undefined && (exclusive ? r.value <= min : r.value < min)) return `${exclusive ? ">" : "≥"} ${shown(min)}`;
         if (max !== undefined && (exclusive ? r.value >= max : r.value > max)) return `${exclusive ? "<" : "≤"} ${shown(max)}`;
@@ -182,7 +210,9 @@ export function LengthInput({ id, value, onCommit, min, max, exclusive, onError,
       }}
       onCommit={(text) => {
         const r = parse(text);
-        if (r.ok && r.value !== null) onCommit(r.value);
+        if (!r.ok || r.value === null) return;
+        if (bindPath) stageBinding(bindPath, r.expr ?? null);
+        onCommit(r.value);
       }}
     />
   );

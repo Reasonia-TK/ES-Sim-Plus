@@ -7,7 +7,12 @@ import { bulgeOf, pathBounds, segFromBulge, type Seg } from "../cad/geom";
 import { bulgesOf, circlePath, packBulges, removeVertex, splitEdge, type PathData } from "../cad/path";
 import { tidy, tidyPoint, type Point, type Project } from "./project";
 
-export interface SketchLine {
+/** レイヤ (P7f、model/layers.ts。無ければ既定のレイヤ) */
+interface OnLayer {
+  layer?: string | null;
+}
+
+export interface SketchLine extends OnLayer {
   id: string;
   kind: "line";
   a: Point;
@@ -15,7 +20,7 @@ export interface SketchLine {
 }
 
 /** 円弧 (a → b、bulge = tan(θ/4)、正は反時計回り) */
-export interface SketchArc {
+export interface SketchArc extends OnLayer {
   id: string;
   kind: "arc";
   a: Point;
@@ -23,7 +28,7 @@ export interface SketchArc {
   bulge: number;
 }
 
-export interface SketchCircle {
+export interface SketchCircle extends OnLayer {
   id: string;
   kind: "circle";
   center: Point;
@@ -31,7 +36,7 @@ export interface SketchCircle {
 }
 
 /** ポリライン (辺 i は点 i → i+1、閉じていれば最後の点 → 最初の点も辺) */
-export interface SketchPolyline {
+export interface SketchPolyline extends OnLayer {
   id: string;
   kind: "polyline";
   points: Point[];
@@ -119,12 +124,15 @@ export function deleteSketch(d: P, ids: string[]): void {
   cad.sketch = cad.sketch.filter((e) => !drop.has(e.id));
 }
 
-/** 形を置き換える (ID は保つ) */
+/** 形を置き換える (ID と、新しい形で指定しなければレイヤも保つ) */
 export function replaceSketch(d: P, id: string, e: NewSketch): void {
   const list = sketchList(d);
   const k = list.findIndex((x) => x.id === id);
   if (k < 0 || !isValidSketch(e)) return;
-  list[k] = { ...tidyEntity(e), id } as SketchEntity;
+  const layer = e.layer === undefined ? list[k].layer : e.layer;
+  const next = { ...tidyEntity(e), id } as SketchEntity;
+  if (layer !== undefined && layer !== null) next.layer = layer;
+  list[k] = next;
 }
 
 export function translateSketch(e: SketchEntity, dx: number, dy: number): SketchEntity {

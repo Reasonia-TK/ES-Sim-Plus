@@ -7,7 +7,7 @@ import { SchemaField, Toggle } from "../../forms/SchemaField";
 import { setValue } from "../../forms/useField";
 import { useDocument } from "../../model/documentStore";
 import { edgeCount, type Point } from "../../model/project";
-import { buildSweepCandidates, DEFAULT_SWEEP, prepareSweepProject, sweepModuleForPath, sweepValues, valueAtPath, type SweepSettings } from "../../model/sweep";
+import { buildSweepCandidates, DEFAULT_SWEEP, isParamPath, prepareSweepProject, sweepModule, sweepValues, valueAtPath, type SweepModule, type SweepSettings } from "../../model/sweep";
 import { DEFAULT_DSMC_BOUNDARY, defaultDsmc, defaultTl } from "../../schema/defaults";
 import { formatNumber } from "../../util/format";
 import { dsmcParticlesPerCell } from "../../util/runHints";
@@ -216,8 +216,9 @@ export function SweepPage() {
   const prepared = useMemo(() => (s.param_path ? prepareSweepProject(project, s.param_path) : project), [project, s.param_path]);
   const current = s.param_path ? valueAtPath(prepared, s.param_path) : undefined;
   const unset = s.param_path !== "" && valueAtPath(project, s.param_path) === undefined && current !== undefined;
+  const mod = sweepModule(s, project);
   // 1 ケースのスレッド数 (対象のモジュールの設定、無ければ 1)
-  const moduleThreads = Number((project[sweepModuleForPath(s.param_path || "pic.x")] as { threads?: number } | null | undefined)?.threads ?? 1) || 1;
+  const moduleThreads = Number((project[mod] as { threads?: number } | null | undefined)?.threads ?? 1) || 1;
   return (
     <>
       <p className="hint">{t("sweepPage.description")}</p>
@@ -243,8 +244,21 @@ export function SweepPage() {
         <Hint tone={current === undefined ? "warn" : undefined}>
           {current === undefined
             ? t("sweepPage.invalidPath")
-            : t("sweepPage.current", { v: formatNumber(current), module: t(`jobs.kind.${sweepModuleForPath(s.param_path)}`) }) + (unset ? ` ${t("sweepPage.unsetZero")}` : "")}
+            : t("sweepPage.current", { v: formatNumber(current), module: t(`jobs.kind.${mod}`) }) + (unset ? ` ${t("sweepPage.unsetZero")}` : "")}
         </Hint>
+      )}
+      {isParamPath(s.param_path) && (
+        <Field label={t("sweepPage.module")} hint={t("sweepPage.moduleHint")}>
+          {(id) => (
+            <select id={id} className="input" value={mod} onChange={(e) => set({ module: e.target.value as SweepModule })}>
+              {(["pic", "pic1d", "fluid1d", "fluid2d"] as const).map((m) => (
+                <option key={m} value={m}>
+                  {t(`jobs.kind.${m}`)}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
       )}
       <Field label={t("sweepPage.values")}>
         {(id) => (
@@ -303,7 +317,7 @@ export function SweepPage() {
         kind="sweep"
         runLabel={t("sweepPage.runSweep")}
         blocked={!s.param_path || current === undefined ? t("sweepPage.needPath") : values.length === 0 ? t("sweepPage.noValues") : null}
-        options={() => ({ param_path: s.param_path, values, parallel: s.parallel, module: sweepModuleForPath(s.param_path) })}
+        options={() => ({ param_path: s.param_path, values, parallel: s.parallel, module: sweepModule(s, useDocument.getState().project) })}
         project={() => prepareSweepProject(useDocument.getState().project, s.param_path)}
       />
       <SweepCases />

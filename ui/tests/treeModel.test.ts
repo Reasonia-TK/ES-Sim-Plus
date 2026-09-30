@@ -25,7 +25,7 @@ describe("model tree", () => {
     expect(find(root, "study:fem")?.badge).toBeUndefined();
     expect(find(root, "regions.empty")?.placeholder).toBe(true);
     // 1e5 以上は指数表記 (v1 と同じ規則)
-    expect(buildTree(p, t, "um", "demo").children![0].children![0].detail).toBe("1e5 × 50000 µm");
+    expect(find(buildTree(p, t, "um", "demo"), "domain")?.detail).toBe("1e5 × 50000 µm");
   });
 
   it("labels axisymmetric edges and polygon domains", () => {
@@ -53,7 +53,7 @@ describe("model tree", () => {
   it("lists only the open branches for keyboard navigation", () => {
     const root = buildTree(newProject(), t, "mm", "demo");
     const rows = visibleNodes(root, new Set(["project", "geometry"]));
-    expect(rows.map((r) => r.node.id)).toEqual(["project", "geometry", "domain", "regions", "sketch", "boundaries", "mesh", "bfield", "studies", "results"]);
+    expect(rows.map((r) => r.node.id)).toEqual(["project", "params", "geometry", "domain", "regions", "sketch", "layers", "boundaries", "mesh", "bfield", "studies", "results"]);
     expect(rows.find((r) => r.node.id === "domain")?.parent).toBe("geometry");
     expect(rows.find((r) => r.node.id === "domain")?.level).toBe(3);
   });

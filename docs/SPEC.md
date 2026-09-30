@@ -129,6 +129,9 @@ FEM の疎行列直接法ソルブ(スパースLU)は CPU の方が実装・安�
 - 編集: フィレット・面取り・オフセット・トリム・延長。変換: 移動・回転・ミラー・尺度 (コピーも)・配列 (矩形・円周) (P7d)
 - ブーリアン: 領域の和・差・積 (円弧と穴を保つ。結果は元の領域の ID・値、分かれたら同じ値の新しい領域、相手は消すか
   残す)。囲まれた所から領域は面の中の島を穴にする。穴の頂点の表・穴を埋める (P7e)
+- パラメータ: 名前付きの式 (単位付きの数・四則演算・関数、値は SI)。数値の欄にパラメータの名前を使った式を書くと
+  その欄に束縛され、パラメータを変えると一緒に変わる (欄に数を打つと外れる)。スイープの対象にもなる (P7f)
+- レイヤ: 領域とスケッチの表示・ロック・色 (表示だけ、計算には全ての領域を使う)。新しく描く形は今のレイヤへ (P7f)
 - Undo/Redo(操作履歴スタック、プロジェクト状態のスナップショット方式で開始)
 
 ### 4.3 モデル構造
@@ -231,7 +234,7 @@ SI(長さm、電位V、電荷C)。UI上は mm 表示の切り替えを持つ(内
       { "id": "anode", "type": "conductor", "polygon": [...], "voltage": 1000.0 },
       { "id": "wire",  "type": "conductor", "shape": { "kind": "circle", "center": [0.05, 0.02], "radius": 0.005 }, "voltage": -200.0 },
       { "id": "diel1", "type": "dielectric", "polygon": [...], "eps_r": 4.0 },
-      // holes: 穴 (閉じた経路、bulges 可、polygon の領域だけ)
+      // holes: 穴 (閉じた経路、bulges 可、polygon の領域だけ)。layer: UI のレイヤ (cad.layers の id)
       { "id": "ring",  "type": "conductor", "polygon": [...], "holes": [{ "polygon": [[0.06,0.05],[0.04,0.05]], "bulges": [1, 1] }], "voltage": 0.0 },
       { "id": "beam",  "type": "charge",     "polygon": [...], "rho": -1e-6 }
     ],
@@ -240,6 +243,10 @@ SI(長さm、電位V、電荷C)。UI上は mm 表示の切り替えを持つ(内
     ]
   },
   "mesh": { "size": 0.002, "local_sizes": [{ "region": "anode", "size": 0.0005 }] },
+  // パラメータ (P7f): 式 (値は SI) と欄への束縛 (場所は文書の道筋、{"id"}・{"edge"} で要素を選ぶ)。欄には計算した値も入れる
+  "params": { "vars": [{ "name": "gap", "expr": "2 mm", "value": 0.002 }], "bindings": [{ "path": ["geometry", "regions", { "id": "anode" }, "polygon", 1, 0], "expr": "gap" }] },
+  // UI の CAD の状態 (ソルバーは使わない): スケッチ・レイヤ・今のレイヤ
+  "cad": { "sketch": [...], "layers": [{ "id": "L1", "name": "電極", "color": "#ff8800" }], "active_layer": "L1" },
   "solver": { "backend": "numpy" },
   "particles": { ... },   // フェーズ2
   "pic": { ... }          // フェーズ3

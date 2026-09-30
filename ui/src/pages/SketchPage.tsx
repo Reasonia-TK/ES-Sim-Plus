@@ -29,11 +29,13 @@ import { formatNumber, lengthUnitLabel, toDisplayLength, type LengthUnit } from 
 import { Field, LengthInput } from "./inputs";
 import { useLengthUnitLabel } from "./useLengthUnitLabel";
 import { Hint } from "./widgets/common";
+import { LayerSelect } from "./LayersPage";
 import { PathTable, type PathTableOps } from "./widgets/PathTable";
 import { TransformPanel } from "./widgets/TransformPanel";
 import { Toggle } from "../forms/SchemaField";
 import { CommitText } from "./inputs";
 import { parseNumber } from "../util/format";
+import type { Path } from "../schema/schema";
 
 const useUpdate = () => useDocument((s) => s.update);
 
@@ -56,24 +58,25 @@ function summary(e: SketchEntity, unit: LengthUnit, t: TFunction): string {
   }
 }
 
-function PointField({ label, value, onCommit }: { label: string; value: Point; onCommit: (q: Point) => void }) {
+function PointField({ label, value, onCommit, bindPath }: { label: string; value: Point; onCommit: (q: Point) => void; bindPath?: Path }) {
   const u = useLengthUnitLabel();
   return (
     <Field label={label} unit={u}>
       {(id, onError) => (
         <div className="point-input">
-          <LengthInput id={id} aria-label={`${label} x`} onError={onError} value={value[0]} onCommit={(x) => onCommit([x, value[1]])} />
-          <LengthInput aria-label={`${label} y`} onError={onError} value={value[1]} onCommit={(y) => onCommit([value[0], y])} />
+          <LengthInput id={id} aria-label={`${label} x`} onError={onError} value={value[0]} bindPath={bindPath && [...bindPath, 0]} onCommit={(x) => onCommit([x, value[1]])} />
+          <LengthInput aria-label={`${label} y`} onError={onError} value={value[1]} bindPath={bindPath && [...bindPath, 1]} onCommit={(y) => onCommit([value[0], y])} />
         </div>
       )}
     </Field>
   );
 }
 
-function SketchEditor({ e }: { e: SketchEntity }) {
+function SketchEditor({ e, index }: { e: SketchEntity; index: number }) {
   const { t } = useTranslation();
   const update = useUpdate();
   const u = useLengthUnitLabel();
+  const at = (...rest: (string | number)[]): Path => ["cad", "sketch", index, ...rest];
   const set = (next: NewSketch) => update(t("sketchPage.edit"), (d) => replaceSketch(d, e.id, next));
   const report = (r: EdgeRemapReport | null) => {
     const n = r ? r.boundariesRemoved + r.periodicRemoved : 0;
@@ -97,16 +100,17 @@ function SketchEditor({ e }: { e: SketchEntity }) {
       <div className="subsection-title">
         {e.id} · {t(`sketchPage.kind.${e.kind}`)}
       </div>
+      <LayerSelect item={{ kind: "sketch", id: e.id }} />
       {e.kind === "line" && (
         <>
-          <PointField label={t("sketchPage.start")} value={e.a} onCommit={(a) => set({ ...e, a })} />
-          <PointField label={t("sketchPage.end")} value={e.b} onCommit={(b) => set({ ...e, b })} />
+          <PointField label={t("sketchPage.start")} value={e.a} bindPath={at("a")} onCommit={(a) => set({ ...e, a })} />
+          <PointField label={t("sketchPage.end")} value={e.b} bindPath={at("b")} onCommit={(b) => set({ ...e, b })} />
         </>
       )}
       {e.kind === "arc" && (
         <>
-          <PointField label={t("sketchPage.start")} value={e.a} onCommit={(a) => set({ ...e, a })} />
-          <PointField label={t("sketchPage.end")} value={e.b} onCommit={(b) => set({ ...e, b })} />
+          <PointField label={t("sketchPage.start")} value={e.a} bindPath={at("a")} onCommit={(a) => set({ ...e, a })} />
+          <PointField label={t("sketchPage.end")} value={e.b} bindPath={at("b")} onCommit={(b) => set({ ...e, b })} />
           <Field label={t("sketchPage.angle")} unit="°" hint={t("widgets.arcAngleHint")}>
             {(id, onError) => (
               <CommitText
@@ -129,9 +133,9 @@ function SketchEditor({ e }: { e: SketchEntity }) {
       )}
       {e.kind === "circle" && (
         <>
-          <PointField label={t("sketchPage.center")} value={e.center} onCommit={(center) => set({ ...e, center })} />
+          <PointField label={t("sketchPage.center")} value={e.center} bindPath={at("center")} onCommit={(center) => set({ ...e, center })} />
           <Field label={t("sketchPage.radius")} unit={u}>
-            {(id, onError) => <LengthInput id={id} onError={onError} value={e.r} min={0} exclusive onCommit={(r) => set({ ...e, r })} />}
+            {(id, onError) => <LengthInput id={id} onError={onError} value={e.r} min={0} exclusive bindPath={at("r")} onCommit={(r) => set({ ...e, r })} />}
           </Field>
         </>
       )}
@@ -140,7 +144,7 @@ function SketchEditor({ e }: { e: SketchEntity }) {
           <div className="display-toggle">
             <Toggle checked={e.closed} onChange={(v) => set({ ...e, closed: v })} label={t("sketchPage.closed")} disabled={!e.closed && e.points.length < 3} />
           </div>
-          <PathTable path={{ polygon: e.points, bulges: e.bulges ?? null }} label={t("tree.sketch")} ops={ops} closed={e.closed} />
+          <PathTable path={{ polygon: e.points, bulges: e.bulges ?? null }} label={t("tree.sketch")} ops={ops} closed={e.closed} docPath={at("points")} />
         </>
       )}
       <div className="button-row">
@@ -213,7 +217,7 @@ export function SketchPage() {
           </button>
         </div>
       )}
-      {cur && <SketchEditor key={cur.id} e={cur} />}
+      {cur && <SketchEditor key={cur.id} e={cur} index={list.indexOf(cur)} />}
       <TransformPanel />
       <Hint>{t("sketchPage.hint")}</Hint>
     </>

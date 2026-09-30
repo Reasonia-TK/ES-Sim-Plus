@@ -4,6 +4,7 @@
 import type { TFunction } from "i18next";
 import { edgeLabel } from "../tree/treeModel";
 import { rfComponents } from "../util/waveform";
+import { paramsOf, paramValues } from "./params";
 import type { Project } from "./project";
 
 export interface SweepCandidate {
@@ -11,8 +12,12 @@ export interface SweepCandidate {
   path: string;
 }
 
+export type SweepModule = "pic" | "pic1d" | "fluid1d" | "fluid2d";
+
 export interface SweepSettings {
   param_path: string;
+  /** パラメータをスイープするときに実行するモジュール (P7f。ほかのパスはパスから決まる) */
+  module?: SweepModule;
   mode: "list" | "range";
   list_text: string;
   start: number;
@@ -28,6 +33,8 @@ export const DEFAULT_SWEEP: SweepSettings = { param_path: "", mode: "list", list
 export function buildSweepCandidates(p: Project, t: TFunction): SweepCandidate[] {
   const out: SweepCandidate[] = [];
   const tt = t as unknown as (k: string, o?: Record<string, unknown>) => string;
+  // パラメータ (P7f): 式を付けた欄ごと計算し直す
+  for (const v of paramsOf(p).vars) out.push({ label: tt("sweep.cand.param", { name: v.name }), path: `${PARAM_PREFIX}${v.name}` });
   p.geometry.boundaries.forEach((b, i) => {
     if (b.type !== "dirichlet") return;
     const e = b.edges.length ? edgeLabel(p, b.edges[0], t) : `#${i}`;
@@ -96,8 +103,27 @@ export function buildSweepCandidates(p: Project, t: TFunction): SweepCandidate[]
   return out;
 }
 
+/** パラメータのパス (params.<名前>)。backend の sweep.PARAM_PREFIX と同じ */
+export const PARAM_PREFIX = "params.";
+
+export const isParamPath = (path: string) => path.startsWith(PARAM_PREFIX);
+
+/**
+ * 実行するモジュール: パラメータのスイープは選んだもの (無ければ式を付けた欄の最初の 1D・流体のブロック、
+ * それも無ければ pic)、ほかはパスから
+ */
+export function sweepModule(s: Pick<SweepSettings, "param_path" | "module">, p: Project): SweepModule {
+  if (!isParamPath(s.param_path)) return sweepModuleForPath(s.param_path);
+  if (s.module) return s.module;
+  for (const b of paramsOf(p).bindings) {
+    const head = b.path[0];
+    if (head === "pic1d" || head === "fluid1d" || head === "fluid2d") return head;
+  }
+  return "pic";
+}
+
 /** パスから実行するモジュール (backend の resolve_sweep_module と同じ規則。ジオメトリのパスは pic) */
-export function sweepModuleForPath(path: string): "pic" | "pic1d" | "fluid1d" | "fluid2d" {
+export function sweepModuleForPath(path: string): SweepModule {
   if (path.startsWith("pic1d.")) return "pic1d";
   if (path.startsWith("fluid1d.")) return "fluid1d";
   if (path.startsWith("fluid2d.")) return "fluid2d";
@@ -138,6 +164,8 @@ export function sweepValues(s: SweepSettings): number[] {
  */
 export function prepareSweepProject(p: Project, path: string): Project {
   const q = structuredClone(p) as unknown as Record<string, unknown>;
+  // パラメータは backend が式ごと計算し直す (欄を 0 で補う必要はない)
+  if (isParamPath(path)) return q as unknown as Project;
   for (const mod of ["pic1d", "fluid1d"]) {
     const blk = q[mod] as Record<string, Record<string, unknown> | undefined> | null | undefined;
     if (!blk) continue;
@@ -160,8 +188,9 @@ export function prepareSweepProject(p: Project, path: string): Project {
   return q as unknown as Project;
 }
 
-/** ドット区切りのパスの現在値 (数値でなければ undefined) */
+/** ドット区切りのパスの現在値 (数値でなければ undefined)。params.<名前> はパラメータの値 */
 export function valueAtPath(obj: unknown, path: string): number | undefined {
+  if (isParamPath(path)) return paramValues(obj as Project).values[path.slice(PARAM_PREFIX.length)];
   let cur: unknown = obj;
   for (const tok of path.split(".")) {
     if (cur === null || cur === undefined) return undefined;

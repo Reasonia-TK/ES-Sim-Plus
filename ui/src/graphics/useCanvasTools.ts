@@ -53,10 +53,12 @@ import {
 } from "../model/placements";
 import { domainPath, edgeIdOf, regionRings, type Point, type Project } from "../model/project";
 import { addCircleRegionAt, addPolygonRegion, addShapeRegion } from "../model/regionOps";
+import { pickableRegions, pickableSketch, visibleRegions, visibleSketch } from "../model/layers";
 import { PLACEMENT_NODES, PLACEMENT_PATHS, useSelection, type PickRef, type PlacementKind } from "../model/selection";
 import { addSketch, editBend, editMove, editRemove, editSplit, edgeCountOf, sketchOf, sketchSegs, type EditPath } from "../model/sketch";
 import { getIn, setIn } from "../schema/schema";
-import { evalExpression, parseQuantity } from "../schema/units";
+import { evalExpression, parseParamExpr, parseQuantity } from "../schema/units";
+import { paramValues } from "../model/params";
 import { formatNumber, lengthUnitLabel, toDisplayLength } from "../util/format";
 import { gridStep, panBy, snapPoint, snapValue, toScreen, toWorld, type Camera } from "./camera";
 import { commitEdit, commitRadius, deleteItems, editObjectOf, findSketchAt, itemsInBox, moveItems, type EditHow, type EditObject, type EditTarget } from "./editTargets";
@@ -131,13 +133,13 @@ export function localPoint(e: { clientX: number; clientY: number }, el: HTMLElem
   return [e.clientX - r.left, e.clientY - r.top];
 }
 
-/** 囲まれた所を探す相手: ドメインの辺・領域の輪郭・スケッチ */
+/** 囲まれた所を探す相手: ドメインの辺・領域の輪郭・スケッチ (表示しているレイヤ) */
 function allCurves(p: Project): Seg[] {
   const segs: Seg[] = [];
   const d = domainPath(p);
   segs.push(...pathSegs(d.polygon, bulgesOf(d)));
-  for (const r of p.geometry.regions) for (const rp of regionRings(r)) segs.push(...pathSegs(rp.polygon, bulgesOf(rp)));
-  for (const e of sketchOf(p)) segs.push(...sketchSegs(e));
+  for (const r of visibleRegions(p)) for (const rp of regionRings(r)) segs.push(...pathSegs(rp.polygon, bulgesOf(rp)));
+  for (const e of visibleSketch(p)) segs.push(...sketchSegs(e));
   return segs;
 }
 
@@ -221,7 +223,9 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
   const spaceRef = useRef(false);
   const tool = vs.tool;
   const target = vs.drawTarget;
-  const sketch = sketchOf(project);
+  // 選べるもの (表示していてロックしていないレイヤ、P7f)
+  const sketch = useMemo(() => pickableSketch(project), [project]);
+  const regions = useMemo(() => pickableRegions(project), [project]);
   const edit = useMemo(() => editObjectOf(project, picked, activeNode), [project, picked, activeNode]);
 
   // Space (移動)
@@ -267,11 +271,11 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     const sources: SnapSource[] = [];
     const d = domainPath(project);
     sources.push({ owner: "domain", segs: pathSegs(d.polygon, bulgesOf(d)) });
-    for (const r of project.geometry.regions) {
+    for (const r of visibleRegions(project)) {
       if (r.shape) sources.push({ owner: `region:${r.id}`, segs: [], circles: [{ center: r.shape.center, r: r.shape.radius }] });
       else sources.push({ owner: `region:${r.id}`, segs: regionRings(r).flatMap((rp) => pathSegs(rp.polygon, bulgesOf(rp))) });
     }
-    for (const e of sketchOf(project)) {
+    for (const e of visibleSketch(project)) {
       if (e.kind === "circle") sources.push({ owner: `sketch:${e.id}`, segs: [], circles: [{ center: e.center, r: e.r }] });
       else sources.push({ owner: `sketch:${e.id}`, segs: sketchSegs(e) });
     }
@@ -341,7 +345,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
       });
     };
     for (const e of sketch) if (e.kind === "polyline") consider({ kind: "sketch", id: e.id }, e.points, e.closed);
-    for (const r of project.geometry.regions) {
+    for (const r of regions) {
       if (!r.polygon) continue;
       consider({ kind: "region", id: r.id }, r.polygon, true);
       (r.holes ?? []).forEach((h, k) => consider({ kind: "region", id: r.id, hole: k }, h.polygon, true));
@@ -356,7 +360,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     const tol = EDGE_TOLERANCE_PX / camera.scale;
     const e = findSketchAt(q, sketch, tol);
     if (e) return { kind: "sketch", id: e.id };
-    const r = findRegionAt(q, project.geometry.regions, tol);
+    const r = findRegionAt(q, regions, tol);
     return r ? { kind: "region", id: r.id } : null;
   };
 
@@ -555,7 +559,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
         return;
       }
     }
-    const hit = findRegionAt(raw, project.geometry.regions, tol);
+    const hit = findRegionAt(raw, regions, tol);
     if (hit) {
       sel.pick([{ kind: "region", id: hit.id }], shift ? "toggle" : "replace");
       return;
@@ -888,9 +892,16 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
       const text = coordText.trim().replace(/(°|deg)$/i, "");
       let v: number | null = null;
       if (coordMode === "length") {
-        const r = parseQuantity(coordText, undefined, true, { lengthUnit, axisymmetric: false });
+        const r = parseQuantity(coordText, undefined, true, { lengthUnit, axisymmetric: false, vars: paramValues(project).values });
         v = r.ok ? r.value : null;
-      } else v = evalExpression(text);
+      } else {
+        // 角度・倍率: 式 (パラメータも使える、P7f)
+        v = evalExpression(text);
+        if (v === null) {
+          const r = parseParamExpr(text, { lengthUnit, axisymmetric: false, vars: paramValues(project).values });
+          v = r?.ok ? r.value : null;
+        }
+      }
       if (v === null || !Number.isFinite(v) || (coordMode !== "angle" && !(v > 0))) {
         setCoordError(t("coordInput.error.value"));
         return false;
@@ -904,7 +915,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     }
     const last = pts.length ? pts[pts.length - 1] : null;
     const direction: Point | null = last && hover ? [hover[0] - last[0], hover[1] - last[1]] : null;
-    const r = parseCoordInput(coordText, { last, direction, units: { lengthUnit, axisymmetric: false } });
+    const r = parseCoordInput(coordText, { last, direction, units: { lengthUnit, axisymmetric: false, vars: paramValues(project).values } });
     if (!r.ok) {
       setCoordError(t(`coordInput.error.${r.error}`));
       return false;

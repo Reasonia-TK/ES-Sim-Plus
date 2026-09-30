@@ -4,6 +4,8 @@
 
 import { applyPatches, enablePatches, produceWithPatches, type Draft, type Patch } from "immer";
 import { create } from "zustand";
+import { assignNewItemsToLayer } from "./layers";
+import { applyStagedBinding, syncParams, takeStagedBinding } from "./params";
 import { newProject, type Project } from "./project";
 
 enablePatches();
@@ -66,7 +68,15 @@ export const useDocument = create<DocumentState>()((set, get) => ({
 
   update: (label, recipe) => {
     const { project, stateId, past } = get();
-    const [next, patches, inverse] = produceWithPatches(project, recipe);
+    // 欄が置いた束縛 (P7f) と、パラメータ・束縛した欄の同期も同じ編集の中で
+    const staged = takeStagedBinding();
+    const [next, patches, inverse] = produceWithPatches(project, (d) => {
+      recipe(d);
+      if (staged) applyStagedBinding(d, staged);
+      syncParams(d, project);
+      // 新しく作った形は今のレイヤへ (P7f)
+      assignNewItemsToLayer(d, project);
+    });
     if (patches.length === 0) return;
     const after = nextId();
     const entry: HistoryEntry = { label, patches, inverse, before: stateId, after };

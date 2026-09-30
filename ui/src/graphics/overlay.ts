@@ -7,6 +7,7 @@ import type { Shape } from "../cad/boolean";
 import { bulgesOf, pathHandles, type Affine, type PathData } from "../cad/path";
 import type { SnapResult } from "../cad/snap";
 import { transformRegionShape, transformSketch } from "../model/editOps";
+import { layerColor, visibleRegions } from "../model/layers";
 import { axisEdges, boundaryOfEdge, domainPath, regionHoles, regionPath, type Point, type Project, type Region } from "../model/project";
 import type { PickRef } from "../model/selection";
 import { edgeCountOf, sketchSegs, type EditPath, type SketchEntity } from "../model/sketch";
@@ -456,8 +457,9 @@ function drawGeometry(ctx: CanvasRenderingContext2D, s: OverlayState): void {
       dot(ctx, x, y, 3.5, c.selection, "#1b1e24");
     }
   }
-  // 領域
-  for (const r of p.geometry.regions) {
+  // 領域 (表示しているレイヤ)
+  const shown = visibleRegions(p);
+  for (const r of shown) {
     const color = c[r.type] ?? c.edge;
     pathRegion(ctx, v, r);
     if (!s.fieldShown) {
@@ -476,13 +478,13 @@ function drawGeometry(ctx: CanvasRenderingContext2D, s: OverlayState): void {
   for (const e of s.sketch) {
     if (pickedSketch.has(e.id)) continue;
     traceSketch(ctx, v, e);
-    ctx.strokeStyle = c.sketch;
+    ctx.strokeStyle = layerColor(p, e) ?? c.sketch;
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
   // 領域の名前 (小さすぎる領域には出さない)。位置は頂点と辺の中点 (円弧は弧の中点) の平均 (穴の中など領域の外に
   // なれば、その点と外周の点の中点のうち領域の中にあるもの)
-  for (const r of p.geometry.regions) {
+  for (const r of shown) {
     let pts: Point[];
     let size: number;
     if (r.shape) {

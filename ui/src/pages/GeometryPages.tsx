@@ -61,6 +61,7 @@ import { rfComponents, type VoltageWaveform } from "../util/waveform";
 import { CommitText, Field, LengthInput, Select } from "./inputs";
 import { useLengthUnitLabel } from "./useLengthUnitLabel";
 import { DefQuantity, Hint } from "./widgets/common";
+import { LayerSelect } from "./LayersPage";
 import { PathTable, type PathTableOps } from "./widgets/PathTable";
 import { TransformPanel } from "./widgets/TransformPanel";
 import { RfEditor } from "./widgets/RfEditor";
@@ -206,7 +207,7 @@ export function DomainPage() {
       {/* 矩形でも頂点を足す・辺を円弧にすると任意の形にできる (矩形のうちは閉じておく) */}
       <details className="subsection" open={!rect}>
         <summary className="subsection-title">{t("settings.domainVertices")}</summary>
-        <PathTable path={domainPath(project)} label={t("tree.domain")} ops={ops} />
+        <PathTable path={domainPath(project)} label={t("tree.domain")} ops={ops} docPath={["geometry", "domain", "polygon"]} />
       </details>
     </>
   );
@@ -341,7 +342,7 @@ function holePathOps(id: string, k: number, t: TFunction): PathTableOps {
   };
 }
 
-function RegionHoles({ region }: { region: Region }) {
+function RegionHoles({ region, index }: { region: Region; index: number }) {
   const { t } = useTranslation();
   const update = useUpdate();
   return (
@@ -351,7 +352,7 @@ function RegionHoles({ region }: { region: Region }) {
         return (
           <div key={k} className="subsection">
             <div className="subsection-title">{label}</div>
-            <PathTable path={h} label={label} ops={holePathOps(region.id, k, t)} />
+            <PathTable path={h} label={label} ops={holePathOps(region.id, k, t)} docPath={["geometry", "regions", index, "holes", k, "polygon"]} />
             <div className="button-row">
               <button type="button" className="button small" onClick={() => update(t("holes.fill"), (d) => removeRegionHole(d, region.id, k))}>
                 {t("holes.fill")}
@@ -447,6 +448,7 @@ export function RegionPage({ id }: { id: string }) {
           />
         )}
       </Field>
+      <LayerSelect item={{ kind: "region", id: r.id }} />
       {r.type === "conductor" && (
         <>
           <SchemaField path={[...base, "voltage"]} required />
@@ -476,8 +478,8 @@ export function RegionPage({ id }: { id: string }) {
         </>
       ) : (
         <>
-          <PathTable path={regionPath(r)} label={t("action.regionShape")} ops={regionPathOps(r.id, t)} />
-          <RegionHoles region={r} />
+          <PathTable path={regionPath(r)} label={t("action.regionShape")} ops={regionPathOps(r.id, t)} docPath={[...base, "polygon"]} />
+          <RegionHoles region={r} index={idx} />
         </>
       )}
       <RegionBoolean region={r} />

@@ -1,10 +1,10 @@
 // E2E: CAD v2 (prompts/132)。外周の辺を円弧にし、キャンバスで辺を選んで境界条件を付け、辺を分けて静電場を解く (P7a)。
 // スケッチの線から囲まれた所で領域を作る・円弧のある折れ線の領域・スケッチの矩形をドメインに・範囲選択と削除・
 // キャンバスでドメインの頂点を動かし辺を曲げる (P7b)。スナップと数値入力 (P7c)、フィレット・トリム・変換・配列 (P7d)、
-// ブーリアンの差で穴を開けて解く・囲まれた所から穴のある領域 (P7e)。
+// ブーリアンの差で穴を開けて解く・囲まれた所から穴のある領域 (P7e)。パラメータの式の束縛・レイヤ (P7f)。
 
 import type { Page } from "@playwright/test";
-import { expect, openApp, selectNode, test } from "./fixtures";
+import { expect, openApp, selectNode, setNumber, test } from "./fixtures";
 
 /** ルーラーの帯の幅 [px] (既定の文字の大きさ 11 px、graphics/overlay.ts の rulerSize と同じ) */
 const RULER_PX = Math.max(24, 11 * 2.2);
@@ -333,4 +333,64 @@ test("fills the area between a sketch rectangle and a circle as a region with a 
   await clickAt(page, at(20, 25));
   await expect(page.locator(".settings-panel .panel-title")).toContainText("region2");
   await expect(page.getByText("穴 1", { exact: true })).toHaveCount(0);
+});
+
+test("binds fields to parameters and recomputes them (P7f)", async ({ page }) => {
+  await openApp(page);
+  await selectNode(page, "パラメータ");
+  const addParam = page.getByRole("button", { name: "パラメータを追加" });
+  await addParam.click();
+  await setNumber(page, "名前 p1", "V0");
+  await setNumber(page, "式 V0", "250");
+  await addParam.click();
+  await setNumber(page, "名前 p1", "w");
+  await setNumber(page, "式 w", "30 mm");
+  await expect(page.getByRole("table", { name: "パラメータ" })).toContainText("0.03");
+  // 右の辺の電圧に V0、diel1 の頂点 2 の x に 40 mm + w
+  await selectNode(page, "右 (x=w)");
+  await setNumber(page, "電圧 (直流)", "V0");
+  const volt = page.getByLabel("電圧 (直流)", { exact: true });
+  await expect(volt).toHaveValue("250");
+  await expect(volt).toHaveClass(/bound/);
+  await selectNode(page, "diel1");
+  await setNumber(page, "x 2", "40 mm + w");
+  await expect(page.getByLabel("x 2", { exact: true })).toHaveValue("70");
+  // パラメータを変えると欄も変わる
+  await selectNode(page, "パラメータ");
+  await setNumber(page, "式 V0", "300");
+  await setNumber(page, "式 w", "25 mm");
+  const bound = page.getByRole("table", { name: /式の付いた欄/ });
+  await expect(bound).toContainText("境界条件 右 (x=w) › 電圧 (直流)");
+  await expect(bound).toContainText("領域 diel1 › 頂点 2 x");
+  await selectNode(page, "diel1");
+  await expect(page.getByLabel("x 2", { exact: true })).toHaveValue("65");
+  await selectNode(page, "右 (x=w)");
+  await expect(volt).toHaveValue("300");
+  // 数を打つと式は外れる
+  await setNumber(page, "電圧 (直流)", "120");
+  await expect(volt).not.toHaveClass(/bound/);
+  // スイープの対象にもなる
+  await selectNode(page, "パラメータスイープ");
+  await expect(page.getByLabel("振るパラメータ", { exact: true }).locator("option", { hasText: "パラメータ w" })).toHaveCount(1);
+});
+
+test("draws on the current layer and locks it (P7f)", async ({ page }) => {
+  await openApp(page);
+  const at = await fitView(page);
+  await selectNode(page, "レイヤ");
+  await page.getByRole("button", { name: "レイヤを追加" }).click();
+  await expect(page.getByRole("radio", { name: "今のレイヤ (新しく描く形が入る) L1" })).toBeChecked();
+  await tool(page, "矩形");
+  await clickAt(page, at(5, 5));
+  await clickAt(page, at(20, 20));
+  await expect(page.locator(".settings-panel .panel-title")).toContainText("region1");
+  await expect(page.getByLabel("レイヤ", { exact: true })).toHaveValue("L1");
+  // ロックしたレイヤの形はキャンバスで選べない (diel1 は選べる)
+  await selectNode(page, "レイヤ");
+  await page.getByRole("checkbox", { name: "ロック L1" }).check();
+  await tool(page, "選択");
+  await clickAt(page, at(12, 12));
+  await expect(page.locator(".settings-panel .panel-title")).not.toContainText("region1");
+  await clickAt(page, at(50, 25));
+  await expect(page.locator(".settings-panel .panel-title")).toContainText("diel1");
 });

@@ -56,7 +56,8 @@ describe("units", () => {
     const cm3 = parseQuantity("1e10 cm^-3", "m^-3", false, mm);
     expect(cm3.ok && cm3.value).toBeCloseTo(1e16);
     expect(parseQuantity("", "Hz", false, mm)).toEqual({ ok: true, value: null });
-    expect(parseQuantity("abc", "Hz", false, mm)).toEqual({ ok: false, error: "number" });
+    // 語はパラメータの名前として読む (P7f)
+    expect(parseQuantity("abc", "Hz", false, mm)).toEqual({ ok: false, error: "param", message: "abc というパラメータはありません" });
     expect(parseQuantity("5 kV", "Hz", false, mm)).toEqual({ ok: false, error: "unit" });
     expect(parseQuantity("5 cV", "V", false, mm)).toEqual({ ok: false, error: "unit" }); // c はメートルだけ
   });

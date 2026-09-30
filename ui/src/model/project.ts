@@ -6,6 +6,7 @@
 import type { Shape } from "../cad/boolean";
 import { pathArea, pathBounds } from "../cad/geom";
 import { bulgesOf, circlePath, hasArcs, type PathData } from "../cad/path";
+import { applyParams } from "./params";
 
 export type Point = [number, number];
 export type Coord = "xy" | "rz" | "rz_x0";
@@ -41,6 +42,8 @@ export interface Region {
   bulges?: number[] | null;
   /** 穴 (多角形の領域だけ。穴の中はこの領域ではない) */
   holes?: Loop[] | null;
+  /** レイヤ (P7f、model/layers.ts。無ければ既定のレイヤ) */
+  layer?: string | null;
   shape?: CircleShape | null;
   voltage?: number | null;
   eps_r?: number;
@@ -313,6 +316,8 @@ export function normalizeProject(raw: unknown): { project: Project; results: unk
   project.geometry.regions ??= [];
   project.geometry.boundaries ??= [];
   ensureEdgeIds(project);
+  // パラメータが正: 束縛した欄を計算した値にする (手で書き換えた JSON にも合わせる、P7f)
+  applyParams(project);
   const mesh = (project.mesh ?? {}) as MeshSettings;
   if (!(typeof mesh.size === "number" && mesh.size > 0)) {
     const b = domainBounds(project);

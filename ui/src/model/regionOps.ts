@@ -4,6 +4,8 @@
 import type { Draft } from "immer";
 import { shapeProblem, type Shape } from "../cad/boolean";
 import { bulgesOf, packBulges, removeVertex, splitEdge, type PathData } from "../cad/path";
+import { keepLayer } from "./layers";
+import { renameRegionInBindings } from "./params";
 import { domainBounds, regionHoles, regionPath, tidy, tidyPoint, uniqueRegionId, type Loop, type Point, type Project, type Region, type RegionType } from "./project";
 
 type P = Draft<Project>;
@@ -67,6 +69,7 @@ export function renameRegion(p: P, from: string, to: string): void {
   if (!r) return;
   r.id = to;
   for (const l of localSizes(p) ?? []) if (l.region === from) l.region = to;
+  renameRegionInBindings(p, from, to);
 }
 
 /** 複製 (ドメイン幅の 5% だけ右上へずらす) */
@@ -75,7 +78,7 @@ export function duplicateRegion(p: P, id: string): string | null {
   if (!src) return null;
   const b = domainBounds(p as Project);
   const d = 0.05 * Math.min(b.x1 - b.x0, b.y1 - b.y0);
-  const copy = JSON.parse(JSON.stringify(src)) as Region; // Immer の draft は structuredClone できない
+  const copy = keepLayer(src, JSON.parse(JSON.stringify(src)) as Region); // Immer の draft は structuredClone できない
   copy.id = uniqueRegionId(p as Project, `${id}_`);
   if (copy.shape) copy.shape.center = [copy.shape.center[0] + d, copy.shape.center[1] + d];
   if (copy.polygon) copy.polygon = copy.polygon.map(([x, y]) => [x + d, y + d]);

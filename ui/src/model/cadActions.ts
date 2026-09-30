@@ -5,6 +5,7 @@ import type { Draft } from "immer";
 import { applyDomainEdit, domainFromPath, type EdgeRemapReport } from "./domainOps";
 import { regionPath, type Point, type Project } from "./project";
 import { addCircleRegionAt, addPolygonRegion, deleteRegion } from "./regionOps";
+import { keepLayer } from "./layers";
 import { deleteSketch, sketchClosedPath, sketchOf } from "./sketch";
 
 type P = Draft<Project>;
@@ -19,6 +20,9 @@ export function sketchToRegion(d: P, id: string): string | null {
     const path = sketchClosedPath(e);
     if (path) rid = addPolygonRegion(d, path.polygon as Point[], path.bulges);
   }
+  // 領域はスケッチのレイヤのまま
+  const r = rid ? d.geometry.regions.find((x) => x.id === rid) : undefined;
+  if (r) keepLayer(e, r);
   if (rid) deleteSketch(d, [id]);
   return rid;
 }

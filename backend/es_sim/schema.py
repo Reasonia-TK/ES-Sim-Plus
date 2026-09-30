@@ -11,6 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
+from .params import ExprError, evaluate_params, names_in
 from .paths import check_holes, check_path, flatten_path, has_arcs
 
 Point = tuple[float, float]
@@ -138,6 +139,8 @@ class Region(BaseModel):
     bulges: list[float] | None = Field(None, description=BULGES_DESCRIPTION, json_schema_extra=ui("1"))
     # 穴 (P7e のブーリアンの差など)。穴の中はこの領域ではない (下の領域・真空になる)。polygon の領域だけ
     holes: list[Loop] = []
+    # UI のレイヤ (P7f、project.cad.layers の id)。ソルバーは使わない
+    layer: str | None = Field(None, description="UI のレイヤ (project.cad.layers の id)。ソルバーは使わない")
     shape: CircleShape | None = None
     voltage: float | None = Field(None, json_schema_extra=ui("V"))  # conductor: 電位 [V] (直流分)
     # conductor: RF 成分 (PIC のみ使用)。単一またはリスト (デュアル周波数、prompts/49)
@@ -1037,6 +1040,47 @@ class DsmcSettings(BaseModel):
     smoothing_passes: int = Field(0, ge=0, le=20, json_schema_extra=ui(advanced=True))
 
 
+class Param(BaseModel):
+    """名前付きの式 (P7f、params.py の文法。値は SI)。"""
+
+    name: str
+    expr: str
+    # 単位は式による (SI)。フォームには出さない
+    value: float | None = Field(None, description="式を計算した値 (SI)。UI とスイープが書く", json_schema_extra=ui("1"))
+    description: str = ""
+
+
+class ParamBinding(BaseModel):
+    """設定の数値の欄に付けた式 (path は文書の中の道筋: キー・番号・{"id": …}・{"edge": 辺の ID})。"""
+
+    path: list[str | int | dict[str, str]] = Field(..., min_length=1)
+    expr: str
+
+
+class Params(BaseModel):
+    """パラメータと式の束縛 (P7f、prompts/132)。欄には計算した数値も入れておき、ソルバーはそれを使う"""
+
+    vars: list[Param] = []
+    bindings: list[ParamBinding] = []
+
+    @model_validator(mode="after")
+    def _check(self) -> "Params":
+        try:
+            evaluate_params([v.model_dump() for v in self.vars])
+        except ExprError as exc:
+            raise ValueError(str(exc)) from exc
+        known = {v.name for v in self.vars}
+        for b in self.bindings:
+            where = "束縛 " + ".".join(str(p) for p in b.path)
+            try:
+                unknown = names_in(b.expr) - known
+            except ExprError as exc:
+                raise ValueError(f"{where}: {exc}") from exc
+            if unknown:
+                raise ValueError(f"{where}: {', '.join(sorted(unknown))} というパラメータはありません")
+        return self
+
+
 class Project(BaseModel):
     version: int = 1
     unit: Literal["m", "mm"] = "m"
@@ -1067,7 +1111,9 @@ class Project(BaseModel):
     tl: TlSettings | None = None
     # UI の CAD の状態 (prompts/132): スケッチ (領域でない線・円弧・円・ポリライン) など。ソルバーは使わないので
     # 中身は検査しない (壊れていても計算は止めない)
-    cad: dict | None = Field(None, description="UI の CAD の状態 (スケッチなど)。ソルバーは使わない")
+    cad: dict | None = Field(None, description="UI の CAD の状態 (スケッチ・レイヤなど)。ソルバーは使わない")
+    # パラメータと式の束縛 (P7f)。欄には計算した数値が入っているのでソルバーは使わない (スイープで式を計算し直す)
+    params: Params | None = None
 
     @model_validator(mode="after")
     def _flatten_arcs(self) -> "Project":

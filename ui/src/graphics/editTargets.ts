@@ -13,6 +13,7 @@ import {
   splitDomainEdge,
   type EdgeRemapReport,
 } from "../model/domainOps";
+import { pickableRegions, pickableSketch } from "../model/layers";
 import { domainPath, regionPath, type Point, type Project, type Region } from "../model/project";
 import { deleteRegion, moveRegion, setCircleRadius, setRegionPath } from "../model/regionOps";
 import type { PickRef } from "../model/selection";
@@ -163,13 +164,13 @@ export function itemsInBox(p: Project, a: Point, b: Point): PickRef[] {
   const y1 = Math.max(a[1], b[1]);
   const inside = (bb: { x0: number; y0: number; x1: number; y1: number }) => bb.x0 >= x0 && bb.x1 <= x1 && bb.y0 >= y0 && bb.y1 <= y1;
   const out: PickRef[] = [];
-  for (const r of p.geometry.regions) {
+  for (const r of pickableRegions(p)) {
     const bb = r.shape
       ? { x0: r.shape.center[0] - r.shape.radius, y0: r.shape.center[1] - r.shape.radius, x1: r.shape.center[0] + r.shape.radius, y1: r.shape.center[1] + r.shape.radius }
       : regionBounds(r);
     if (inside(bb)) out.push({ kind: "region", id: r.id });
   }
-  for (const e of sketchOf(p)) if (inside(sketchBounds(e))) out.push({ kind: "sketch", id: e.id });
+  for (const e of pickableSketch(p)) if (inside(sketchBounds(e))) out.push({ kind: "sketch", id: e.id });
   return out;
 }
 

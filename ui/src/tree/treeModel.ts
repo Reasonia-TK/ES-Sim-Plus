@@ -11,6 +11,8 @@ import {
   type Project,
 } from "../model/project";
 import type { NodeId } from "../model/selection";
+import { layersOf } from "../model/layers";
+import { paramsOf } from "../model/params";
 import { sketchOf } from "../model/sketch";
 import type { JobKind, JobSummary } from "../jobs/types";
 import { formatNumber, lengthUnitLabel, toDisplayLength, type LengthUnit } from "../util/format";
@@ -192,6 +194,7 @@ export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: s
     id: "project",
     label: docName,
     children: [
+      { id: "params", label: t("tree.params"), detail: String(paramsOf(p).vars.length) },
       {
         id: "geometry",
         label: t("tree.geometry"),
@@ -204,6 +207,7 @@ export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: s
             children: regions.length ? regions : [{ id: "regions.empty", label: t("tree.noRegions"), placeholder: true }],
           },
           { id: "sketch", label: t("tree.sketch"), detail: String(sketchOf(p).length) },
+          { id: "layers", label: t("tree.layers"), detail: String(layersOf(p).length) },
           { id: "boundaries", label: t("tree.boundaries"), detail: String(edges.length), children: edges },
           { id: "mesh", label: t("tree.mesh"), detail: meshDetail(p, unit) },
           { id: "bfield", label: t("tree.bfield"), detail: bfieldDetail(p) },

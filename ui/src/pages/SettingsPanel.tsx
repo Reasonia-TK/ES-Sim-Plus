@@ -8,6 +8,8 @@ import { edgeIndexOf, type Project } from "../model/project";
 import { useSelection } from "../model/selection";
 import { edgeLabel, type StudyKind } from "../tree/treeModel";
 import { BFieldPage, BoundariesPage, DomainPage, EdgePage, ProjectPage, RegionPage, RegionsPage } from "./GeometryPages";
+import { LayersPage } from "./LayersPage";
+import { ParamsPage } from "./ParamsPage";
 import { SketchPage } from "./SketchPage";
 import { MeshPage } from "./MeshPage";
 import { RunPage } from "./RunPage";
@@ -35,6 +37,8 @@ function pageTitle(node: string, project: Project, t: TFunction, jobs: Record<st
     domain: t("tree.domain"),
     regions: t("tree.regions"),
     sketch: t("tree.sketch"),
+    params: t("tree.params"),
+    layers: t("tree.layers"),
     boundaries: t("tree.boundaries"),
     mesh: t("tree.mesh"),
     bfield: t("tree.bfield"),
@@ -63,6 +67,8 @@ function PageBody({ node }: { node: string }) {
   if (node === "regions") return <RegionsPage />;
   if (node.startsWith("region:")) return <RegionPage id={node.slice(7)} />;
   if (node === "sketch") return <SketchPage />;
+  if (node === "params") return <ParamsPage />;
+  if (node === "layers") return <LayersPage />;
   if (node === "boundaries") return <BoundariesPage />;
   if (node.startsWith("edge:")) return <EdgePage id={node.slice(5)} />;
   if (node === "mesh") return <MeshPage />;

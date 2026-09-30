@@ -6,6 +6,7 @@
 
 import type { Draft } from "immer";
 import { booleanShapes, overlapArea, type BoolError, type BoolOp } from "../cad/boolean";
+import { keepLayer } from "./layers";
 import { regionShape, uniqueRegionId, type Project, type Region } from "./project";
 import { deleteRegion, writeShape } from "./regionOps";
 
@@ -39,7 +40,7 @@ export function applyRegionBoolean(d: Draft<Project>, op: BoolOp, targetId: stri
   let at = regions.indexOf(target) + 1;
   shapes.forEach((sh, k) => {
     if (k === main) return;
-    const copy = JSON.parse(JSON.stringify(template)) as Region;
+    const copy = keepLayer(template, JSON.parse(JSON.stringify(template)) as Region);
     copy.id = uniqueRegionId(d as Project, `${target.id}_`);
     writeShape(copy, sh);
     regions.splice(at++, 0, copy);

@@ -3,6 +3,8 @@
 
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { bindingAt, stageBinding } from "../model/params";
+import { useDocument } from "../model/documentStore";
 import { CommitText, Field } from "../pages/inputs";
 import { usePrefs } from "../prefs/prefs";
 import type { FieldInfo, Path } from "../schema/schema";
@@ -23,6 +25,8 @@ interface QuantityProps {
   id?: string;
   info: FieldInfo;
   value: number | null | undefined;
+  /** 式を束縛する文書の場所 (P7f。無ければパラメータは 1 回だけ計算して値にする) */
+  bindPath?: Path;
   onCommit: (v: number | null) => void;
   onError?: (msg: string | null) => void;
   placeholder?: string;
@@ -32,14 +36,18 @@ interface QuantityProps {
 }
 
 /** 数値の欄 (単位付きの入力可。空欄は null の項目だけ) */
-export function QuantityInput({ id, info, value, onCommit, onError, placeholder, ctx, disabled, ...rest }: QuantityProps) {
+export function QuantityInput({ id, info, value, onCommit, onError, placeholder, ctx, disabled, bindPath, ...rest }: QuantityProps) {
   const { t } = useTranslation();
   const tf = t as unknown as (k: string) => string;
+  const bound = useDocument((s) => (bindPath ? bindingAt(s.project, bindPath) : null));
   const show = (x: number) => `${formatQuantity(x, info.geom, ctx)} ${displayUnit(info.unit, info.geom, ctx)}`.trim();
   return (
     <CommitText
       id={id}
       inputMode="decimal"
+      className={bound ? "input bound" : undefined}
+      title={bound ? `= ${bound}` : undefined}
+      editText={bound ?? undefined}
       value={formatQuantity(value, info.geom, ctx)}
       placeholder={placeholder}
       disabled={disabled}
@@ -47,13 +55,15 @@ export function QuantityInput({ id, info, value, onCommit, onError, placeholder,
       onError={onError}
       validate={(s) => {
         const r = parseQuantity(s, info.unit, info.geom, ctx);
-        if (!r.ok) return r.error === "unit" ? t("input.badUnit", { unit: displayUnit(info.unit, info.geom, ctx) || "-" }) : t("input.notNumber");
+        if (!r.ok) return r.error === "param" ? (r.message ?? t("input.notNumber")) : r.error === "unit" ? t("input.badUnit", { unit: displayUnit(info.unit, info.geom, ctx) || "-" }) : t("input.notNumber");
         if (r.value === null) return info.nullable ? null : t("input.required");
         return rangeError(r.value, info, show, tf);
       }}
       onCommit={(s) => {
         const r = parseQuantity(s, info.unit, info.geom, ctx);
-        if (r.ok) onCommit(r.value);
+        if (!r.ok) return;
+        if (bindPath) stageBinding(bindPath, r.expr ?? null);
+        onCommit(r.value);
       }}
     />
   );
@@ -141,6 +151,7 @@ export function SchemaField({ path, label, hint, placeholder, always, disabled, 
             id={id}
             info={required ? { ...info, nullable: false } : info}
             ctx={ctx}
+            bindPath={path}
             value={v === undefined ? ((info.default as number | null | undefined) ?? null) : v}
             placeholder={placeholder ?? (info.nullable && !required ? t("input.auto") : undefined)}
             disabled={disabled}
@@ -165,6 +176,7 @@ export function SchemaField({ path, label, hint, placeholder, always, disabled, 
                 id={k === 0 ? id : undefined}
                 info={{ ...one, schema: axis[k] ?? one.schema }}
                 ctx={ctx}
+                bindPath={pt ? [...path, k] : undefined}
                 aria-label={k === 0 ? "x" : "y"}
                 value={pt ? pt[k] : null}
                 onError={onError}

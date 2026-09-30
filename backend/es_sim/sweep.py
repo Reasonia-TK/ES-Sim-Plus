@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .batch import _worker
+from .params import apply_params
 
 # 数値として扱う Python 型。bool は int のサブクラスだが、True/False を数値スイープの
 # 対象にすると意味を破壊しかねない (例: immobile_ions) ため明示的に除外する
@@ -112,16 +113,25 @@ def resolve_sweep_module(param_path: str, requested: str | None) -> str:
     return "pic"
 
 
+PARAM_PREFIX = "params."
+
+
 def build_sweep_cases(base_project: dict, param_path: str, values: list[float]) -> list[dict]:
     """ベース project (dict) から N ケースを生成する (deepcopy + set_by_path)。
 
     base_project 自体は変更しない (deepcopy してから上書きするため、呼び出し側が
     同じ dict を使い回しても安全)。
+
+    param_path が "params.<名前>" ならパラメータのスイープ (P7f、prompts/132): そのパラメータを値にして
+    ほかのパラメータと束縛した欄を計算し直す (params.apply_params)。
     """
     cases: list[dict] = []
     for v in values:
         case = copy.deepcopy(base_project)
-        set_by_path(case, param_path, float(v))
+        if param_path.startswith(PARAM_PREFIX):
+            apply_params(case, {param_path[len(PARAM_PREFIX):]: float(v)})
+        else:
+            set_by_path(case, param_path, float(v))
         cases.append(case)
     return cases
 
