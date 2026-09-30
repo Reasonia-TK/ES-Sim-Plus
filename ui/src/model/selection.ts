@@ -1,6 +1,7 @@
 // 選択状態 (元に戻す対象外)。ツリー・設定・グラフィックスで共有する。
 
 import { create } from "zustand";
+import { useDocument } from "./documentStore";
 
 /**
  * ツリーのノード ID:
@@ -63,3 +64,22 @@ export const PLACEMENT_NODES: Record<PlacementKind, NodeId> = {
   gasbc: "study:dsmc",
   edgeSize: "mesh",
 };
+
+// 元に戻す・やり直しなどで無くなった領域・配置物は選択から外す (v1 の ensureSelection)
+useDocument.subscribe((s, prev) => {
+  if (s.project === prev.project) return;
+  const sel = useSelection.getState();
+  const patch: Partial<Pick<SelectionState, "activeNode" | "selectedRegion" | "selectedPlacement">> = {};
+  if (sel.selectedRegion !== null && !s.project.geometry.regions.some((r) => r.id === sel.selectedRegion)) {
+    patch.selectedRegion = null;
+    if (sel.activeNode === `region:${sel.selectedRegion}`) patch.activeNode = "regions";
+  }
+  const pl = sel.selectedPlacement;
+  if (pl) {
+    const [a, b] = PLACEMENT_PATHS[pl.kind];
+    const blk = (s.project as unknown as Record<string, Record<string, unknown> | null | undefined>)[a];
+    const list = blk?.[b];
+    if (!Array.isArray(list) || pl.index >= list.length) patch.selectedPlacement = null;
+  }
+  if (Object.keys(patch).length) useSelection.setState(patch);
+});

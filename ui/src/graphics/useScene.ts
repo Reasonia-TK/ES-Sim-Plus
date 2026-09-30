@@ -14,7 +14,7 @@ import { sheathLinesOf } from "../results/sheath";
 import { runScene, VIEWER_KINDS, type RunScene } from "./runScene";
 import type { Scene } from "./scene";
 import { staticScene } from "./staticScene";
-import { useViewer } from "./viewerStore";
+import { useViewer, type StaticQuantity } from "./viewerStore";
 
 export interface SceneControls {
   quantities: { value: string; label: string }[];
@@ -109,10 +109,11 @@ export function useActiveScene(): ActiveScene {
         ? [
             { value: "v", label: t("viewer.quantity_v") },
             { value: "e_abs", label: t("viewer.quantity_e_abs") },
+            { value: "none", label: t("viewer.quantity_none") },
           ]
         : [],
       quantity: stSolve ? vq : null,
-      setQuantity: (q) => useViewer.getState().setQuantity(q as "v" | "e_abs"),
+      setQuantity: (q) => useViewer.getState().setQuantity(q as StaticQuantity),
       modes: [],
       mode: null,
       setMode: null,

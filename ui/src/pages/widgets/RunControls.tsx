@@ -8,12 +8,15 @@ import { JobRow } from "../../jobs/JobRow";
 import { runJob, sortedJobs, useJobs } from "../../jobs/jobsStore";
 import type { JobKind, JobSummary } from "../../jobs/types";
 import { useDocument } from "../../model/documentStore";
+import type { Project } from "../../model/project";
 import { Hint } from "./common";
 
 interface RunControlsProps {
   kind: JobKind;
   /** ジョブの設定 (スイープの対象・DSMC の結果の指定など) */
   options?: () => Record<string, unknown>;
+  /** 送る文書 (既定は今の文書。スイープは整えた写し) */
+  project?: () => Project;
   /** 実行できない理由 (あれば「実行」を押せない) */
   blocked?: string | null;
   /** 実行ボタンの文言 */
@@ -26,7 +29,7 @@ interface RunControlsProps {
   filter?: (job: JobSummary) => boolean;
 }
 
-export function RunControls({ kind, options, blocked, runLabel, extra, shown = 3, filter }: RunControlsProps) {
+export function RunControls({ kind, options, project, blocked, runLabel, extra, shown = 3, filter }: RunControlsProps) {
   const { t } = useTranslation();
   const connected = useConnection((s) => s.status === "connected");
   const hasJobs = useConnection((s) => s.info?.jobs === true);
@@ -38,7 +41,7 @@ export function RunControls({ kind, options, blocked, runLabel, extra, shown = 3
   const reason = !connected ? t("static.notConnected") : !hasJobs ? t("jobs.oldBackend") : (blocked ?? null);
   const run = async () => {
     setBusy(true);
-    await runJob(kind, useDocument.getState().project, options?.() ?? {});
+    await runJob(kind, project?.() ?? useDocument.getState().project, options?.() ?? {});
     setBusy(false);
   };
   return (

@@ -50,6 +50,8 @@ interface StaticState {
   /** 最後に作ったもの (メッシュを作り直したらメッシュを優先して表示する、v1 と同じ) */
   latest: "mesh" | "solve" | null;
   busy: Busy;
+  /** 計算を始めた時刻 (performance.now()、ステータスバーの経過時間) */
+  busySince: number | null;
   error: string | null;
   runMesh: () => Promise<void>;
   runSolve: () => Promise<void>;
@@ -78,13 +80,14 @@ export const useStatic = create<StaticState>()((set, get) => ({
   solve: null,
   latest: null,
   busy: null,
+  busySince: null,
   error: null,
 
   runMesh: async () => {
     if (get().busy) return;
     const project = useDocument.getState().project;
     controller = new AbortController();
-    set({ busy: "mesh", error: null });
+    set({ busy: "mesh", busySince: performance.now(), error: null });
     const t0 = performance.now();
     try {
       const result = await buildMesh(project, controller.signal);
@@ -98,7 +101,7 @@ export const useStatic = create<StaticState>()((set, get) => ({
       logError(t("msg.source.static"), t("static.meshFailed", { error: msg }));
     } finally {
       controller = null;
-      set({ busy: null });
+      set({ busy: null, busySince: null });
     }
   },
 
@@ -106,7 +109,7 @@ export const useStatic = create<StaticState>()((set, get) => ({
     if (get().busy) return;
     const project = useDocument.getState().project;
     controller = new AbortController();
-    set({ busy: "solve", error: null });
+    set({ busy: "solve", busySince: performance.now(), error: null });
     const t0 = performance.now();
     try {
       const result = await solveStatic(project, controller.signal);
@@ -125,20 +128,20 @@ export const useStatic = create<StaticState>()((set, get) => ({
       logError(t("msg.source.static"), t("static.solveFailed", { error: msg }));
     } finally {
       controller = null;
-      set({ busy: null });
+      set({ busy: null, busySince: null });
     }
   },
 
   cancel: () => {
     controller?.abort();
     controller = null;
-    set({ busy: null });
+    set({ busy: null, busySince: null });
   },
 
   clear: () => {
     controller?.abort();
     controller = null;
-    set({ mesh: null, solve: null, latest: null, busy: null, error: null });
+    set({ mesh: null, solve: null, latest: null, busy: null, busySince: null, error: null });
   },
 }));
 

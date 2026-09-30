@@ -1,6 +1,6 @@
 """2D シースエッジ評価ライン (SheathLine) の schema テスト (prompts/98)。
 
-計算そのものはフロント側 (frontend/src/sheath.ts) で行うため、backend は
+計算そのものはフロント側 (ui/src/results/sheath.ts、v1 は frontend/src/sheath.ts) で行うため、backend は
 永続化 (schema + 最大本数の validator) のみを担う。
 """
 

@@ -9,6 +9,7 @@ import { t } from "../i18n";
 import { documentName, isDirty, useDocument, type DocFile } from "../model/documentStore";
 import { newProject, normalizeProject, serializeProject } from "../model/project";
 import { useSelection } from "../model/selection";
+import { isTauri } from "../util/env";
 import { usePrefs, type RecentFile } from "../prefs/prefs";
 import { buildResultsBundle, importResultsBundle } from "../results/bundle";
 import { useResultsView } from "../results/resultsView";
@@ -23,7 +24,7 @@ function currentName(): string {
 }
 
 function resetSelection(): void {
-  useSelection.setState({ activeNode: "domain", selectedRegion: null });
+  useSelection.setState({ activeNode: "domain", selectedRegion: null, selectedPlacement: null });
 }
 
 /** 未保存の変更があれば保存するか尋ねる。続けてよければ true */
@@ -121,6 +122,28 @@ export async function saveDocument(): Promise<boolean> {
     logError(src(), t("msg.saveFailed", { error: errorText(e) }));
     return false;
   }
+}
+
+/**
+ * Tauri: ウィンドウを閉じる前に未保存の確認 (保存・保存しない・キャンセル)。ブラウザは beforeunload (autosave.ts)。
+ * 「保存しない」で閉じたら自動保存の控えも消す (次に開いたときに復元を尋ねない)。
+ */
+export function startCloseGuard(): void {
+  if (!isTauri()) return;
+  void import("@tauri-apps/api/window")
+    .then(({ getCurrentWindow }) => {
+      const win = getCurrentWindow();
+      return win.onCloseRequested(async (event) => {
+        if (!isDirty(useDocument.getState())) return;
+        event.preventDefault();
+        const choice = await askUnsaved(currentName());
+        if (choice === "cancel") return;
+        if (choice === "save" && !(await saveDocument())) return;
+        if (choice === "discard") clearRecovery();
+        await win.destroy();
+      });
+    })
+    .catch(() => {});
 }
 
 /** 結果付きで保存 (v1 と同じ形の書き出し。文書の保存先と未保存の印は変えない) */

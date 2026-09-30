@@ -131,6 +131,35 @@ export function sweepValues(s: SweepSettings): number[] {
   return s.mode === "list" ? parseListValues(s.list_text) : rangeValues(s.start, s.end, s.count, s.log);
 }
 
+/**
+ * スイープで送る文書 (写し) を整える (v1 の runSweepStart と同じ): PIC 1D・流体 1D の電極の voltage_rf が 1 成分
+ * (オブジェクト) なら配列に包み (候補のパスは voltage_rf.0.* の形)、対象のキーが無ければ親があるときに限り 0 で補う
+ * (see_gamma のような省略できる項目)。元の文書は変えない。
+ */
+export function prepareSweepProject(p: Project, path: string): Project {
+  const q = structuredClone(p) as unknown as Record<string, unknown>;
+  for (const mod of ["pic1d", "fluid1d"]) {
+    const blk = q[mod] as Record<string, Record<string, unknown> | undefined> | null | undefined;
+    if (!blk) continue;
+    for (const side of ["left", "right"]) {
+      const e = blk[side];
+      if (e && e.voltage_rf && !Array.isArray(e.voltage_rf)) e.voltage_rf = [e.voltage_rf];
+    }
+  }
+  const toks = path.split(".");
+  let cur: unknown = q;
+  for (const tok of toks.slice(0, -1)) {
+    if (cur === null || cur === undefined) break;
+    cur = Array.isArray(cur) ? cur[Number(tok)] : (cur as Record<string, unknown>)[tok];
+  }
+  const last = toks[toks.length - 1];
+  if (path && cur !== null && typeof cur === "object" && !Array.isArray(cur)) {
+    const rec = cur as Record<string, unknown>;
+    if (typeof rec[last] !== "number") rec[last] = 0;
+  }
+  return q as unknown as Project;
+}
+
 /** ドット区切りのパスの現在値 (数値でなければ undefined) */
 export function valueAtPath(obj: unknown, path: string): number | undefined {
   let cur: unknown = obj;

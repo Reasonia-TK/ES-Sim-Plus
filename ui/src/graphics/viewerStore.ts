@@ -8,13 +8,13 @@ import { DEFAULT_COLORMAP, type ColormapKey } from "./colormaps";
 import type { ManualRange } from "./fieldScale";
 
 export type DrawTool = "select" | "polyline" | "rect" | "circle";
-export type PlaceTool = "profile" | "emitter" | "collector" | "gasbc" | "eedfbox" | "meshref" | "sheathline";
+export type PlaceTool = "profile" | "emitter" | "injector" | "collector" | "gasbc" | "eedfbox" | "meshref" | "sheathline";
 /** 調べる道具 (文書は変えない) */
 export type InspectTool = "probe" | "measure";
 export type Tool = DrawTool | PlaceTool | InspectTool;
 
 export const DRAW_TOOLS: DrawTool[] = ["select", "polyline", "rect", "circle"];
-export const PLACE_TOOLS: PlaceTool[] = ["profile", "emitter", "collector", "gasbc", "eedfbox", "meshref", "sheathline"];
+export const PLACE_TOOLS: PlaceTool[] = ["profile", "emitter", "injector", "collector", "gasbc", "eedfbox", "meshref", "sheathline"];
 export const INSPECT_TOOLS: InspectTool[] = ["probe", "measure"];
 
 /** ルーラーの文字の大きさ (v1 と同じ 3 段) */
@@ -22,7 +22,8 @@ export const RULER_FONTS = { s: 9, m: 11, l: 14 } as const;
 export type RulerFont = keyof typeof RULER_FONTS;
 
 /** 静電場で塗る量 */
-export type StaticQuantity = "v" | "e_abs";
+/** 静電場の塗る量 (none は背景なし、粒子軌道の背景に) */
+export type StaticQuantity = "v" | "e_abs" | "none";
 
 export type OverlayKey =
   | "mesh"

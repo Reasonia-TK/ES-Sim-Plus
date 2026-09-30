@@ -13,6 +13,7 @@ import { CommitText } from "../pages/inputs";
 import { usePrefs } from "../prefs/prefs";
 import { useJobs } from "../jobs/jobsStore";
 import { buildTree, filterTree, visibleNodes, type TreeNode } from "./treeModel";
+import { isStale, solveKey, useStatic } from "../results/staticResults";
 
 /** 境界条件の枝を最初から開いておく辺の数の上限 (同軸の例は 64 辺) */
 const EXPAND_EDGES_MAX = 8;
@@ -50,7 +51,10 @@ export function ModelTree() {
   const treeRef = useRef<HTMLDivElement>(null);
 
   const jobs = useJobs((s) => s.jobs);
-  const root = useMemo(() => buildTree(project, t, unit, docName, Object.values(jobs)), [project, t, unit, docName, jobs]);
+  const stBusy = useStatic((s) => s.busy !== null);
+  const stSolve = useStatic((s) => s.solve);
+  const stat = useMemo(() => ({ busy: stBusy, solved: stSolve !== null, stale: isStale(stSolve, solveKey, project) }), [stBusy, stSolve, project]);
+  const root = useMemo(() => buildTree(project, t, unit, docName, Object.values(jobs), stat), [project, t, unit, docName, jobs, stat]);
   const shown = useMemo(() => filterTree(root, query), [root, query]);
   const filtering = query.trim() !== "";
   const rows = useMemo(() => (shown ? visibleNodes(shown, expanded, filtering) : []), [shown, expanded, filtering]);

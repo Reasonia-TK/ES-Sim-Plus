@@ -1,7 +1,7 @@
 [package]
 name = "es-sim"
-version = "0.1.0"
-description = "2D sketch CAD + electrostatic field simulation"
+version = "0.2.0"
+description = "ES-Sim: 2D CAD + plasma / electrostatic field simulation (UI v2)"
 edition = "2021"
 
 [build-dependencies]

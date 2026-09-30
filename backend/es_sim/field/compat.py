@@ -1,6 +1,6 @@
 """v2 直交格子エンジンの結果を v1 API の形 (三角形メッシュ上の値) へ変換する (prompts/119, 121)。
 
-既存の v1 UI (frontend/) は三角形メッシュ (nodes/triangles) の節点値・要素値を描く。
+UI (ui/、v1 の frontend/ も) は三角形メッシュ (nodes/triangles) の節点値・要素値を描く。
 v2 の直交格子は各セルを市松の対角線で 2 三角形に分割した「表示用メッシュ」として渡す
 (gpic.geometry.ParticleGeometry.display_mesh と同じ。導体内のセルは穴)。
 

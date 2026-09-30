@@ -108,10 +108,10 @@ export function RunPage({ id }: { id: string }) {
             <span className="mono">{formatSi(dt, "s")}</span>
           </>
         )}
-        {typeof started?.effective_threads === "number" && (
+        {(typeof started?.effective_threads === "number" || typeof started?.threads === "number") && (
           <>
             <span>{t("jobs.threads")}</span>
-            <span>{formatNumber(started.effective_threads)}</span>
+            <span>{formatNumber(Number(started.effective_threads ?? started.threads))}</span>
           </>
         )}
       </div>

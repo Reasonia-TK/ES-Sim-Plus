@@ -244,9 +244,9 @@ function CollectorCard({ collectors, labels }: { collectors: PicCollectorResult[
       ) : (
         <>
           <div className="chart-subtitle">{t("charts.iedf")}</div>
-          <LineChart x={iedf.centers} series={[{ label: "IEDF", values: iedf.counts, color: "#4da3ff", paths: "bars", fill: "rgba(77, 163, 255, 0.55)" }]} xLabel="E [eV]" yLabel={t("charts.weightedCount")} height={140} legend={false} />
+          <LineChart x={iedf.centers} series={[{ label: "IEDF", values: iedf.counts, color: "#4da3ff", paths: "bars", fill: "rgba(77, 163, 255, 0.55)" }]} xLabel="E [eV]" yLabel={t("charts.weightedCount")} height={140} />
           <div className="chart-subtitle">{t("charts.iadf")}</div>
-          <LineChart x={iadf.centers} series={[{ label: "IADF", values: iadf.counts, color: "#ffb84d", paths: "bars", fill: "rgba(255, 184, 77, 0.55)" }]} xLabel={t("charts.angleDeg")} yLabel={t("charts.weightedCount")} xRange={IADF_RANGE} height={140} legend={false} />
+          <LineChart x={iadf.centers} series={[{ label: "IADF", values: iadf.counts, color: "#ffb84d", paths: "bars", fill: "rgba(255, 184, 77, 0.55)" }]} xLabel={t("charts.angleDeg")} yLabel={t("charts.weightedCount")} xRange={IADF_RANGE} height={140} />
           <div className="chart-head-row">
             <div className="chart-subtitle">{t("charts.iaedf")}</div>
             <Toggle checked={logIaedf} onChange={setLogIaedf} label={t("charts.log")} />

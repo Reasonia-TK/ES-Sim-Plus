@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DialogHost } from "../src/app/DialogHost";
 import { useMessages } from "../src/app/messages";
 import { useConnection } from "../src/backend/connection";
 import { t } from "../src/i18n";
@@ -127,9 +128,15 @@ describe("tree", () => {
 describe("run controls", () => {
   it("submits a job and lists runs with stop / continue / delete", async () => {
     useConnection.setState({ status: "disconnected" });
-    const { rerender } = render(<RunControls kind="pic1d" />);
+    const { rerender } = render(
+      <>
+        <RunControls kind="pic1d" />
+        <DialogHost />
+      </>,
+    );
     expect((screen.getByRole("button", { name: "実行" }) as HTMLButtonElement).disabled).toBe(true);
     useConnection.setState({ status: "connected", info: { version: "0.2", gpu: false, numba: true, jobs: true } });
+    useJobs.setState({ connected: true });
     const calls: [string, string][] = [];
     vi.stubGlobal(
       "fetch",
@@ -139,7 +146,12 @@ describe("run controls", () => {
         return new Response(JSON.stringify(job({ id: "n1", seq: 7, state: "running" })), { status: 200 });
       }),
     );
-    rerender(<RunControls kind="pic1d" />);
+    rerender(
+      <>
+        <RunControls kind="pic1d" />
+        <DialogHost />
+      </>,
+    );
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "実行" }));
     });
@@ -153,8 +165,13 @@ describe("run controls", () => {
     expect(calls.at(-1)).toEqual(["POST", "/v2/jobs/n1/stop"]);
     act(() => handleEvent({ type: "job", job: job({ id: "n1", seq: 7, state: "stopped", runs: 1, can_continue: true, has_result: true }) }));
     expect(screen.getByRole("button", { name: "続きを実行" })).toBeTruthy();
+    // 削除は確認してから
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "削除" }));
+    });
+    expect(await screen.findByText(/元に戻せません/)).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: "削除" }).at(-1)!);
     });
     expect(calls.at(-1)).toEqual(["DELETE", "/v2/jobs/n1"]);
     expect(screen.queryByText("PIC 1D #7")).toBeNull();

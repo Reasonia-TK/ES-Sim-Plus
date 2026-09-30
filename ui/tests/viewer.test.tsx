@@ -54,7 +54,8 @@ describe("electrostatics page", () => {
     render(<SettingsPanel />);
     const compute = screen.getByRole("button", { name: "計算" }) as HTMLButtonElement;
     expect(compute.disabled).toBe(true);
-    expect(screen.getByText("バックエンドに接続していないので計算できません")).toBeTruthy();
+    // メッシュの作成と計算の両方に出る
+    expect(screen.getAllByText("バックエンドに接続していないので計算できません").length).toBeGreaterThan(0);
 
     const mesh = { nodes: [[0, 0], [0.1, 0], [0.1, 0.05], [0, 0.05]], triangles: [[0, 1, 2], [0, 2, 3]], region_of_triangle: [-1, -1] };
     const result = {

@@ -5,7 +5,8 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { usePrefs } from "../prefs/prefs";
-import { formatNumber, fromDisplayLength, parseNumber, toDisplayLength } from "../util/format";
+import { parseQuantity } from "../schema/units";
+import { formatNumber, lengthUnitLabel, parseNumber, toDisplayLength } from "../util/format";
 
 interface FieldProps {
   label: ReactNode;
@@ -58,12 +59,18 @@ export function CommitText({ id, value, onCommit, validate, onError, className, 
   const [draft, setDraft] = useState(value);
   const [editing, setEditing] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
+  // Esc で抜けたときは確定しない (blur が先に走るので印を付けておく。v1 は Esc でも確定していた)
+  const cancelled = useRef(false);
   useEffect(() => {
     if (!editing) setDraft(value);
   }, [value, editing]);
 
   const commit = () => {
     setEditing(false);
+    if (cancelled.current) {
+      cancelled.current = false;
+      return;
+    }
     const err = validate?.(draft) ?? null;
     onError?.(err);
     if (err !== null) {
@@ -84,13 +91,17 @@ export function CommitText({ id, value, onCommit, validate, onError, className, 
       disabled={disabled}
       spellCheck={false}
       aria-label={rest["aria-label"]}
-      onFocus={() => setEditing(true)}
+      onFocus={() => {
+        cancelled.current = false;
+        setEditing(true);
+      }}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           ref.current?.blur();
         } else if (e.key === "Escape") {
+          cancelled.current = true;
           setDraft(value);
           setEditing(false);
           onError?.(null);
@@ -146,16 +157,33 @@ type LengthInputProps = Omit<NumberInputProps, "nullable" | "value" | "onCommit"
   onCommit: (m: number) => void;
 };
 
-/** 長さの欄: 値は m、表示・入力は設定の単位 (mm/µm) */
-export function LengthInput({ value, onCommit, min, max, ...rest }: LengthInputProps) {
+/** 長さの欄: 値は m、表示・入力は設定の単位 (mm/µm)。単位を付けても入れられる ("0.5 cm"・"5 µm") */
+export function LengthInput({ id, value, onCommit, min, max, exclusive, onError, placeholder, "aria-label": ariaLabel }: LengthInputProps) {
+  const { t } = useTranslation();
   const unit = usePrefs((s) => s.lengthUnit);
+  const ctx = { lengthUnit: unit, axisymmetric: false };
+  const parse = (text: string) => parseQuantity(text, undefined, true, ctx);
+  const shown = (m: number) => `${formatNumber(toDisplayLength(m, unit))} ${lengthUnitLabel(unit)}`;
   return (
-    <NumberInput
-      {...rest}
-      value={toDisplayLength(value, unit)}
-      min={min === undefined ? undefined : toDisplayLength(min, unit)}
-      max={max === undefined ? undefined : toDisplayLength(max, unit)}
-      onCommit={(v) => v !== null && onCommit(fromDisplayLength(v, unit))}
+    <CommitText
+      id={id}
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      inputMode="decimal"
+      value={formatNumber(toDisplayLength(value, unit))}
+      onError={onError}
+      validate={(text) => {
+        const r = parse(text);
+        if (!r.ok) return r.error === "unit" ? t("input.badUnit", { unit: lengthUnitLabel(unit) }) : t("input.notNumber");
+        if (r.value === null) return t("input.notNumber");
+        if (min !== undefined && (exclusive ? r.value <= min : r.value < min)) return `${exclusive ? ">" : "≥"} ${shown(min)}`;
+        if (max !== undefined && (exclusive ? r.value >= max : r.value > max)) return `${exclusive ? "<" : "≤"} ${shown(max)}`;
+        return null;
+      }}
+      onCommit={(text) => {
+        const r = parse(text);
+        if (r.ok && r.value !== null) onCommit(r.value);
+      }}
     />
   );
 }

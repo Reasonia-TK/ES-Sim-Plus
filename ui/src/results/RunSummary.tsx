@@ -176,6 +176,7 @@ function PicSummary({ job, project }: { job: JobSummary; project: Project | null
           title={t("summary.timingTitle")}
           rows={[
             result.elapsed_s != null ? [t("summary.elapsedWall"), `${result.elapsed_s.toFixed(3)} s`] : null,
+            result.fields ? [t("summary.avgSteps"), result.fields.avg_steps] : null,
             ...timing,
             regrids.length > 0 ? [t("summary.regrids"), t("summary.regridsValue", { n: regrids.length, nodes: regrids[regrids.length - 1]?.n_nodes ?? "-" })] : null,
           ]}
@@ -236,6 +237,7 @@ function Fluid2dSummary({ job, project }: { job: JobSummary; project: Project | 
           title={t("summary.title")}
           rows={[
             [t("summary.elapsedWall"), `${result.elapsed_s.toFixed(3)} s`],
+            result.fields ? [t("summary.avgSteps"), result.fields.avg_steps] : null,
             ...timing,
             [t("summary.total"), `${(result.timing?.total ?? 0).toFixed(3)} s`],
             iterative && typeof iters === "number" ? [t("summary.solverIters"), iters.toLocaleString()] : null,

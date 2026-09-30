@@ -1,7 +1,9 @@
 // フォームの入れ物: 見出しつきの区分、有効/無効を切り替えるブロック (v1 の [R]: 無効にしても直前の値を
 // 覚えていて、有効に戻すと復元する)、スキーマから残りの項目を並べる AutoFields。
 
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
+import { usePageValue } from "../app/pageState";
+import { useSelection } from "../model/selection";
 import { useTranslation } from "react-i18next";
 import { useDocument } from "../model/documentStore";
 import { usePrefs } from "../prefs/prefs";
@@ -21,7 +23,8 @@ export function recallBlock(path: Path): unknown {
 }
 
 export function Section({ title, children, actions, defaultOpen = true }: { title: ReactNode; children: ReactNode; actions?: ReactNode; defaultOpen?: boolean }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const node = useSelection((s) => s.activeNode);
+  const [open, setOpen] = usePageValue(`section.${node}.${typeof title === "string" ? title : ""}`, defaultOpen);
   return (
     <section className="form-section">
       <header className="form-section-header">

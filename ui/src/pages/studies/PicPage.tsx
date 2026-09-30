@@ -18,6 +18,7 @@ import { DsmcSourceSelect, useDsmcSource } from "../widgets/DsmcSource";
 import { RunControls } from "../widgets/RunControls";
 import { StudyShell } from "./StudyShell";
 import { useSelection } from "../../model/selection";
+import { EmitterFields } from "../widgets/EmitterFields";
 
 interface Pic {
   dt?: number | null;
@@ -82,7 +83,6 @@ export function PicPage() {
   const freqs = projectFreqs(project, true);
   const P = ["pic"] as const;
   const inj = [...P, "injection"] as const;
-  const injLine = (pic.injection?.emitter?.kind ?? "line") === "line";
   const b = polygonBounds(project.geometry.domain.polygon);
   const reflect = pic.reflect_edges ?? [];
   const sel = useSelection((s) => s.selectedPlacement);
@@ -108,12 +108,8 @@ export function PicPage() {
       >
         <SchemaField path={[...inj, "species"]} />
         <SchemaField path={[...inj, "current_a_per_m"]} />
-        <SchemaField path={[...inj, "emitter", "kind"]} />
-        <SchemaField path={[...inj, "emitter", "p1"]} />
-        {injLine && <SchemaField path={[...inj, "emitter", "p2"]} />}
-        <SchemaField path={[...inj, "emitter", "energy_ev"]} />
-        <SchemaField path={[...inj, "emitter", "direction_deg"]} />
-        <SchemaField path={[...inj, "emitter", "spread_deg"]} />
+        <EmitterFields path={[...inj, "emitter"]} />
+        <Hint>{t("picPage.injectionCanvasHint")}</Hint>
         {(project.particles as { emitter?: unknown } | null)?.emitter ? (
           <button
             type="button"
@@ -130,14 +126,14 @@ export function PicPage() {
       <Section title={t("studyCommon.run")}>
         <SchemaField path={[...P, "n_macro"]} />
         <SchemaField path={[...P, "dt"]} />
-        <RfCycleHint freqs={freqs} dt={pic.dt} />
+        <RfCycleHint kind="pic" freqs={freqs} dt={pic.dt} nSteps={pic.n_steps ?? 2000} />
         <SchemaField path={[...P, "n_steps"]} />
         <SchemaField path={[...P, "frame_every"]} />
         <SchemaField path={[...P, "ion_subcycle"]} />
         <SchemaField path={[...P, "threads"]} />
         <SchemaField path={[...P, "avg_steps"]} placeholder={t("studyCommon.last25")} />
         <SchemaField path={[...P, "phase_bins"]} />
-        <PhaseBinHint freqs={freqs} dt={pic.dt} bins={pic.phase_bins ?? 40} avgSteps={pic.avg_steps} nSteps={pic.n_steps ?? 2000} />
+        <PhaseBinHint kind="pic" freqs={freqs} dt={pic.dt} bins={pic.phase_bins ?? 40} avgSteps={pic.avg_steps} nSteps={pic.n_steps ?? 2000} />
       </Section>
       <OptionalBlock path={[...P, "merge"]} title={t("picPage.merge")} defaults={() => ({ ...DEFAULT_MERGE })} hint={t("picPage.mergeHint")}>
         <SchemaField path={[...P, "merge", "n_max"]} />

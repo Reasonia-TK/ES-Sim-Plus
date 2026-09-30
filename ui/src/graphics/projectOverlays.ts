@@ -52,6 +52,14 @@ export function emitterOf(p: Project): EmitterView | null {
   return { kind: e.kind === "point" ? "point" : "line", p1: e.p1, p2: isPoint(e.p2) ? e.p2 : e.p1, directionDeg: e.direction_deg ?? 0 };
 }
 
+/** PIC の注入のエミッタ (PIC が有効で注入があるとき。v1 は粒子軌道のエミッタと共通だった) */
+export function injectorOf(p: Project): EmitterView | null {
+  const inj = (p.pic as { injection?: { emitter?: { kind?: string; p1?: unknown; p2?: unknown; direction_deg?: number } | null } | null } | null | undefined)?.injection;
+  const e = inj?.emitter;
+  if (!e || !isPoint(e.p1)) return null;
+  return { kind: e.kind === "point" ? "point" : "line", p1: e.p1, p2: isPoint(e.p2) ? e.p2 : e.p1, directionDeg: e.direction_deg ?? 0 };
+}
+
 /** AMR の細分化の矩形 (直交格子のときだけ) */
 export function amrBoxesOf(p: Project): [Point, Point][] {
   if (p.mesh.mode !== "cartesian") return [];

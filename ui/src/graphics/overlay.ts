@@ -37,6 +37,7 @@ const COLOR_VARS = {
   handleMid: "--color-handle-mid",
   draw: "--color-draw",
   emitter: "--color-emitter",
+  injector: "--color-injector",
   gasbc: "--color-gasbc",
   eedf: "--color-eedf",
   edgeSize: "--color-edgesize",
@@ -249,6 +250,8 @@ export interface OverlayState {
   drawing: Drawing;
   placements: Placement[];
   emitter: EmitterView | null;
+  /** PIC の注入のエミッタ */
+  injector: EmitterView | null;
   amrBoxes: [Point, Point][];
   profile: [Point, Point] | null;
   measure: [Point, Point] | null;
@@ -430,9 +433,8 @@ function drawPlacement(ctx: CanvasRenderingContext2D, s: OverlayState, pl: Place
   }
 }
 
-function drawEmitter(ctx: CanvasRenderingContext2D, s: OverlayState, e: EmitterView): void {
+function drawEmitter(ctx: CanvasRenderingContext2D, s: OverlayState, e: EmitterView, color = s.colors.emitter, tag?: string): void {
   const v = s.view;
-  const color = s.colors.emitter;
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.lineWidth = 2;
@@ -461,6 +463,7 @@ function drawEmitter(ctx: CanvasRenderingContext2D, s: OverlayState, e: EmitterV
   ctx.lineTo(ex, ey);
   ctx.stroke();
   arrowHead(ctx, ox, oy, ex, ey, 7);
+  if (tag) label(ctx, tag, ox + 8, oy + 10, color, "left", "top");
 }
 
 function drawSelection(ctx: CanvasRenderingContext2D, s: OverlayState): void {
@@ -532,6 +535,8 @@ function drawRubberBand(ctx: CanvasRenderingContext2D, s: OverlayState): void {
   const color =
     tool === "emitter"
       ? c.emitter
+      : tool === "injector"
+        ? c.injector
       : tool === "collector"
         ? c.collectors[0]
         : tool === "gasbc"
@@ -764,7 +769,11 @@ function drawRulers(ctx: CanvasRenderingContext2D, s: OverlayState): void {
   ctx.font = `${Math.min(s.rulerFont, 10)}px system-ui, sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(lengthUnitLabel(s.lengthUnit), size / 2, size / 2);
+  // 軸対称では軸の名前も (z/r・r/z、v1 と同じ)
+  if (s.axisNames[0] !== "x") {
+    ctx.fillText(`${s.axisNames[0]}/${s.axisNames[1]}`, size / 2, size / 2 - 5);
+    ctx.fillText(lengthUnitLabel(s.lengthUnit), size / 2, size / 2 + 6);
+  } else ctx.fillText(lengthUnitLabel(s.lengthUnit), size / 2, size / 2);
 }
 
 export function drawOverlay(ctx: CanvasRenderingContext2D, s: OverlayState): void {
@@ -786,6 +795,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, s: OverlayState): voi
   }
   for (const pl of s.placements) drawPlacement(ctx, s, pl);
   if (s.emitter) drawEmitter(ctx, s, s.emitter);
+  if (s.injector) drawEmitter(ctx, s, s.injector, s.colors.injector, "PIC");
   if (s.profile) drawProfile(ctx, s, s.profile);
   drawSelection(ctx, s);
   if (s.measure) drawMeasure(ctx, s, s.measure);

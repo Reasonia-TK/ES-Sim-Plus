@@ -70,7 +70,7 @@ export function TlCharts({ result }: { result: TlResult }) {
         <LineChart x={r} series={harm} xLabel={rl} yLabel="|V_n| [V]" logY={logHarm} height={180} />
       </ChartCard>
       <ChartCard title={t("charts.tlPower")}>
-        <LineChart x={r} series={[{ label: "p(r)", values: result.power.p, color: "#f2b880" }]} xLabel={rl} yLabel="p [W/m^2]" height={150} legend={false} />
+        <LineChart x={r} series={[{ label: "p(r)", values: result.power.p, color: "#f2b880" }]} xLabel={rl} yLabel="p [W/m^2]" height={150} />
       </ChartCard>
       {vt && (
         <ChartCard title={t("charts.tlProbeV")}>
@@ -142,7 +142,7 @@ export function BoltzCharts({ table }: { table: BoltzTable }) {
           </>
         }
       >
-        <LineChart x={eps} series={[{ label: m, values: m === "eepf" ? eepf : row, color: "#7ec8e3" }]} xLabel="ε [eV]" yLabel={m === "eepf" ? "f(ε)/√ε [eV^-1.5]" : "f(ε) [eV^-1]"} logY={log} height={160} legend={false} />
+        <LineChart x={eps} series={[{ label: m, values: m === "eepf" ? eepf : row, color: "#7ec8e3" }]} xLabel="ε [eV]" yLabel={m === "eepf" ? "f(ε)/√ε [eV^-1.5]" : "f(ε) [eV^-1]"} logY={log} height={160} />
       </ChartCard>
     </>
   );

@@ -246,6 +246,14 @@ export async function stopRun(id: string): Promise<void> {
   }
 }
 
+/** 実行中・待ちのジョブをすべて止める (読み込んだ実行は除く) */
+export async function stopAllRuns(): Promise<void> {
+  const ids = Object.values(useJobs.getState().jobs)
+    .filter((j) => (j.state === "running" || j.state === "queued") && !j.imported)
+    .map((j) => j.id);
+  await Promise.all(ids.map((id) => stopRun(id)));
+}
+
 export async function continueRun(id: string, options: Record<string, unknown>): Promise<void> {
   try {
     await continueJob(id, options);

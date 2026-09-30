@@ -3,6 +3,7 @@
 // 自動起動し、アプリ終了時に kill する (prompts/44)。
 // 開発モード (`tauri dev`) ではサイドカーを起動しない — デバッグは従来通り
 // 手動 uvicorn (`uvicorn es_sim.server:app --port 8317`) を使う。
+// フロントエンドは UI v2 (`ui/`、prompts/130 P6f)。v1 (`frontend/`) からここへ移した。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::io::Write;
@@ -29,6 +30,21 @@ fn log_line(path: &Option<PathBuf>, msg: &str) {
         }
     }
 }
+
+/// サイドカーをプロセスツリーごと止める。PyInstaller の onefile は展開役の親と本体の子の 2 つのプロセスで動き、
+/// 親だけを kill すると本体 (uvicorn) が残ってポートを塞ぐ (P6f の確認で判明、v1 も同じだった)。
+#[cfg(windows)]
+fn kill_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+}
+
+#[cfg(not(windows))]
+fn kill_tree(_pid: u32) {}
 
 fn main() {
     tauri::Builder::default()
@@ -105,6 +121,7 @@ fn main() {
             if let tauri::RunEvent::Exit = event {
                 // アプリ終了時にバックエンドの子プロセスを確実に殺す
                 if let Some(child) = app.state::<BackendChild>().0.lock().unwrap().take() {
+                    kill_tree(child.pid());
                     let _ = child.kill();
                 }
             }

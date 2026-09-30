@@ -33,7 +33,7 @@ describe("settings panel", () => {
     expect(isDirty(useDocument.getState())).toBe(true);
 
     commit(width, "-1");
-    expect(screen.getByRole("alert").textContent).toBe("> 0");
+    expect(screen.getByRole("alert").textContent).toBe("> 0 mm");
     expect((width as HTMLInputElement).value).toBe("120");
 
     act(() => useDocument.getState().undo());

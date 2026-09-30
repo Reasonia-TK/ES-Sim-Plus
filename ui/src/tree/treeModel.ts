@@ -78,7 +78,10 @@ function domainDetail(p: Project, unit: LengthUnit): string {
 function meshDetail(p: Project, unit: LengthUnit): string {
   const size = `${formatNumber(toDisplayLength(p.mesh.size, unit))} ${lengthUnitLabel(unit)}`;
   const mode = p.mesh.mode ?? "unstructured";
-  const amr = mode === "cartesian" && p.mesh.amr?.max_level ? ` · AMR L${p.mesh.amr.max_level}` : "";
+  // 細分化の矩形のレベルも含めた最大 (v1 と同じ)
+  const amrObj = p.mesh.amr as { max_level?: number; regions?: { level?: number }[] } | null | undefined;
+  const level = Math.max(amrObj?.max_level ?? 0, ...(amrObj?.regions ?? []).map((r) => r.level ?? 0));
+  const amr = mode === "cartesian" && amrObj && level > 0 ? ` · AMR L${level}` : "";
   return `${size} · ${mode}${amr}`;
 }
 
@@ -115,6 +118,8 @@ const STATE_TONE: Record<JobSummary["state"], BadgeTone> = {
 };
 
 function pct(j: JobSummary): string {
+  // スイープは終わったケースの数 (v1 と同じ)
+  if (j.kind === "sweep" && j.progress) return ` ${j.progress.step}/${j.progress.n_steps}`;
   const f = j.progress?.fraction;
   return f === null || f === undefined ? "" : ` ${Math.round(f * 100)}%`;
 }
@@ -136,7 +141,14 @@ export function studyConfigured(p: Project, kind: StudyKind): boolean {
   return key === null ? true : p[key] !== null && p[key] !== undefined;
 }
 
-export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: string, jobs: JobSummary[] = []): TreeNode {
+/** 静電場の状態 (計算中・結果あり・設定が変わった) */
+export interface StaticStatus {
+  busy: boolean;
+  solved: boolean;
+  stale: boolean;
+}
+
+export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: string, jobs: JobSummary[] = [], stat?: StaticStatus): TreeNode {
   const newest = [...jobs].sort((a, b) => b.created - a.created);
   const regions: TreeNode[] = p.geometry.regions.map((r) => ({
     id: `region:${r.id}`,
@@ -152,7 +164,17 @@ export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: s
     const configured = studyConfigured(p, kind);
     const hasBlock = STUDY_SETTINGS_KEY[kind] !== null;
     const jk = STUDY_JOB_KIND[kind];
-    const run = jk ? runBadge(newest.filter((j) => j.kind === jk), t) : null;
+    const run = jk
+      ? runBadge(newest.filter((j) => j.kind === jk), t)
+      : kind === "fem" && stat
+        ? stat.busy
+          ? { text: t("jobs.state.running"), tone: "run" as const }
+          : stat.solved
+            ? stat.stale
+              ? { text: t("tree.stale"), tone: "warn" as const }
+              : { text: t("jobs.state.done"), tone: "ok" as const }
+            : { text: t("tree.notRun"), tone: "muted" as const }
+        : null;
     return {
       id: `study:${kind}`,
       label: t(`study.${kind}`),
@@ -207,8 +229,10 @@ export function filterTree(root: TreeNode, query: string): TreeNode | null {
   const q = query.trim().toLowerCase();
   if (!q) return root;
   const walk = (n: TreeNode): TreeNode | null => {
-    const kids = (n.children ?? []).map(walk).filter((c): c is TreeNode => c !== null);
     const hit = !n.placeholder && `${n.label} ${n.detail ?? ""}`.toLowerCase().includes(q);
+    // 群の名前が一致したら子をすべて出す (v1 と同じ)
+    if (hit && n.children && n.id !== "project") return n;
+    const kids = (n.children ?? []).map(walk).filter((c): c is TreeNode => c !== null);
     if (!hit && kids.length === 0) return null;
     return { ...n, children: n.children ? kids : undefined };
   };

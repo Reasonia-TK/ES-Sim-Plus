@@ -17,6 +17,8 @@ export function handleShortcut(e: KeyboardEvent): boolean {
   const mod = IS_MAC ? e.metaKey : e.ctrlKey;
   if (!mod || e.altKey) return false;
   const key = e.key.toLowerCase();
+  // 入力欄に打ちかけの値があれば先に確定する (確定はフォーカスが外れたとき)
+  if ((key === "n" || key === "o" || key === "s") && inTextField(document.activeElement)) (document.activeElement as HTMLElement).blur();
   if (key === "n" && !e.shiftKey) void newDocument();
   else if (key === "o" && !e.shiftKey) void openDocument();
   else if (key === "s" && e.shiftKey) void saveDocumentAs();

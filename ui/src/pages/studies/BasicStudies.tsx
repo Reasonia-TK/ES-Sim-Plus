@@ -10,8 +10,10 @@ import { defaultParticles } from "../../schema/defaults";
 import { Hint } from "../widgets/common";
 import { FnSection } from "../widgets/FnSection";
 import { RunControls } from "../widgets/RunControls";
-import { SolveSummary } from "../widgets/StaticRun";
+import { MeshBuild, SolveSummary } from "../widgets/StaticRun";
 import { StudyShell } from "./StudyShell";
+import { EmitterFields } from "../widgets/EmitterFields";
+import type { Project } from "../../model/project";
 
 export function FemPage() {
   const { t } = useTranslation();
@@ -37,9 +39,24 @@ export function FemPage() {
       )}
       <SchemaField path={["solver", "backend"]} />
       <Hint>{t("femPage.computeHint")}</Hint>
+      <MeshBuild />
       <SolveSummary />
     </>
   );
+}
+
+/** 任意の粒子で q・m が空なら電子の値 (v1 の既定値と同じ) */
+const ELECTRON_Q = -1.602176634e-19;
+const ELECTRON_M = 9.1093837015e-31;
+
+function withSpeciesDefaults(p: Project): Project {
+  const sp = (p.particles as { species?: { preset?: string; q?: number | null; m?: number | null } } | null | undefined)?.species;
+  if (sp?.preset !== "custom" || (sp.q != null && sp.m != null)) return p;
+  const q = structuredClone(p);
+  const s = (q.particles as { species: { q?: number | null; m?: number | null } }).species;
+  s.q ??= ELECTRON_Q;
+  s.m ??= ELECTRON_M;
+  return q;
 }
 
 export function TracePage() {
@@ -48,11 +65,9 @@ export function TracePage() {
   const ps = project.particles as { fn?: unknown; species?: { preset?: string }; emitter?: { kind?: string; energy_dist?: string } | null } | null | undefined;
   const fnOn = ps?.fn !== null && ps?.fn !== undefined;
   const custom = ps?.species?.preset === "custom";
-  const line = (ps?.emitter?.kind ?? "line") === "line";
-  const maxwell = ps?.emitter?.energy_dist === "maxwell";
   const e = ["particles", "emitter"] as const;
   return (
-    <StudyShell settingsKey="particles" defaults={() => defaultParticles(project)} description={t("tracePage.description")} run={<RunControls kind="trace" />}>
+    <StudyShell settingsKey="particles" defaults={() => defaultParticles(project)} description={t("tracePage.description")} run={<RunControls kind="trace" project={() => withSpeciesDefaults(useDocument.getState().project)} />}>
       {fnOn ? (
         <Hint>{t("tracePage.fnReplaces")}</Hint>
       ) : (
@@ -61,26 +76,13 @@ export function TracePage() {
             <SchemaField path={["particles", "species", "preset"]} />
             {custom && (
               <>
-                <SchemaField path={["particles", "species", "q"]} />
-                <SchemaField path={["particles", "species", "m"]} />
+                <SchemaField path={["particles", "species", "q"]} placeholder={`${ELECTRON_Q} (${t("tracePage.electronDefault")})`} />
+                <SchemaField path={["particles", "species", "m"]} placeholder={`${ELECTRON_M} (${t("tracePage.electronDefault")})`} />
               </>
             )}
           </Section>
           <Section title={t("tracePage.emitter")}>
-            <SchemaField path={[...e, "kind"]} />
-            <SchemaField path={[...e, "p1"]} />
-            {line && <SchemaField path={[...e, "p2"]} />}
-            <SchemaField path={[...e, "n"]} />
-            <SchemaField path={[...e, "energy_dist"]} />
-            <SchemaField path={[...e, "energy_ev"]} />
-            <SchemaField path={[...e, "direction_deg"]} />
-            <SchemaField path={[...e, "spread_deg"]} disabled={maxwell} />
-            {maxwell && (
-              <>
-                <SchemaField path={[...e, "temperature_ev"]} />
-                <SchemaField path={[...e, "seed"]} />
-              </>
-            )}
+            <EmitterFields path={[...e]} />
             <Hint>{t("tracePage.emitterCanvasHint")}</Hint>
           </Section>
         </>

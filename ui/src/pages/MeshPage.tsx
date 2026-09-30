@@ -13,9 +13,11 @@ import { Hint } from "./widgets/common";
 import { ListEditor } from "./widgets/ListEditor";
 import { MeshBuild } from "./widgets/StaticRun";
 import { useSelection } from "../model/selection";
+import { Field } from "./inputs";
 
 interface Amr {
   max_level?: number;
+  blocking_factor?: number;
   adaptive?: boolean;
   pic_regrid_every?: number;
   dsmc_regrid_every?: number;
@@ -33,7 +35,17 @@ function AmrEditor() {
       <SchemaField path={[...base, "max_level"]} />
       <SchemaField path={[...base, "refine_boundaries"]} />
       <SchemaField path={[...base, "buffer_cells"]} />
-      <SchemaField path={[...base, "blocking_factor"]} />
+      <Field label={t("mesh.blockingFactor")}>
+        {(id) => (
+          <select id={id} className="input" value={String(amr?.blocking_factor ?? 8)} onChange={(e) => setValue([...base, "blocking_factor"], Number(e.target.value), label)}>
+            {[4, 8, 16].map((n) => (
+              <option key={n} value={n}>
+                {n}×{n}
+              </option>
+            ))}
+          </select>
+        )}
+      </Field>
       <SchemaField path={[...base, "adaptive"]} />
       {amr?.adaptive && (
         <>
@@ -66,11 +78,11 @@ function AmrEditor() {
         title={(r, i) => `R${i + 1} · L${r.level}`}
         emptyText={t("mesh.amrRegionsEmpty")}
         create={() => {
-          // 中央に半分の大きさの矩形 (v1 と同じ)
+          // 中央に幅・高さとも 1/4 の矩形 (v1 と同じ: 0.375〜0.625)
           const cx = (b.x0 + b.x1) / 2;
           const cy = (b.y0 + b.y1) / 2;
-          const hw = (b.x1 - b.x0) / 4;
-          const hh = (b.y1 - b.y0) / 4;
+          const hw = (b.x1 - b.x0) / 8;
+          const hh = (b.y1 - b.y0) / 8;
           return { p1: [cx - hw, cy - hh] as Point, p2: [cx + hw, cy + hh] as Point, level: Math.max(1, amr?.max_level ?? 1) };
         }}
         render={(_, i) => (

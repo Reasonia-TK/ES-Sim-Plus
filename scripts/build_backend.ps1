@@ -5,11 +5,11 @@
 #
 # PyInstaller で backend\dist\es-sim-backend.exe を生成し、Tauri の externalBin が
 # 要求する target triple 付きファイル名 (es-sim-backend-x86_64-pc-windows-msvc.exe)
-# で frontend\src-tauri\binaries\ へ配置する。
+# で ui\src-tauri\binaries\ へ配置する (P6f で v1 の frontend\ から移した)。
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
-$BinDir = Join-Path $Root "frontend\src-tauri\binaries"
+$BinDir = Join-Path $Root "ui\src-tauri\binaries"
 
 # ---- target triple の決定 (rustc があればホスト triple、無ければ MSVC 既定) ----
 $Triple = "x86_64-pc-windows-msvc"

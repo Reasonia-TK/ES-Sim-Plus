@@ -2,7 +2,7 @@
 
 対象パラメータの指定はドット区切りパス (例 "geometry.boundaries.1.voltage") のみを
 受け付ける汎用実装にしている。GUI 側の「プリセット選択」は現在のプロジェクトから
-候補パスを生成する糖衣であり (frontend/src/panels/SweepPanel.tsx)、backend はパスの
+候補パスを生成する糖衣であり (ui/src/model/sweep.ts、v1 は SweepPanel.tsx)、backend はパスの
 意味を一切解釈しない (dict/list を辿って数値を上書きするだけ)。
 
 ケースごとの実行は prompts/78 のバッチ実行 (batch.py) の子プロセス実行関数 (_worker) を

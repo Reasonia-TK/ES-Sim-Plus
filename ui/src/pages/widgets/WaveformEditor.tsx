@@ -56,6 +56,7 @@ export function WaveformEditor({ path }: { path: Path }) {
         )}
       </div>
       {error && <Hint tone="error">{error}</Hint>}
+      <Hint>{t("widgets.csvFormatHint")}</Hint>
       {wf && (
         <>
           <p className="muted">{t("widgets.csvPoints", { n: wf.phase.length })}</p>

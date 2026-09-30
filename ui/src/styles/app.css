@@ -43,6 +43,7 @@
   --color-handle-mid: #4d9aff;
   --color-draw: #4d9aff;
   --color-emitter: #4ddd8c;
+  --color-injector: #f472d0;
   --color-gasbc: #ffb454;
   --color-eedf: #c792ea;
   --color-edgesize: #59c2ff;
@@ -102,6 +103,7 @@
   --color-handle-mid: #1f6fdc;
   --color-draw: #1f6fdc;
   --color-emitter: #17924f;
+  --color-injector: #b8327f;
   --color-gasbc: #c8740e;
   --color-eedf: #8a4fd0;
   --color-edgesize: #1a7fc4;
@@ -1622,4 +1624,16 @@ details > summary {
 
 .text-error {
   color: var(--error);
+}
+
+.status-dismiss {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.status-dismiss:hover {
+  color: var(--text);
 }

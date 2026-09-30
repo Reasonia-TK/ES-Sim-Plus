@@ -1,6 +1,7 @@
 // 衝突断面積のプロセス一覧と LXCat の取り込み (POST /lxcat/parse、取り込むと一覧を置き換える。v1 と同じ)。
 
 import { useRef, useState } from "react";
+import { usePageValue } from "../../app/pageState";
 import { useTranslation } from "react-i18next";
 import { apiPost } from "../../backend/api";
 import { useConnection } from "../../backend/connection";
@@ -24,7 +25,7 @@ export function ProcessList({ path, species, emptyHint }: { path: Path; species:
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [warnings, setWarnings] = useState<string[]>([]);
+  const [warnings, setWarnings] = usePageValue<string[]>(`lxcat.warnings.${path.join(".")}`, []);
   const label = species === "electron" ? t("widgets.electronProcesses") : t("widgets.ionProcesses");
 
   const importFile = async (f: File) => {

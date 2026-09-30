@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// v1 (frontend/) の 1420 と並べて開発できるよう 1421 を固定で使う (Tauri 切替時は devUrl を合わせる)
+// 開発サーバは 1421 に固定する (Tauri の devUrl も 1421。v1 の 1420 と並べて開発していた名残)
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
 export default defineConfig({

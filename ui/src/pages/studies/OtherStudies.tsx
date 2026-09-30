@@ -7,7 +7,7 @@ import { SchemaField, Toggle } from "../../forms/SchemaField";
 import { setValue } from "../../forms/useField";
 import { useDocument } from "../../model/documentStore";
 import { edgeCount, type Point } from "../../model/project";
-import { buildSweepCandidates, DEFAULT_SWEEP, sweepModuleForPath, sweepValues, valueAtPath, type SweepSettings } from "../../model/sweep";
+import { buildSweepCandidates, DEFAULT_SWEEP, prepareSweepProject, sweepModuleForPath, sweepValues, valueAtPath, type SweepSettings } from "../../model/sweep";
 import { DEFAULT_DSMC_BOUNDARY, defaultDsmc, defaultTl } from "../../schema/defaults";
 import { formatNumber } from "../../util/format";
 import { dsmcParticlesPerCell } from "../../util/runHints";
@@ -19,6 +19,8 @@ import { TlImport } from "../widgets/TlImport";
 import { RunControls } from "../widgets/RunControls";
 import { StudyShell } from "./StudyShell";
 import { useSelection } from "../../model/selection";
+import { sortedJobs, useJobs } from "../../jobs/jobsStore";
+import { useStatic } from "../../results/staticResults";
 
 interface DsmcBoundary {
   edges: number[];
@@ -107,7 +109,13 @@ export function DsmcPage() {
   const { t } = useTranslation();
   const project = useDocument((s) => s.project);
   const d = (project.dsmc ?? {}) as { n_particles?: number; mesh_scale?: number };
-  const ppc = dsmcParticlesPerCell(project, d.n_particles ?? 50000, d.mesh_scale ?? 1);
+  const lastDsmc = useJobs((s) => sortedJobs(s.jobs, "dsmc").find((j) => j.has_result)?.id);
+  const dsmcCells = useJobs((s) => (lastDsmc ? (s.results[lastDsmc]?.data as { mesh?: { triangles?: unknown[] } } | undefined)?.mesh?.triangles?.length : undefined));
+  const femCells = useStatic((s) => s.mesh?.result.triangles.length ?? s.solve?.result.mesh.triangles.length);
+  const cellsActual = dsmcCells ?? femCells;
+  const nPart = d.n_particles ?? 50000;
+  const ppc = dsmcParticlesPerCell(project, nPart, d.mesh_scale ?? 1, cellsActual);
+  const nCells = Math.max(1, Math.round(nPart / ppc));
   const sel = useSelection((s) => s.selectedPlacement);
   const P = ["dsmc"] as const;
   return (
@@ -138,7 +146,15 @@ export function DsmcPage() {
         <SchemaField path={[...P, "init_temperature_k"]} />
         <SchemaField path={[...P, "mesh_scale"]} />
         <SchemaField path={[...P, "n_particles"]} />
-        <Hint tone={ppc < 20 ? "warn" : undefined}>{t("dsmcPage.perCell", { n: formatNumber(Math.round(ppc)) })}</Hint>
+        <Hint tone={ppc < 20 ? "warn" : undefined}>
+          {t("dsmcPage.cellsAdvice", {
+            approx: cellsActual === undefined ? t("dsmcPage.approx") : "",
+            cells: nCells.toLocaleString(),
+            lo: (nCells * 20).toLocaleString(),
+            hi: (nCells * 50).toLocaleString(),
+          })}{" "}
+          {t("dsmcPage.perCell", { n: ppc.toFixed(1) })}
+        </Hint>
         <SchemaField path={[...P, "dt"]} />
         <SchemaField path={[...P, "n_steps"]} />
         <SchemaField path={[...P, "avg_steps"]} />
@@ -196,7 +212,12 @@ export function SweepPage() {
   const label = t("study.sweep");
   const set = (patch: Partial<SweepSettings>) => setValue(["ui", "sweep"], { ...s, ...patch }, label);
   const values = sweepValues(s);
-  const current = s.param_path ? valueAtPath(project, s.param_path) : undefined;
+  // 送る写しで見る (未設定の γ は 0、1D の RF は配列にしてから)
+  const prepared = useMemo(() => (s.param_path ? prepareSweepProject(project, s.param_path) : project), [project, s.param_path]);
+  const current = s.param_path ? valueAtPath(prepared, s.param_path) : undefined;
+  const unset = s.param_path !== "" && valueAtPath(project, s.param_path) === undefined && current !== undefined;
+  // 1 ケースのスレッド数 (対象のモジュールの設定、無ければ 1)
+  const moduleThreads = Number((project[sweepModuleForPath(s.param_path || "pic.x")] as { threads?: number } | null | undefined)?.threads ?? 1) || 1;
   return (
     <>
       <p className="hint">{t("sweepPage.description")}</p>
@@ -220,7 +241,9 @@ export function SweepPage() {
       )}
       {s.param_path && (
         <Hint tone={current === undefined ? "warn" : undefined}>
-          {current === undefined ? t("sweepPage.invalidPath") : t("sweepPage.current", { v: formatNumber(current), module: sweepModuleForPath(s.param_path) })}
+          {current === undefined
+            ? t("sweepPage.invalidPath")
+            : t("sweepPage.current", { v: formatNumber(current), module: t(`jobs.kind.${sweepModuleForPath(s.param_path)}`) }) + (unset ? ` ${t("sweepPage.unsetZero")}` : "")}
         </Hint>
       )}
       <Field label={t("sweepPage.values")}>
@@ -269,11 +292,19 @@ export function SweepPage() {
           />
         )}
       </Field>
+      <Hint>
+        {t("sweepPage.threads", {
+          p: s.parallel,
+          t: moduleThreads,
+          total: s.parallel * moduleThreads,
+        })}
+      </Hint>
       <RunControls
         kind="sweep"
         runLabel={t("sweepPage.runSweep")}
         blocked={!s.param_path || current === undefined ? t("sweepPage.needPath") : values.length === 0 ? t("sweepPage.noValues") : null}
         options={() => ({ param_path: s.param_path, values, parallel: s.parallel, module: sweepModuleForPath(s.param_path) })}
+        project={() => prepareSweepProject(useDocument.getState().project, s.param_path)}
       />
       <SweepCases />
     </>

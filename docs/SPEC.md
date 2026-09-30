@@ -246,10 +246,11 @@ ES-Sim/
 │   ├── pyproject.toml
 │   ├── es_sim/          # server / schema / geometry / meshing / fem / particles / pic / backend
 │   └── tests/           # pytest(解析解との比較テスト)
-└── frontend/
-    ├── package.json     # React + Vite + TypeScript
-    ├── src/             # App / api / types / canvas/CadCanvas
-    └── src-tauri/       # Tauri 2 (Rust シェル)
+└── ui/                 # UI v2 (prompts/130。v1 の frontend/ は P6f で削除)
+    ├── package.json     # React 19 + Vite + TypeScript
+    ├── src/             # app / model / pages / graphics (WebGL2) / plots / jobs / results / io / i18n
+    ├── e2e/             # E2E (Playwright)
+    └── src-tauri/       # Tauri 2 (Rust シェル、サイドカーの起動と停止)
 ```
 
 ## 12. ロードマップと完了基準

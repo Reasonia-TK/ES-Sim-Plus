@@ -129,6 +129,9 @@ function DisplayPopover({ scene, controls, run }: { scene: Scene; controls: Scen
   const { t } = useTranslation();
   const vs = useViewer();
   const follow = useResultsView((s) => s.follow);
+  const sheathContour = useResultsView((s) => s.sheathContour);
+  const sheathAlpha = useResultsView((s) => s.sheathAlpha);
+  const setSheath = useResultsView((s) => s.setSheath);
   const [rfMonitor, setRfMonitor] = useChartPref("viewer.rfMonitor", true);
   const overlay = (k: OverlayKey) => (
     <div key={k} className="display-toggle">
@@ -160,6 +163,25 @@ function DisplayPopover({ scene, controls, run }: { scene: Scene; controls: Scen
           <div className="display-toggle">
             <Toggle checked={follow} onChange={(v) => useResultsView.getState().setFollow(v)} label={t("results.follow")} />
           </div>
+          {run && (run.kind === "pic" || run.kind === "fluid2d") && (
+            <div className="display-row">
+              <span className="display-label">{t("charts.sheath2d")}</span>
+              <div className="range-row">
+                <Toggle checked={sheathContour} onChange={(v) => setSheath({ contour: v })} label="n_e/n_i = α" />
+                <input
+                  type="range"
+                  min={0.05}
+                  max={0.95}
+                  step={0.05}
+                  value={sheathAlpha}
+                  aria-label={t("charts.alpha", { a: sheathAlpha.toFixed(2) })}
+                  title={t("charts.alpha", { a: sheathAlpha.toFixed(2) })}
+                  onChange={(e) => setSheath({ alpha: Number(e.target.value) })}
+                />
+                <span className="mono small">{sheathAlpha.toFixed(2)}</span>
+              </div>
+            </div>
+          )}
           {controls.modes.length > 0 && (
             <div className="display-row">
               <span className="display-label">{t("results.modeLabel")}</span>

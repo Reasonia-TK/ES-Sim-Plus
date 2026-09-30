@@ -3,6 +3,7 @@
 
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { useDocument } from "../model/documentStore";
 
 /** 2D で場を塗る種類 */
 export type Field2dKind = "pic" | "fluid2d" | "dsmc";
@@ -101,6 +102,12 @@ export const useResultsView = create<ResultsViewState>()(
     },
   ),
 );
+
+// 別の文書にしたら (新規・開く・サンプル・復元) 出している実行を外す (前の文書の結果の上に新しい文書の
+// ジオメトリを描かない。結果付きのファイルを開いたときは、読み込んだ実行をこのあとで出す)
+useDocument.subscribe((s, prev) => {
+  if (s.docSerial !== prev.docSerial) useResultsView.getState().setActiveRun(null);
+});
 
 /** グラフの表示の選択 (保存する。型が違う値や未設定は既定値) */
 export function useChartPref(key: string, def: boolean): [boolean, (v: boolean) => void];

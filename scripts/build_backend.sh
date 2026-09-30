@@ -5,11 +5,11 @@
 #   bash scripts/build_backend.sh
 #
 # PyInstaller で backend/dist/es-sim-backend を生成し、Tauri の externalBin が
-# 要求する target triple 付きファイル名で frontend/src-tauri/binaries/ へ配置する。
+# 要求する target triple 付きファイル名で ui/src-tauri/binaries/ へ配置する (P6f で v1 の frontend/ から移した)。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN_DIR="$ROOT/frontend/src-tauri/binaries"
+BIN_DIR="$ROOT/ui/src-tauri/binaries"
 
 # ---- target triple の決定 (rustc があればホスト triple、無ければ uname から推定) ----
 if command -v rustc >/dev/null 2>&1; then

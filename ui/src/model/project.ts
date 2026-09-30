@@ -201,8 +201,10 @@ export function normalizeProject(raw: unknown): { project: Project; results: unk
   project.mesh = mesh;
   // 旧形式: pic.collector (単一) → pic.collectors (v1 と同じ移行)
   const pic = project.pic as Record<string, unknown> | null | undefined;
-  if (pic && pic.collector && !pic.collectors) {
-    pic.collectors = [pic.collector];
+  // collectors が空のときも移し、ラベルが無ければ C1 (v1 と同じ)
+  if (pic && pic.collector && (!Array.isArray(pic.collectors) || pic.collectors.length === 0)) {
+    const c = pic.collector as Record<string, unknown>;
+    pic.collectors = [{ label: "C1", ...c }];
     delete pic.collector;
   }
   return { project, results: results ?? null };

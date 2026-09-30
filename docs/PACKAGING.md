@@ -15,9 +15,9 @@ Tauri の **サイドカー (`bundle.externalBin`)** としてアプリに同梱
 | `backend/es_sim_server.spec` | PyInstaller 仕様 (gmsh 共有ライブラリ同梱、uvicorn hidden imports) |
 | `scripts/build_backend.ps1` | Windows 用バックエンドビルド + 配置 |
 | `scripts/build_backend.sh` | Linux/macOS 用 (検証用) |
-| `frontend/src-tauri/binaries/` | サイドカー配置先 (**target triple 付きファイル名**。コミットしない) |
-| `frontend/src-tauri/tauri.conf.json` | `bundle.externalBin: ["binaries/es-sim-backend"]` |
-| `frontend/src-tauri/src/main.rs` | サイドカーの spawn / kill (配布ビルドのみ) |
+| `ui/src-tauri/binaries/` | サイドカー配置先 (**target triple 付きファイル名**。コミットしない) |
+| `ui/src-tauri/tauri.conf.json` | `bundle.externalBin: ["binaries/es-sim-backend"]` |
+| `ui/src-tauri/src/main.rs` | サイドカーの spawn / kill (配布ビルドのみ、終了時はプロセスの木ごと) |
 
 ## Windows での配布ビルド全手順
 
@@ -34,19 +34,21 @@ pip install pyinstaller
 # 2. バックエンドを単一 exe 化して Tauri へ配置
 cd ..
 powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1
-#  → frontend\src-tauri\binaries\es-sim-backend-x86_64-pc-windows-msvc.exe が生成される
+#  → ui\src-tauri\binaries\es-sim-backend-x86_64-pc-windows-msvc.exe が生成される
+#  (uv で管理している venv なら、依存を変えずに: cd backend; uv run --no-sync --with pyinstaller pyinstaller --clean --noconfirm es_sim_server.spec
+#   のあと backend\dist\es-sim-backend.exe を上の名前で ui\src-tauri\binaries\ へ置く)
 
-# 3. フロントエンド + Tauri の配布ビルド
-cd frontend
+# 3. フロントエンド (UI v2) + Tauri の配布ビルド
+cd ui
 npm install          # 初回のみ
 npm run tauri build
 ```
 
 生成物の場所:
 
-- インストーラ: `frontend\src-tauri\target\release\bundle\nsis\ES-Sim_<ver>_x64-setup.exe`
+- インストーラ: `ui\src-tauri\target\release\bundle\nsis\ES-Sim_<ver>_x64-setup.exe`
   (および `msi\ES-Sim_<ver>_x64_en-US.msi`)
-- 実行ファイル本体: `frontend\src-tauri\target\release\es-sim.exe`
+- 実行ファイル本体: `ui\src-tauri\target\release\es-sim.exe` (`npm run tauri build -- --no-bundle` ならインストーラを作らずこれだけ)
   (同ディレクトリに `es-sim-backend-x86_64-pc-windows-msvc.exe` が並置される)
 
 Tauri の `externalBin` は **target triple 付きのファイル名を要求する**
@@ -74,8 +76,8 @@ Tauri の `externalBin` は **target triple 付きのファイル名を要求す
 - 使用中プロセスの確認: `netstat -ano | findstr :8317` → `taskkill /PID <pid> /F`
 - 前回のアプリが異常終了して `es-sim-backend-*.exe` が残っている場合は
   タスクマネージャーから終了する
-- 恒久的にポートを変える場合は `main.rs` の `--port` 引数とフロントエンドの
-  接続先 (`src/api.ts` 等の 8317) を揃えて変更する
+- ポートはアプリの「ヘルプ › バックエンドの接続…」(ステータスバーのバックエンドの表示をクリック) で変える。
+  AppConfig の `backend-port.txt` に保存され、次に起動したときサイドカーもその番号で起動する
 
 ## トラブルシューティング
 
@@ -92,10 +94,12 @@ Tauri の `externalBin` は **target triple 付きのファイル名を要求す
 - **起動が遅い**: onefile 形式は初回起動時に一時フォルダへ自己解凍するため
   数秒かかる。恒常的に問題なら spec を onedir 構成へ変更する
   (その場合 externalBin ではなく `bundle.resources` での同梱に変更が必要)
-- **`failed to bundle ... externalBin`**: `frontend/src-tauri/binaries/` に
+- **`failed to bundle ... externalBin`**: `ui/src-tauri/binaries/` に
   triple 付きバイナリが無い。`scripts/build_backend.*` を先に実行する
-- **サイドカーが終了しない**: アプリ強制終了時に子プロセスが残ることがある。
-  タスクマネージャーで `es-sim-backend` を終了する
+- **サイドカーが終了しない**: 通常の終了ではプロセスの木ごと止める (PyInstaller の onefile は展開役と本体の
+  2 つのプロセスで動く)。アプリを強制終了したときは残ることがあるので、タスクマネージャーで `es-sim-backend` を終了する
+- **`Found version mismatched Tauri packages`**: `ui/package.json` の `@tauri-apps/*` と `ui/src-tauri/Cargo.lock` の
+  クレートのマイナー版をそろえる (今は api 2.11・plugin-fs 2.5・plugin-dialog 2.7)
 
 ## Linux での検証 (この構成の動作確認)
 
@@ -103,7 +107,7 @@ Tauri の `externalBin` は **target triple 付きのファイル名を要求す
 cd backend && pip install -e . pyinstaller
 bash ../scripts/build_backend.sh     # dist/es-sim-backend → binaries/es-sim-backend-<triple>
 ./dist/es-sim-backend --port 8317 &  # /health, /solve が応答することを確認
-cd ../frontend/src-tauri && cargo check
+cd ../ui/src-tauri && cargo check
 ```
 
 ## GitHub Actions によるリリースビルド

@@ -8,10 +8,13 @@ __pycache__/
 # Node
 node_modules/
 dist/
+# Playwright (UI v2 の E2E) の結果
+ui/test-results/
+ui/playwright-report/
 
 # Rust / Tauri
-frontend/src-tauri/target/
-frontend/src-tauri/gen/
+ui/src-tauri/target/
+ui/src-tauri/gen/
 
 # 配布パッケージ (PyInstaller / サイドカー。binaries/ 内は同梱の .gitignore で除外)
 backend/build/

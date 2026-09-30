@@ -44,7 +44,7 @@ from .fluid2d import build_fluid2d_result
 from .gfluid import make_fluid2d_simulation
 from .schema import Project
 
-# frontend/src/types.ts の PicDiag と同じキー順 (toDiagArray が組み立てる行の形に合わせる)。
+# UI の PicDiag (ui/src/results/types.ts、v1 は frontend/src/types.ts) と同じキー順 (結果の束の history の行の形)。
 # pic.py の history はこのキー全てを常に持つ (欠損なし) ので単純な列→行変換でよい。
 _DIAG_KEYS = (
     "t", "ke_e", "ke_i", "fe", "n_e", "n_i", "wall_e", "wall_i", "phi_min", "phi_max",
@@ -59,7 +59,7 @@ def _prepare_project_dict(raw: dict) -> dict:
     """入力 JSON をバッチ実行用に前処理する。
 
     - 「結果付き保存」ファイルが誤って渡された場合に備え、Project スキーマ外の
-      results キーを除去する (frontend/App.tsx の loadProject と同じ分離)。
+      results キーを除去する (UI の normalizeProject、v1 の loadProject と同じ分離)。
     - pic.injection.emitter を particles.emitter で上書きする
       (App.tsx の withInjectionEmitter と同じ合成。PicPanel は編集用の複製を持たず、
       保存/送信時に都度同期する設計のため、未合成の手書き JSON にもここで対応する)。
@@ -81,7 +81,7 @@ def _prepare_project_dict(raw: dict) -> dict:
 
 
 def _build_results_bundle(sim: PicSimulation, step_offset: int, elapsed_s: float) -> dict:
-    """ResultsBundle.pic (frontend/src/types.ts) と同じ形の dict を組み立てる。
+    """結果付き保存の pic (ui/src/results/bundle.ts、v1 の ResultsBundle.pic) と同じ形の dict を組み立てる。
 
     server.py の _stream_run が started/done メッセージを組み立てる変換をそのまま流用する。
     history は pic.py が返す「列ごとの辞書」なので、frontend の toDiagArray 相当の

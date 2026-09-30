@@ -60,7 +60,7 @@ export function RfMonitor({ title, electrodes, t, height = 110 }: { title: strin
         )}
         {more > 0 && <span className="muted small">{tr("charts.rfMore", { n: more })}</span>}
       </div>
-      <LineChart x={data.x} series={data.series} xLabel={`t [${data.unit.label}]`} yLabel="V [V]" height={height} markers={markers} legend={data.series.length > 1} />
+      <LineChart x={data.x} series={data.series} xLabel={`t [${data.unit.label}]`} yLabel="V [V]" height={height} markers={markers} />
     </div>
   );
 }

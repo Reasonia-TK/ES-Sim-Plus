@@ -3,6 +3,7 @@
 
 import type { Project } from "../model/project";
 import { isStale, meshKey, solveKey, type MeshEntry, type SolveEntry } from "../results/staticResults";
+import { fieldStats } from "./fieldScale";
 import { EMPTY_SCENE, type Scene, type ScalarField } from "./scene";
 import type { StaticQuantity } from "./viewerStore";
 
@@ -35,7 +36,9 @@ export function potentialOf(s: SolveEntry): ScalarField {
 export function fieldAbsOf(s: SolveEntry): ScalarField {
   let f = fieldCache.get(s);
   if (!f) {
-    f = { mesh: s.view, values: s.eAbs, location: "element", label: "|E|", unit: "V/m" };
+    // 自動の範囲は 0〜|E| の最大 (v1 と同じ。最小からだと弱い場の差が誇張される)
+    const st = fieldStats(s.eAbs);
+    f = { mesh: s.view, values: s.eAbs, location: "element", label: "|E|", unit: "V/m", stats: { min: 0, max: Number.isFinite(s.result.e_abs_max) ? s.result.e_abs_max : st.max, minPositive: st.minPositive } };
     fieldCache.set(s, f);
   }
   return f;
@@ -51,6 +54,10 @@ export function staticScene(src: StaticSource, quantity: StaticQuantity, project
       mesh: mesh.view,
       fillRegions: true,
     };
+  }
+  if (solve && quantity === "none") {
+    // 背景なし (粒子軌道の背景に、v1 と同じ)
+    return { ...EMPTY_SCENE, stale: isStale(solve, solveKey, project) };
   }
   if (solve) {
     const v = potentialOf(solve);

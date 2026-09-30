@@ -1,5 +1,6 @@
 // PIC-MCC (1D) と流体 (1D・2D) の設定ページ (v1 Pic1dPanel・Fluid1dPanel・Fluid2dPanel の設定部分)。
 
+import { usePageValue } from "../../app/pageState";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { apiGet } from "../../backend/api";
@@ -19,6 +20,7 @@ import { PhaseBinHint, RfCycleHint } from "../widgets/RunHints";
 import { MccBlock } from "./PicPage";
 import { RunControls } from "../widgets/RunControls";
 import { StudyShell } from "./StudyShell";
+import type { Project } from "../../model/project";
 
 interface Electrode {
   voltage_rf?: unknown;
@@ -51,9 +53,10 @@ interface Preset {
 function Presets() {
   const { t } = useTranslation();
   const connected = useConnection((s) => s.status === "connected");
-  const [presets, setPresets] = useState<Record<string, Preset> | null>(null);
+  const [presets, setPresets] = usePageValue<Record<string, Preset> | null>("pic1d.presets", null);
   const [error, setError] = useState<string | null>(null);
-  const [key, setKey] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [key, setKey] = usePageValue("pic1d.presetKey", "");
   useEffect(() => {
     if (!connected || presets) return;
     let alive = true;
@@ -61,16 +64,23 @@ function Presets() {
       .then((p) => {
         if (!alive) return;
         setPresets(p);
-        setKey(Object.keys(p)[0] ?? "");
+        if (!key) setKey(Object.keys(p)[0] ?? "");
         setError(null);
       })
       .catch((e) => alive && setError(e instanceof Error ? e.message : String(e)));
     return () => {
       alive = false;
     };
-  }, [connected, presets]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, presets, attempt]);
+  // 取れなかったら 3 秒ごとに取り直す
+  useEffect(() => {
+    if (!error || !connected) return;
+    const id = setTimeout(() => setAttempt((n) => n + 1), 3000);
+    return () => clearTimeout(id);
+  }, [error, connected, attempt]);
   if (!connected) return <Hint>{t("widgets.needBackend")}</Hint>;
-  if (error) return <Hint tone="error">{t("pic1dPage.presetsError", { error })}</Hint>;
+  if (error) return <Hint tone="error">{t("pic1dPage.presetsError", { error })} {t("pic1dPage.presetsRetry")}</Hint>;
   if (!presets) return null;
   const p = presets[key];
   return (
@@ -96,6 +106,12 @@ function Presets() {
       {p?.note && <Hint tone="warn">{p.note}</Hint>}
     </div>
   );
+}
+
+/** 電子の係数モデルが Boltzmann なのに係数の表が無い (backend の validator と同じ条件) */
+function boltzMissing(p: Project, key: "fluid1d" | "fluid2d"): boolean {
+  const b = p[key] as { electron_model?: string; boltz_table?: unknown } | null | undefined;
+  return b?.electron_model === "boltzmann" && !b.boltz_table;
 }
 
 export function Pic1dPage() {
@@ -130,12 +146,12 @@ export function Pic1dPage() {
       <Section title={t("studyCommon.run")}>
         <SchemaField path={[...P, "see_energy_ev"]} />
         <SchemaField path={[...P, "dt"]} />
-        <RfCycleHint freqs={freqs} dt={blk.dt} />
+        <RfCycleHint kind="pic1d" freqs={freqs} dt={blk.dt} nSteps={blk.n_steps ?? 2000} />
         <SchemaField path={[...P, "n_steps"]} />
         <SchemaField path={[...P, "frame_every"]} />
         <SchemaField path={[...P, "avg_steps"]} placeholder={t("studyCommon.last25")} />
         <SchemaField path={[...P, "phase_bins"]} />
-        <PhaseBinHint freqs={freqs} dt={blk.dt} bins={blk.phase_bins ?? 40} avgSteps={blk.avg_steps} nSteps={blk.n_steps ?? 2000} />
+        <PhaseBinHint kind="pic1d" freqs={freqs} dt={blk.dt} bins={blk.phase_bins ?? 40} avgSteps={blk.avg_steps} nSteps={blk.n_steps ?? 2000} />
         <SchemaField path={[...P, "wall_iedf_bins"]} />
       </Section>
       <Section title={t("pic1dPage.eedfRegions")}>
@@ -223,7 +239,7 @@ export function Fluid1dPage() {
       }
     });
   return (
-    <StudyShell settingsKey="fluid1d" defaults={defaultFluid1d} description={t("fluidPage.description1d")} run={<RunControls kind="fluid1d" />}>
+    <StudyShell settingsKey="fluid1d" defaults={defaultFluid1d} description={t("fluidPage.description1d")} run={<RunControls kind="fluid1d" blocked={boltzMissing(project, "fluid1d") ? t("widgets.boltzNoTable") : null} />}>
       <div className="button-row tight">
         <button type="button" className="button small" disabled={!pic1d} onClick={importPic1d} title={pic1d ? undefined : t("fluidPage.noPic1d")}>
           {t("fluidPage.importPic1d")}
@@ -242,12 +258,12 @@ export function Fluid1dPage() {
       <FluidPhysics base="fluid1d" />
       <Section title={t("studyCommon.run")}>
         <SchemaField path={[...P, "dt"]} />
-        <RfCycleHint freqs={freqs} dt={blk.dt} />
+        <RfCycleHint kind="fluid1d" freqs={freqs} dt={blk.dt} nSteps={blk.n_steps ?? 20000} />
         <SchemaField path={[...P, "n_steps"]} />
         <SchemaField path={[...P, "frame_every"]} />
         <SchemaField path={[...P, "avg_steps"]} placeholder={t("studyCommon.last25")} />
         <SchemaField path={[...P, "phase_bins"]} />
-        <PhaseBinHint freqs={freqs} dt={blk.dt} bins={blk.phase_bins ?? 40} avgSteps={blk.avg_steps} nSteps={blk.n_steps ?? 20000} />
+        <PhaseBinHint kind="fluid1d" freqs={freqs} dt={blk.dt} bins={blk.phase_bins ?? 40} avgSteps={blk.avg_steps} nSteps={blk.n_steps ?? 20000} />
         <SchemaField path={[...P, "wall_iedf_bins"]} />
       </Section>
     </StudyShell>
@@ -273,7 +289,7 @@ export function Fluid2dPage() {
       dst.electron_processes = JSON.parse(JSON.stringify(src.electron_processes ?? []));
     });
   return (
-    <StudyShell settingsKey="fluid2d" defaults={defaultFluid2d} description={t("fluidPage.description2d")} run={<RunControls kind="fluid2d" />}>
+    <StudyShell settingsKey="fluid2d" defaults={defaultFluid2d} description={t("fluidPage.description2d")} run={<RunControls kind="fluid2d" blocked={boltzMissing(project, "fluid2d") ? t("widgets.boltzNoTable") : null} />}>
       <div className="button-row tight">
         <button type="button" className="button small" disabled={!hasF1} onClick={importFluid1d} title={hasF1 ? undefined : t("fluidPage.noFluid1d")}>
           {t("fluidPage.importFluid1d")}
@@ -285,12 +301,12 @@ export function Fluid2dPage() {
         <SchemaField path={[...P, "linear_solver"]} />
         {blk.linear_solver !== "direct" && <SchemaField path={[...P, "threads"]} />}
         <SchemaField path={[...P, "dt"]} />
-        <RfCycleHint freqs={freqs} dt={blk.dt} />
+        <RfCycleHint kind="fluid2d" freqs={freqs} dt={blk.dt} nSteps={blk.n_steps ?? 20000} />
         <SchemaField path={[...P, "n_steps"]} />
         <SchemaField path={[...P, "frame_every"]} />
         <SchemaField path={[...P, "avg_steps"]} placeholder={t("studyCommon.last25")} />
         <SchemaField path={[...P, "phase_bins"]} />
-        <PhaseBinHint freqs={freqs} dt={blk.dt} bins={blk.phase_bins ?? 0} avgSteps={blk.avg_steps} nSteps={blk.n_steps ?? 20000} />
+        <PhaseBinHint kind="fluid2d" freqs={freqs} dt={blk.dt} bins={blk.phase_bins ?? 0} avgSteps={blk.avg_steps} nSteps={blk.n_steps ?? 20000} />
       </Section>
     </StudyShell>
   );

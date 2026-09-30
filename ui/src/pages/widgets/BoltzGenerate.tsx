@@ -1,13 +1,14 @@
 // boltzpm で係数の表を作る (v1 の BoltzSection の生成と同じ条件。条件は文書に保存しない)。できた表は
 // ジョブの完了で流体の設定の boltz_table に入る (jobs/effects.ts)。
 
-import { useState } from "react";
+import { usePageValue } from "../../app/pageState";
 import { useTranslation } from "react-i18next";
 import { DEFAULT_BOLTZ_OPTS } from "../../schema/defaults";
 import { formatNumber, parseNumber } from "../../util/format";
 import { CommitText, Field } from "../inputs";
 import { Section } from "../../forms/blocks";
 import { RunControls } from "./RunControls";
+import { Hint } from "./common";
 
 type Opts = typeof DEFAULT_BOLTZ_OPTS;
 
@@ -22,7 +23,7 @@ const FIELDS: { key: keyof Opts; unit?: string; integer?: boolean; nullable?: bo
 
 export function BoltzGenerate({ module }: { module: "fluid1d" | "fluid2d" }) {
   const { t } = useTranslation();
-  const [opts, setOpts] = useState<Opts>({ ...DEFAULT_BOLTZ_OPTS });
+  const [opts, setOpts] = usePageValue<Opts>(`boltz.opts.${module}`, { ...DEFAULT_BOLTZ_OPTS });
   const bad = !(opts.en_max_td >= opts.en_min_td);
   return (
     <Section title={t("jobs.boltzTitle")} defaultOpen={false}>
@@ -47,6 +48,7 @@ export function BoltzGenerate({ module }: { module: "fluid1d" | "fluid2d" }) {
           )}
         </Field>
       ))}
+      <Hint>{t("jobs.boltzEpsAuto")}</Hint>
       <RunControls
         kind="boltz"
         runLabel={t("jobs.boltzGenerate")}

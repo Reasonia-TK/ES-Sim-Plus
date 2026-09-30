@@ -21,6 +21,12 @@ interface BoltzTable {
   warnings?: string[];
 }
 
+/** 生成したときの条件 (E/N の範囲・点の数・エネルギー格子・角度の分割・ε_max) */
+function genOpts(o: Record<string, unknown>): string {
+  const f = (v: unknown) => (typeof v === "number" ? formatNumber(v) : "-");
+  return `E/N ${f(o.en_min_td)}–${f(o.en_max_td)} Td · ${f(o.n_points)} · dε ${f(o.d_eps_ev)} eV · nθ ${f(o.n_theta)} · ε_max ${o.eps_max_ev == null ? "auto" : `${f(o.eps_max_ev)} eV`}`;
+}
+
 function range(a: number[]): string {
   return a.length ? `${formatNumber(Math.min(...a))} – ${formatNumber(Math.max(...a))}` : "-";
 }
@@ -59,6 +65,12 @@ export function BoltzSection({ path }: { path: Path }) {
             <span>{range(table.mean_energy_ev)}</span>
             <span>E/N [Td]</span>
             <span>{range(table.en_td)}</span>
+            {table.opts && (
+              <>
+                <span>{t("widgets.boltzGenOpts")}</span>
+                <span className="small">{genOpts(table.opts)}</span>
+              </>
+            )}
             {table.opts?.boltzpm_version !== undefined && (
               <>
                 <span>boltzpm</span>

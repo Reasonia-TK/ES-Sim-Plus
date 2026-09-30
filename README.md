@@ -10,7 +10,7 @@
 
 平面上に電極・誘電体・空間電荷をスケッチし、そのまま静電場解析(P1-FEM)・荷電粒子の軌道追跡・
 自己無撞着な PIC-MCC 粒子シミュレーションへと展開できる。バックエンドは Python(FastAPI ローカル
-サーバー)、フロントは Tauri 2 + React + TypeScript の Canvas 2D ビューア。
+サーバー)、フロントは Tauri 2 + React + TypeScript (UI v2、WebGL2 のビューアと uPlot のグラフ)。
 
 **主な機能**: CADスケッチ / 静電場FEM / 粒子軌道追跡 / PIC-MCC / 軸対称(r-z)座標系 /
 構造格子メッシュ / IEDF・IADF(複数コレクタ) / RF周期の位相分解アニメーション / 続き実行 —
@@ -22,9 +22,7 @@
 ## 構成
 
 - `backend/` — Python 計算コア(FastAPI ローカルサーバー、gmsh メッシュ、P1-FEM、粒子・PIC-MCC)
-- `frontend/` — Tauri 2 + React + TypeScript(CADキャンバス・結果ビューア、v1 の UI)
-- `ui/` — UI v2 (作り直し中、React 19 + Vite 8。[prompts/130](prompts/130-ui-v2-plan.md))。完成したら Tauri を
-  こちらに切り替える
+- `ui/` — UI v2 (React 19 + Vite 8、Tauri 2 のアプリ `ui/src-tauri`。[prompts/130](prompts/130-ui-v2-plan.md))
 - `examples/` — サンプルプロジェクト(JSON、詳細は下記)
 - `docs/SPEC.md` — 仕様書
 - `docs/DSMC.md` — DSMC(定常ガス流れ)のアルゴリズム解説
@@ -65,9 +63,9 @@ uv sync --extra dev
 ### 2. フロントエンド(別ターミナル)
 
 ```powershell
-cd frontend
+cd ui
 npm install
-npm run tauri dev
+npm run tauri dev   # Tauri のアプリ (UI v2)。ブラウザだけなら npm run dev → http://localhost:1421
 ```
 
 > `package.json` には `@tauri-apps/plugin-dialog` / `@tauri-apps/plugin-fs`(保存/読込ダイアログ用)
@@ -76,16 +74,16 @@ npm run tauri dev
 
 アプリが起動したらツールバー右上に `backend v0.1.0` と表示されれば疎通OK。
 
-Tauri を使わずブラウザで動作確認する場合は `npm run dev` → http://localhost:1420
-
-### UI v2(作り直し中、prompts/130)
+### UI v2 のテスト(prompts/130)
 
 ```powershell
 cd ui
-npm install
-npm run dev      # → http://localhost:1421 (v1 の 1420 と並べて使える。バックエンドは上と同じ)
-npm test         # Vitest
+npm run typecheck   # 型検査 (E2E のコードも)
+npm test            # Vitest
+npm run e2e         # E2E (Playwright。バックエンドと UI を別のポートで立て、PC の Chrome で操作する)
 ```
+
+v1 の UI (`frontend/`) は P6f で削除した (コミット b5c5cb5 までの履歴に残る)。
 
 ## バッチ実行(パラメータスイープ、prompts/78)
 

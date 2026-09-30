@@ -59,6 +59,25 @@ export function placeEmitter(p: P, p1: Point, p2: Point): PlaceResult {
   return { index: 0, enabledStudy: enabled };
 }
 
+/** PIC の注入のエミッタの 2 点 (注入が無ければ既定の注入を作る。種類・数などはそのまま) */
+export function placeInjectionEmitter(p: P, p1: Point, p2: Point): PlaceResult {
+  const { obj, enabled } = ensureStudy(p, "pic", () => structuredClone(DEFAULT_PIC));
+  let inj = obj.injection as Obj | null | undefined;
+  if (!inj) {
+    inj = { emitter: { ...defaultEmitter(p as Project), p1: copy(p1), p2: copy(p2) }, species: "electron", current_a_per_m: 1e-4 };
+    obj.injection = inj;
+    return { index: 0, enabledStudy: enabled };
+  }
+  const em = inj.emitter as Obj | null | undefined;
+  if (em) {
+    em.p1 = copy(p1);
+    em.p2 = copy(p2);
+  } else {
+    inj.emitter = { ...defaultEmitter(p as Project), p1: copy(p1), p2: copy(p2) };
+  }
+  return { index: 0, enabledStudy: enabled };
+}
+
 export function placeCollector(p: P, p1: Point, p2: Point): PlaceResult {
   const { obj, enabled } = ensureStudy(p, "pic", () => structuredClone(DEFAULT_PIC));
   const items = list<{ label?: string }>(obj, "collectors");

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { askConfirm } from "../app/dialogs";
 import { errorText, logError } from "../app/messages";
 import { useConnection } from "../backend/connection";
 import { CommitText } from "../pages/inputs";
@@ -54,7 +55,16 @@ export function JobsView() {
           </label>
         )}
         <span className="spacer" />
-        <button type="button" className="button small" disabled={finished.length === 0} onClick={() => void Promise.all(finished.map((j) => removeRun(j.id)))}>
+        <button
+          type="button"
+          className="button small"
+          disabled={finished.length === 0}
+          onClick={() =>
+            void askConfirm(t("jobs.clearTitle"), t("jobs.clearMessage", { n: finished.length }), { okLabel: t("jobs.clearFinished"), danger: true }).then(
+              (ok) => ok && void Promise.all(finished.map((j) => removeRun(j.id))),
+            )
+          }
+        >
           {t("jobs.clearFinished")}
         </button>
       </div>

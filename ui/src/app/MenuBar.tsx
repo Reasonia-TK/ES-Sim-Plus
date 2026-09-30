@@ -10,6 +10,11 @@ import type { LengthUnit } from "../util/format";
 import { showAbout, showPortDialog } from "./dialogs";
 import { resetLayout } from "./layout";
 import { MOD } from "./shortcuts";
+import { useConnection } from "../backend/connection";
+import { stopAllRuns, useJobs } from "../jobs/jobsStore";
+import { BUNDLE_KINDS } from "../results/bundle";
+import { useStatic } from "../results/staticResults";
+import { useBottomTab } from "./BottomPanel";
 
 function Item({ label, shortcut, onSelect, disabled }: { label: string; shortcut?: string; onSelect: () => void; disabled?: boolean }) {
   return (
@@ -70,6 +75,13 @@ export function MenuBar() {
   const undoLabel = useUndoLabel();
   const redoLabel = useRedoLabel();
   const { undo, redo } = useDocument.getState();
+  const connected = useConnection((s) => s.status === "connected");
+  const staticBusy = useStatic((s) => s.busy !== null);
+  const anyRunning = useJobs((s) => Object.values(s.jobs).some((j) => (j.state === "running" || j.state === "queued") && !j.imported));
+  // 結果付きで保存できるもの (静電場の結果か、保存する種類の実行の結果) があるか
+  const staticResults = useStatic((s) => s.solve !== null || s.mesh !== null);
+  const runResults = useJobs((s) => Object.values(s.jobs).some((j) => j.has_result && BUNDLE_KINDS.some((b) => b.kind === j.kind)));
+  const hasResults = staticResults || runResults;
   return (
     <Menubar.Root className="menubar">
       <span className="app-title">{t("app.name")}</span>
@@ -100,7 +112,7 @@ export function MenuBar() {
         <Sep />
         <Item label={t("menu.save")} shortcut={`${MOD}+S`} onSelect={() => void saveDocument()} />
         <Item label={t("menu.saveAs")} shortcut={`${MOD}+Shift+S`} onSelect={() => void saveDocumentAs()} />
-        <Item label={t("menu.saveWithResults")} onSelect={() => void saveDocumentWithResults()} />
+        <Item label={t("menu.saveWithResults")} onSelect={() => void saveDocumentWithResults()} disabled={!hasResults} />
       </Menu>
       <Menu label={t("menu.edit")}>
         <Item
@@ -151,7 +163,13 @@ export function MenuBar() {
         <Item label={t("menu.resetLayout")} onSelect={resetLayout} />
       </Menu>
       <Menu label={t("menu.run")}>
-        <Item label={t("menu.runNotYet")} onSelect={() => {}} disabled />
+        <Item label={t("menu.runMesh")} onSelect={() => void useStatic.getState().runMesh()} disabled={!connected || staticBusy} />
+        <Item label={t("menu.runSolve")} onSelect={() => void useStatic.getState().runSolve()} disabled={!connected || staticBusy} />
+        <Sep />
+        <Item label={t("menu.stopAll")} onSelect={() => void stopAllRuns()} disabled={!anyRunning} />
+        <Sep />
+        <Item label={t("menu.showProgress")} onSelect={() => useBottomTab.getState().setTab("progress")} />
+        <Item label={t("menu.showJobs")} onSelect={() => useBottomTab.getState().setTab("jobs")} />
       </Menu>
       <Menu label={t("menu.help")}>
         <Item label={t("menu.backendPort")} onSelect={() => void showPortDialog()} />

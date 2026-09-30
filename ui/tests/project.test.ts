@@ -32,7 +32,7 @@ describe("normalizeProject", () => {
     expect(project.geometry.regions).toEqual([]);
     expect(project.geometry.boundaries).toEqual([]);
     expect(project.mesh.size).toBeCloseTo(0.02 / 25);
-    expect(project.pic).toEqual({ collectors: [{ p1: [0, 0], p2: [1, 1] }] });
+    expect(project.pic).toEqual({ collectors: [{ label: "C1", p1: [0, 0], p2: [1, 1] }] });
     // 元のオブジェクトは変えない
     expect((raw.pic as Record<string, unknown>).collector).toBeDefined();
   });

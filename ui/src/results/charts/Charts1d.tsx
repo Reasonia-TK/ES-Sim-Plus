@@ -259,7 +259,7 @@ function Profile1dCard({ job, kind, result }: { job: JobSummary; kind: Kind1d; r
       {!p || !chart ? (
         <p className="hint">{t("charts.noProfiles")}</p>
       ) : (
-        <LineChart x={chart.x} series={chart.series} xLabel={`x [${len.unit}]`} yLabel={fieldLabel} logY={logOn} height={190} markers={markers} legend={chart.series.length > 1} />
+        <LineChart x={chart.x} series={chart.series} xLabel={`x [${len.unit}]`} yLabel={fieldLabel} logY={logOn} height={190} markers={markers} />
       )}
       {p && cp && cmp && <CompareSummary a={result} b={cmp} nameB={nameB} />}
     </ChartCard>
@@ -315,7 +315,7 @@ function Cycle1dCard({ kind, result, cycle }: { kind: Kind1d; result: Result1d; 
       }
       note={periodS > 0 ? t("charts.freqPeriod", { f: formatSi(cycle.freq_hz, "Hz"), T: formatSi(periodS, "s") }) : undefined}
     >
-      <LineChart x={x} series={series} xLabel={`x [${len.unit}]`} yLabel={t(`charts.field1d.${field}`)} yRange={yRange ?? undefined} height={170} markers={markers} legend={false} />
+      <LineChart x={x} series={series} xLabel={`x [${len.unit}]`} yLabel={t(`charts.field1d.${field}`)} yRange={yRange ?? undefined} height={170} markers={markers} />
       <PlaybackBar playback={{ bins: cycle.bins, periodS }} />
       {sPhi && (
         <>

@@ -5,7 +5,7 @@ es_sim.batch.run_files を直接呼び出す (CLI 引数パースは build_argpa
 ケースは test_pic.py 同様の極小サイズにする。
 
 1. 2ケースを --parallel 2 相当で実行し、出力2ファイルが生成されること。
-   出力が frontend/src/types.ts の ResultsBundle / PicStartedMsg / PicDiag / PicFields と
+   出力が UI の結果の型 (ui/src/results/types.ts、v1 は frontend/src/types.ts) の ResultsBundle / PicStartedMsg / PicDiag / PicFields と
    キー構造が一致すること (実際に types.ts を読んでキー名を写して assert する)。
 2. 出力 JSON から results を除いた部分が pydantic の Project として再度読めること
    (loadProject と同じ「project 本体と results を分離する」設計の検証)。

@@ -4,9 +4,11 @@
 import { Popover } from "radix-ui";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { askConfirm } from "../app/dialogs";
+import { useConnection } from "../backend/connection";
 import { useSelection } from "../model/selection";
 import { CommitText } from "../pages/inputs";
-import { formatElapsed } from "../util/format";
+import { formatElapsed, formatNumber } from "../util/format";
 import { continueRun, jobElapsed, jobName, removeRun, stopRun, useJobs } from "./jobsStore";
 import { HAS_PHASE_BINS, type JobState, type JobSummary } from "./types";
 
@@ -32,6 +34,8 @@ export function useTicker(active: boolean, ms = 1000): number {
 
 export function StateBadge({ job }: { job: JobSummary }) {
   const { t } = useTranslation();
+  const events = useJobs((s) => s.connected);
+  if (!events && !job.imported && (job.state === "running" || job.state === "queued")) return <span className="badge badge-muted">{t("jobs.unknownState")}</span>;
   let text = t(`jobs.state.${job.state}`);
   if (job.state === "running" && job.stopping) text = t("jobs.stopping");
   else if (job.state === "running" && job.progress?.fraction != null) text += ` ${Math.round(job.progress.fraction * 100)}%`;
@@ -109,6 +113,12 @@ function ContinueButton({ job }: { job: JobSummary }) {
 export function JobRow({ job, showKind = true, openable = true }: { job: JobSummary; showKind?: boolean; openable?: boolean }) {
   const { t } = useTranslation();
   const runSince = useJobs((s) => s.runSince[job.id]);
+  // 停止・続き・削除はバックエンドにつながっているときだけ (読み込んだ実行の削除はこの画面だけ)
+  const online = useJobs((s) => s.connected) && useConnection.getState().status === "connected";
+  const canAct = online || Boolean(job.imported);
+  const remove = async () => {
+    if (await askConfirm(t("jobs.deleteTitle"), t("jobs.deleteMessage", { name: jobName(job) }), { okLabel: t("jobs.delete"), danger: true })) void removeRun(job.id);
+  };
   useTicker(job.state === "running");
   const active = job.state === "running" || job.state === "queued";
   const p = job.progress;
@@ -128,13 +138,13 @@ export function JobRow({ job, showKind = true, openable = true }: { job: JobSumm
         {job.runs > 1 && <span className="muted small">{t("jobs.runsN", { n: job.runs })}</span>}
         <span className="spacer" />
         {active && (
-          <button type="button" className="button small" disabled={job.stopping} onClick={() => void stopRun(job.id)}>
+          <button type="button" className="button small" disabled={job.stopping || !canAct} onClick={() => void stopRun(job.id)}>
             {job.state === "queued" ? t("jobs.cancel") : t("jobs.stop")}
           </button>
         )}
-        {job.can_continue && <ContinueButton job={job} />}
+        {job.can_continue && canAct && <ContinueButton job={job} />}
         {!active && (
-          <button type="button" className="button small danger" onClick={() => void removeRun(job.id)}>
+          <button type="button" className="button small danger" disabled={!canAct} onClick={() => void remove()}>
             {t("jobs.delete")}
           </button>
         )}
@@ -144,12 +154,19 @@ export function JobRow({ job, showKind = true, openable = true }: { job: JobSumm
           <ProgressBar fraction={p?.fraction} />
           {p && (
             <span className="muted small mono">
-              {p.step - (p.step_offset ?? 0)} / {p.n_steps}
+              {job.kind === "sweep" ? p.step : p.step - (p.step_offset ?? 0)} / {p.n_steps}
             </span>
           )}
+          {job.kind === "boltz" && typeof p?.en_td === "number" && <span className="muted small mono">E/N {formatNumber(p.en_td)} Td</span>}
         </div>
       )}
       {job.state === "error" && job.error && <div className="hint hint-error job-error">{job.error}</div>}
+      {job.warnings.length > 0 && (
+        <div className="hint hint-warn job-warnings" title={job.warnings.join("\n")}>
+          {job.warnings[0]}
+          {job.warnings.length > 1 ? ` ${t("jobs.moreWarnings", { n: job.warnings.length - 1 })}` : ""}
+        </div>
+      )}
     </div>
   );
 }

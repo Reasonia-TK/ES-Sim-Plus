@@ -84,7 +84,8 @@ export function parseQuantity(text: string, unit: string | undefined, geom: bool
   const s = text.trim();
   if (s === "") return { ok: true, value: null };
   const m = NUMBER_RE.exec(s);
-  if (!m) return { ok: false, error: "number" };
+  // 式 ("2*6.78 MHz"、"1/3"、"sqrt(2)" など): 数値だけで読めないときは、最後の語を単位として式を計算する
+  if (!m || /^[*/+\-^(]/.test(m[2].trim()) || /^[(a-zπ]/i.test(s)) return parseExpression(s, unit, geom, ctx);
   const num = Number(m[1]);
   if (!Number.isFinite(num)) return { ok: false, error: "number" };
   const suffix = m[2].trim();
@@ -113,4 +114,114 @@ export function unitFactor(sym: string, base: string, ctx?: UnitContext): number
     }
   }
   return null;
+}
+
+/** 式と、あれば最後の語の単位 ("2*6.78 MHz" → 13.56e6 Hz、"(1+2)*3" → 9) */
+function parseExpression(s: string, unit: string | undefined, geom: boolean, ctx: UnitContext): ParseResult {
+  const whole = evalExpression(s);
+  if (whole !== null) return { ok: true, value: fromDisplay(whole, geom, ctx) };
+  const sp = s.lastIndexOf(" ");
+  if (sp > 0) {
+    const v = evalExpression(s.slice(0, sp));
+    const sym = s.slice(sp + 1).trim();
+    const base = geom ? "m" : unit;
+    if (v !== null && base) {
+      const factor = unitFactor(sym, base, ctx);
+      if (factor === null) return { ok: false, error: "unit" };
+      return { ok: true, value: v * factor };
+    }
+  }
+  return { ok: false, error: "number" };
+}
+
+const FUNCS: Record<string, (x: number) => number> = {
+  sqrt: Math.sqrt,
+  exp: Math.exp,
+  ln: Math.log,
+  log: Math.log10,
+  log10: Math.log10,
+  sin: Math.sin,
+  cos: Math.cos,
+  tan: Math.tan,
+  abs: Math.abs,
+};
+
+/**
+ * 四則演算の式 (+ - * / ^、かっこ、pi、sqrt/exp/ln/log/sin/cos/tan/abs)。計算できなければ null。
+ * べき乗は右結合、単項のマイナスはべき乗より弱い (-2^2 = -4)。
+ */
+export function evalExpression(src: string): number | null {
+  const s = src.replace(/\s+/g, "").replace(/π/g, "pi").replace(/×/g, "*").replace(/÷/g, "/");
+  if (s === "") return null;
+  let i = 0;
+  const num = (): number | null => {
+    const m = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(s.slice(i));
+    if (!m) return null;
+    i += m[0].length;
+    return Number(m[0]);
+  };
+  const primary = (): number | null => {
+    if (s[i] === "(") {
+      i++;
+      const v = expr();
+      if (v === null || s[i] !== ")") return null;
+      i++;
+      return v;
+    }
+    const id = /^[a-z][a-z0-9]*/i.exec(s.slice(i));
+    if (id) {
+      const name = id[0].toLowerCase();
+      i += id[0].length;
+      if (name === "pi") return Math.PI;
+      const f = FUNCS[name];
+      if (!f || s[i] !== "(") return null;
+      i++;
+      const a = expr();
+      if (a === null || s[i] !== ")") return null;
+      i++;
+      return f(a);
+    }
+    return num();
+  };
+  const power = (): number | null => {
+    const b = primary();
+    if (b === null) return null;
+    if (s[i] === "^") {
+      i++;
+      const e = unary();
+      return e === null ? null : Math.pow(b, e);
+    }
+    return b;
+  };
+  const unary = (): number | null => {
+    if (s[i] === "-" || s[i] === "+") {
+      const neg = s[i] === "-";
+      i++;
+      const v = unary();
+      return v === null ? null : neg ? -v : v;
+    }
+    return power();
+  };
+  const term = (): number | null => {
+    let v = unary();
+    while (v !== null && (s[i] === "*" || s[i] === "/")) {
+      const op = s[i++];
+      const r = unary();
+      if (r === null) return null;
+      v = op === "*" ? v * r : v / r;
+    }
+    return v;
+  };
+  const expr = (): number | null => {
+    let v = term();
+    while (v !== null && (s[i] === "+" || s[i] === "-")) {
+      const op = s[i++];
+      const r = term();
+      if (r === null) return null;
+      v = op === "+" ? v + r : v - r;
+    }
+    return v;
+  };
+  const v = expr();
+  return v !== null && i === s.length && Number.isFinite(v) ? v : null;
 }

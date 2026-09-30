@@ -22,6 +22,7 @@ import { RfEditor } from "./widgets/RfEditor";
 import { VertexTable } from "./widgets/VertexTable";
 import { VoltagePreview } from "./widgets/VoltagePreview";
 import { WaveformEditor } from "./widgets/WaveformEditor";
+import { logInfo } from "../app/messages";
 
 const useUpdate = () => useDocument((s) => s.update);
 
@@ -38,15 +39,25 @@ export function CoordSelect() {
           value={coordOf(project)}
           options={coords.map((c) => ({ value: c, label: t(`coord.${c}`) }))}
           onChange={(c) =>
+          {
+            let removed = false;
             update(t("action.coord"), (d) => {
               d.coord = c;
-              // 軸対称に切り替えたら対称軸の辺の境界条件を外す (v1 と同じ)
+              // 軸対称に切り替えたら対称軸の辺の境界条件を外す (v1 と同じ)。周期境界は対の片方だけ残すと backend が
+              // 拒むので、軸の辺を含むものはまるごと外す
               const axis = axisEdge(d as Project);
               if (axis !== null) {
+                const before = JSON.stringify(d.geometry.boundaries);
+                d.geometry.boundaries = d.geometry.boundaries.filter((b) => !(b.type === "periodic" && b.edges.includes(axis)));
                 for (const b of d.geometry.boundaries) b.edges = b.edges.filter((e) => e !== axis);
                 d.geometry.boundaries = d.geometry.boundaries.filter((b) => b.edges.length > 0);
+                removed = JSON.stringify(d.geometry.boundaries) !== before;
+                // 磁場は平面 2D だけ (軸対称では backend が拒む)
+                if (d.b_field) d.b_field = null;
               }
-            })
+            });
+            if (removed) logInfo(t("msg.source.app"), t("settings.axisBcRemoved"));
+          }
           }
         />
       )}
@@ -184,7 +195,15 @@ function RegionMerge({ region }: { region: Region }) {
     <div className="subsection">
       <div className="subsection-title">{t("merge.title")}</div>
       <div className="field-control">
-        <select className="input" value={target.id} onChange={(e) => setOther(e.target.value)} aria-label={t("merge.title")}>
+        <select
+          className="input"
+          value={target.id}
+          onChange={(e) => {
+            setOther(e.target.value);
+            setError(null);
+          }}
+          aria-label={t("merge.title")}
+        >
           {others.map((r) => (
             <option key={r.id} value={r.id}>
               {r.id}
@@ -281,7 +300,7 @@ export function RegionPage({ id }: { id: string }) {
       </Field>
       {r.type === "conductor" && (
         <>
-          <SchemaField path={[...base, "voltage"]} />
+          <SchemaField path={[...base, "voltage"]} required />
           <RfEditor path={[...base, "voltage_rf"]} />
           <div className="subsection-title">{t("widgets.waveform")}</div>
           <WaveformEditor path={[...base, "voltage_waveform"]} />
@@ -391,7 +410,7 @@ export function EdgePage({ edge }: { edge: number }) {
       {bc && bc.edges.length > 1 && type !== "periodic" && <Hint>{t("bcPage.shared", { n: bc.edges.length })}</Hint>}
       {type === "dirichlet" && bc && (
         <>
-          <SchemaField path={[...base, "voltage"]} />
+          <SchemaField path={[...base, "voltage"]} required />
           <RfEditor path={[...base, "voltage_rf"]} />
           <div className="subsection-title">{t("widgets.waveform")}</div>
           <WaveformEditor path={[...base, "voltage_waveform"]} />

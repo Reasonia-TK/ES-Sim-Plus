@@ -81,9 +81,11 @@ export interface SchemaFieldProps {
   disabled?: boolean;
   /** 選択肢を絞る・並べ替える */
   options?: unknown[];
+  /** 空欄 (null) にさせない (導体の電圧など、スキーマでは null を許しても使うときに要る値) */
+  required?: boolean;
 }
 
-export function SchemaField({ path, label, hint, placeholder, always, disabled, options }: SchemaFieldProps) {
+export function SchemaField({ path, label, hint, placeholder, always, disabled, options, required }: SchemaFieldProps) {
   const { t } = useTranslation();
   const ctx = useUnitContext();
   const showAdvanced = usePrefs((s) => s.showAdvanced);
@@ -137,10 +139,10 @@ export function SchemaField({ path, label, hint, placeholder, always, disabled, 
         {(id, onError) => (
           <QuantityInput
             id={id}
-            info={info}
+            info={required ? { ...info, nullable: false } : info}
             ctx={ctx}
             value={v === undefined ? ((info.default as number | null | undefined) ?? null) : v}
-            placeholder={placeholder ?? (info.nullable ? t("input.auto") : undefined)}
+            placeholder={placeholder ?? (info.nullable && !required ? t("input.auto") : undefined)}
             disabled={disabled}
             onError={onError}
             onCommit={(x) => f.set(x)}

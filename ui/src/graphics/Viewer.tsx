@@ -15,6 +15,7 @@ import {
   placeEdgeMeshSize,
   placeEedfRegion,
   placeEmitter,
+  placeInjectionEmitter,
   placeGasBoundary,
   placeSheathLine,
   MAX_COLLECTORS,
@@ -56,7 +57,7 @@ import {
 } from "./hitTest";
 import { isoLevels, isolineSegments } from "./isolines";
 import { drawBase, drawOverlay, readColors, rulerSize, type Arrow, type OverlayState, type Placement, type Preview } from "./overlay";
-import { amrBoxesOf, emitterOf, placementsOf } from "./projectOverlays";
+import { amrBoxesOf, emitterOf, injectorOf, placementsOf } from "./projectOverlays";
 import { sampleField, sampleVector, statsOf, type Scene } from "./scene";
 import { PlaybackBar } from "./PlaybackBar";
 import { ViewerRfStrip } from "./ViewerRfStrip";
@@ -72,7 +73,7 @@ type Drag =
   | { kind: "move"; x: number; y: number; id: string; start: Point };
 
 /** 2 点で決める道具 */
-const TWO_POINT: Tool[] = ["rect", "circle", "profile", "emitter", "collector", "gasbc", "eedfbox", "meshref", "sheathline", "measure"];
+const TWO_POINT: Tool[] = ["rect", "circle", "profile", "emitter", "injector", "collector", "gasbc", "eedfbox", "meshref", "sheathline", "measure"];
 
 /** ポインタを捕まえる (キャンバスの外へ出てもドラッグを続ける。作ったイベントでは捕まえられないので無視) */
 function capture(el: HTMLElement, id: number): void {
@@ -262,7 +263,11 @@ export function Viewer({ active }: { active: ActiveScene }) {
   const fieldKey = scene.field ? `${scene.field.label}|${scene.field.unit}` : "";
   const lastFieldKey = useRef(fieldKey);
   useEffect(() => {
-    if (lastFieldKey.current !== fieldKey && (vs.range.min !== null || vs.range.max !== null)) vs.setRange({ min: null, max: null });
+    if (lastFieldKey.current !== fieldKey) {
+      if (vs.range.min !== null || vs.range.max !== null) vs.setRange({ min: null, max: null });
+      // 読む量が変わったらプローブの点も消す (v1 と同じ)
+      if (vs.probe) vs.setProbe(null);
+    }
     lastFieldKey.current = fieldKey;
   }, [fieldKey, vs]);
   const log = controls.log;
@@ -283,6 +288,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
   }, [vs.overlays.isolines, scene.iso, scene.field, range]);
   const placements = useMemo(() => placementsOf(project, vs.overlays), [project, vs.overlays]);
   const emitter = useMemo(() => (vs.overlays.emitter ? emitterOf(project) : null), [project, vs.overlays.emitter]);
+  const injector = useMemo(() => (vs.overlays.emitter ? injectorOf(project) : null), [project, vs.overlays.emitter]);
   const amrBoxes = useMemo(() => amrBoxesOf(project), [project]);
   const origin = useMemo<[number, number]>(() => {
     const b = polygonBounds(project.geometry.domain.polygon);
@@ -383,6 +389,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
         drawing: { tool: vs.tool, pts, cursor },
         placements: placements as Placement[],
         emitter,
+        injector,
         amrBoxes,
         profile: vs.profile,
         measure: measure ?? (vs.tool === "measure" && pts.length === 1 && cursor ? [pts[0], cursor] : null),
@@ -450,6 +457,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
       if (same) return;
       const place: Record<string, [(d: Parameters<typeof placeEmitter>[0], a: Point, b: Point) => PlaceResult, string, PlacementKind | null, string, number]> = {
         emitter: [placeEmitter, t("cad.placeEmitter"), null, "study:trace", 0],
+        injector: [placeInjectionEmitter, t("cad.placeInjection"), null, "study:pic", 0],
         collector: [placeCollector, t("cad.placeCollector"), "collector", "study:pic", MAX_COLLECTORS],
         gasbc: [placeGasBoundary, t("cad.placeGasBoundary"), "gasbc", "study:dsmc", 0],
         eedfbox: [placeEedfRegion, t("cad.placeEedf"), "eedf", "study:pic", MAX_EEDF_REGIONS],
