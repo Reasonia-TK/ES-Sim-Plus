@@ -15,10 +15,10 @@ describe("model tree", () => {
     const root = buildTree(p, t, "mm", "demo");
     expect(root.label).toBe("demo");
     expect(find(root, "domain")?.detail).toBe("100 × 50 mm");
-    expect(find(root, "edge:3")?.label).toBe("左 (x=0)");
-    expect(find(root, "edge:3")?.detail).toBe("Dirichlet 0 V");
-    expect(find(root, "edge:1")?.detail).toBe("Dirichlet 100 V + RF");
-    expect(find(root, "edge:0")?.detail).toBe("なし");
+    expect(find(root, "edge:e4")?.label).toBe("左 (x=0)");
+    expect(find(root, "edge:e4")?.detail).toBe("Dirichlet 0 V");
+    expect(find(root, "edge:e2")?.detail).toBe("Dirichlet 100 V + RF");
+    expect(find(root, "edge:e1")?.detail).toBe("なし");
     expect(find(root, "mesh")?.detail).toBe("4 mm · unstructured");
     expect(find(root, "study:pic")?.badge?.text).toBe("設定済み");
     expect(find(root, "study:fluid2d")?.badge?.text).toBe("未設定");
@@ -31,7 +31,7 @@ describe("model tree", () => {
   it("labels axisymmetric edges and polygon domains", () => {
     const p: Project = { ...newProject(), coord: "rz" };
     expect(edgeSummary(p, 0, t)).toBe("対称軸");
-    expect(find(buildTree(p, t, "mm", "x"), "edge:2")?.label).toBe("上 (r=R)");
+    expect(find(buildTree(p, t, "mm", "x"), "edge:e3")?.label).toBe("上 (r=R)");
     const coax = normalizeProject(EXAMPLES.find((e) => e.key === "coaxial")!.data).project;
     const root = buildTree(coax, t, "mm", "coax");
     const edges = find(root, "boundaries")!.children!;

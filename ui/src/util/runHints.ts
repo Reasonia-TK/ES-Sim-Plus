@@ -1,7 +1,7 @@
 // 実行設定の目安 (v1 の各パネルが出していたもの): RF 1 周期のステップ数、位相分解のビン数・平均区間の推奨、
 // DSMC のセルあたりの粒子数。
 
-import { polygonArea, type Project } from "../model/project";
+import { domainArea, type Project } from "../model/project";
 import { rfComponents, waveformFreqs, type VoltageWaveform } from "./waveform";
 
 /** 2D の電極 (Dirichlet の辺、includeRegions なら導体の領域も) の RF・CSV 波形の周波数 (重複なし・昇順) */
@@ -63,6 +63,6 @@ export function phaseBinAdvice(freqs: number[], dt: number | null | undefined, b
 
 /** DSMC のセルあたりの粒子数の目安 (メッシュが無いときは v1 と同じく 面積 / (0.433 (size·scale)²) のセル数で) */
 export function dsmcParticlesPerCell(p: Project, nParticles: number, meshScale: number, nCells?: number): number {
-  const cells = nCells ?? polygonArea(p.geometry.domain.polygon) / (0.433 * (p.mesh.size * meshScale) ** 2);
+  const cells = nCells ?? domainArea(p) / (0.433 * (p.mesh.size * meshScale) ** 2);
   return cells > 0 ? nParticles / cells : Infinity;
 }

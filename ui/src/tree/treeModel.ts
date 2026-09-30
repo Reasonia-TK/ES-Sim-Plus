@@ -2,12 +2,12 @@
 
 import type { TFunction } from "i18next";
 import {
-  axisEdge,
   boundaryOfEdge,
   coordOf,
-  edgeCount,
+  domainBounds,
+  edgeIdsOf,
+  isAxisEdge,
   isRectDomain,
-  polygonBounds,
   type Project,
 } from "../model/project";
 import type { NodeId } from "../model/selection";
@@ -54,7 +54,7 @@ export function edgeLabel(p: Project, i: number, t: TFunction): string {
 
 /** 辺の境界条件の概要 (v1 のツリーと同じ: 対称軸 / なし / Dirichlet NV [+RF] / 対称 / 周期) */
 export function edgeSummary(p: Project, i: number, t: TFunction): string {
-  if (axisEdge(p) === i) return t("bc.axis");
+  if (isAxisEdge(p, i)) return t("bc.axis");
   const bc = boundaryOfEdge(p, i);
   if (!bc || bc.type === "neumann") return t("bc.none");
   if (bc.type === "dirichlet") {
@@ -68,7 +68,7 @@ export function edgeSummary(p: Project, i: number, t: TFunction): string {
 }
 
 function domainDetail(p: Project, unit: LengthUnit): string {
-  const b = polygonBounds(p.geometry.domain.polygon);
+  const b = domainBounds(p);
   const u = lengthUnitLabel(unit);
   const w = formatNumber(toDisplayLength(b.x1 - b.x0, unit));
   const h = formatNumber(toDisplayLength(b.y1 - b.y0, unit));
@@ -155,8 +155,8 @@ export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: s
     label: r.id,
     detail: `${t(`region.${r.type}`)} · ${r.shape ? t("region.circle") : t("region.polygon")}`,
   }));
-  const edges: TreeNode[] = Array.from({ length: edgeCount(p) }, (_, i) => ({
-    id: `edge:${i}`,
+  const edges: TreeNode[] = edgeIdsOf(p).map((id, i) => ({
+    id: `edge:${id}`,
     label: edgeLabel(p, i, t),
     detail: edgeSummary(p, i, t),
   }));

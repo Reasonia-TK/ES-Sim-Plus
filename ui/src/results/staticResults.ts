@@ -14,7 +14,8 @@ export function meshKey(p: Project): string {
   return JSON.stringify([
     p.coord ?? "xy",
     p.geometry.domain.polygon,
-    p.geometry.regions.map((r) => [r.id, r.type, r.polygon ?? null, r.shape ?? null]),
+    p.geometry.domain.bulges ?? null,
+    p.geometry.regions.map((r) => [r.id, r.type, r.polygon ?? null, r.bulges ?? null, r.shape ?? null]),
     p.mesh,
   ]);
 }

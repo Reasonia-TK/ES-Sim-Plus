@@ -115,7 +115,7 @@ describe("tree", () => {
     expect(find(root, "mesh")?.detail).toContain("AMR L3");
     // 群の名前で探すと子をすべて出す
     const f = filterTree(root, "境界条件")!;
-    expect(find(f, "edge:0")).toBeTruthy();
+    expect(find(f, "edge:e1")).toBeTruthy();
   });
 });
 

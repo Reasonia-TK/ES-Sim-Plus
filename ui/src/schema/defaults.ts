@@ -1,13 +1,13 @@
 // スタディ・設定ブロックを有効にしたときの初期値 (v1 frontend の DEFAULT_* と同じ値)。
 // 必須で既定値の無い項目 (初期密度・ガス圧など) を含むので、スキーマの既定値だけでは作れない。
 
-import { polygonBounds, type Project } from "../model/project";
+import { domainBounds, type Project } from "../model/project";
 
 export const DEFAULT_VOLTAGE_RF = { amplitude: 100.0, freq_hz: 13.56e6, phase_deg: 0.0 };
 export const DEFAULT_VOLTAGE_RF_2ND = { amplitude: 100.0, freq_hz: 2e6, phase_deg: 0.0 };
 
 export function defaultEmitter(p: Project) {
-  const b = polygonBounds(p.geometry.domain.polygon);
+  const b = domainBounds(p);
   const w = b.x1 - b.x0;
   const h = b.y1 - b.y0;
   return {

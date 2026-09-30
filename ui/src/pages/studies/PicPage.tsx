@@ -5,7 +5,7 @@ import { OptionalBlock, Section } from "../../forms/blocks";
 import { SchemaField, Toggle } from "../../forms/SchemaField";
 import { setValue } from "../../forms/useField";
 import { useDocument } from "../../model/documentStore";
-import { polygonBounds, type Point, type Project } from "../../model/project";
+import { domainBounds, type Point, type Project } from "../../model/project";
 import { DEFAULT_INITIAL_PLASMA, DEFAULT_MCC, DEFAULT_MERGE, DEFAULT_PIC, defaultEmitter } from "../../schema/defaults";
 import { edgeLabel } from "../../tree/treeModel";
 import { projectFreqs } from "../../util/runHints";
@@ -56,7 +56,7 @@ export function MccBlock({ base, allowDsmc }: { base: readonly (string | number)
 }
 
 function segment(p: Project, fy: number): { p1: Point; p2: Point } {
-  const b = polygonBounds(p.geometry.domain.polygon);
+  const b = domainBounds(p);
   const y = b.y0 + fy * (b.y1 - b.y0);
   return { p1: [b.x0 + 0.25 * (b.x1 - b.x0), y], p2: [b.x0 + 0.75 * (b.x1 - b.x0), y] };
 }
@@ -83,7 +83,7 @@ export function PicPage() {
   const freqs = projectFreqs(project, true);
   const P = ["pic"] as const;
   const inj = [...P, "injection"] as const;
-  const b = polygonBounds(project.geometry.domain.polygon);
+  const b = domainBounds(project);
   const reflect = pic.reflect_edges ?? [];
   const sel = useSelection((s) => s.selectedPlacement);
   const selectPlacement = useSelection((s) => s.selectPlacement);

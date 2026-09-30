@@ -1,14 +1,17 @@
 """プロジェクト JSON のスキーマ (pydantic)。仕様書 §10 参照。
 
 このモデルがプロジェクトファイルの唯一の正。
-フロントエンドの TypeScript 型 (src/types.ts) はこれと手動同期する。
+UI の TypeScript 型 (ui/src/model/project.ts ほか) はこれと手動同期し、設定フォームは
+python -m es_sim.ui_schema が書き出す JSON Schema (ui/src/schema/project.schema.json) から作る。
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
+
+from .paths import check_path, flatten_path, has_arcs
 
 Point = tuple[float, float]
 
@@ -32,10 +35,34 @@ def ui(unit: str | None = None, *, geom: bool = False, advanced: bool = False) -
 GEOM = ui("m", geom=True)
 
 
+BULGES_DESCRIPTION = (
+    "辺ごとの円弧 (辺 i は頂点 i → i+1)。bulge = tan(θ/4)、θ は中心角で正は反時計回り、0 は直線 "
+    "(DXF の LWPOLYLINE と同じ)。ソルバーには検証の段階でメッシュ幅に合わせた弦に分けて渡す (paths.py)"
+)
+
+
 class Domain(BaseModel):
     polygon: list[Point] = Field(
-        ..., min_length=3, description="解析領域の外周 (閉ポリゴン、反時計回り)", json_schema_extra=GEOM
+        ...,
+        min_length=2,
+        description="解析領域の外周 (閉じた経路、反時計回り)。直線だけなら 3 頂点以上、円弧を含めば 2 頂点以上",
+        json_schema_extra=GEOM,
     )
+    bulges: list[float] | None = Field(None, description=BULGES_DESCRIPTION, json_schema_extra=ui("1"))
+    # 辺の永続 ID (prompts/132)。UI が辺を分ける・消すときに境界条件などの辺の番号を付け替えるのに使う
+    # (ソルバーは使わない)。辺と同じ数・重複なし
+    edge_ids: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "Domain":
+        check_path(self.polygon, self.bulges, "domain")
+        if self.edge_ids is not None:
+            n = len(self.polygon)
+            if len(self.edge_ids) != n:
+                raise ValueError(f"domain.edge_ids は辺と同じ数 ({n}) が必要です (今は {len(self.edge_ids)})")
+            if any(not e for e in self.edge_ids) or len(set(self.edge_ids)) != n:
+                raise ValueError("domain.edge_ids は空でない重複のない文字列が必要です")
+        return self
 
 
 class CircleShape(BaseModel):
@@ -99,7 +126,9 @@ class VoltageWaveform(BaseModel):
 class Region(BaseModel):
     id: str
     type: Literal["conductor", "dielectric", "charge"]
-    polygon: list[Point] | None = Field(None, min_length=3, json_schema_extra=GEOM)
+    # 輪郭 (閉じた経路)。直線だけなら 3 頂点以上、円弧 (bulges) を含めば 2 頂点以上
+    polygon: list[Point] | None = Field(None, min_length=2, json_schema_extra=GEOM)
+    bulges: list[float] | None = Field(None, description=BULGES_DESCRIPTION, json_schema_extra=ui("1"))
     shape: CircleShape | None = None
     voltage: float | None = Field(None, json_schema_extra=ui("V"))  # conductor: 電位 [V] (直流分)
     # conductor: RF 成分 (PIC のみ使用)。単一またはリスト (デュアル周波数、prompts/49)
@@ -119,6 +148,10 @@ class Region(BaseModel):
     def _check_polygon_xor_shape(self) -> "Region":
         if (self.polygon is None) == (self.shape is None):
             raise ValueError("Region には polygon か shape のどちらか一方のみを指定してください")
+        if self.polygon is not None:
+            check_path(self.polygon, self.bulges, f"領域 {self.id}")
+        elif self.bulges is not None:
+            raise ValueError(f"領域 {self.id}: bulges は polygon の領域だけに指定できます")
         return self
 
 
@@ -159,18 +192,29 @@ class Geometry(BaseModel):
     domain: Domain
     regions: list[Region] = []
     boundaries: list[BoundaryCondition] = []
+    # 円弧を弦に分けたあとの辺 k → 元の辺の番号 (Project の検証で分けたときだけ。電荷のラベル "edge{k}" を
+    # 元の辺の番号で付けるのに使う、edge_label)
+    _edge_origin: list[int] | None = PrivateAttr(default=None)
+
+    def edge_label(self, k: int) -> str:
+        """外周の辺 k (弦に分けたあとの番号) の電極ラベル。円弧を分けた辺は元の辺の番号で付ける。"""
+        origin = self._edge_origin
+        return f"edge{origin[k] if origin is not None and 0 <= k < len(origin) else k}"
 
     @model_validator(mode="after")
     def _check_periodic_pairs(self) -> "Geometry":
         """periodic 境界の2辺が domain の平行・同長の対辺であることを検査する。"""
         poly = self.domain.polygon
         n = len(poly)
+        bulges = self.domain.bulges
         for bc in self.boundaries:
             if bc.type != "periodic":
                 continue
             for e in bc.edges:
                 if not (0 <= e < n):
                     raise ValueError(f"periodic 境界のエッジ番号 {e} が範囲外です (0..{n - 1})")
+                if bulges is not None and abs(bulges[e]) > 1e-12:
+                    raise ValueError(f"periodic 境界のエッジ {e} は円弧です (周期境界は直線の辺だけ)")
             e1, e2 = bc.edges
             d1 = (poly[(e1 + 1) % n][0] - poly[e1][0], poly[(e1 + 1) % n][1] - poly[e1][1])
             d2 = (poly[(e2 + 1) % n][0] - poly[e2][0], poly[(e2 + 1) % n][1] - poly[e2][1])
@@ -1009,6 +1053,66 @@ class Project(BaseModel):
     # VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。null なら無効。
     # pic1d 同様 geometry/mesh とは無関係な専用ソルバー (tl.py)
     tl: TlSettings | None = None
+
+    @model_validator(mode="after")
+    def _flatten_arcs(self) -> "Project":
+        """円弧 (bulges) を弦に分け、ソルバーには直線だけの多角形を渡す (prompts/132)。
+
+        - 分ける幅 h: 領域は局所メッシュ幅 (local_sizes) か全体のメッシュ幅、ドメインは全体のメッシュ幅。
+          直交格子 (cartesian) で AMR があれば最も細かいレベルの幅 (2^-L 倍)。密度は円の多角形化と同じ。
+        - 外周の辺の番号を持つ参照 (境界条件・FN 放出・PIC の反射・DSMC の境界) は分けた弦の番号に展開し、
+          元の辺の番号を Geometry._edge_origin に残す (電荷のラベルは元の番号、Geometry.edge_label)。
+        - 円弧の無い文書は何も変えない (今までと完全に同じ)。
+        この検証はほかの Project の検証より先に定義してあり (定義順に実行される)、軸対称の r ≥ 0・軸上の
+        Dirichlet の検査は分けたあとの形で行う (円弧のふくらみが軸をまたぐのも検出する)。
+        """
+        geo = self.geometry
+        dom = geo.domain
+        region_arcs = any(r.polygon is not None and has_arcs(r.bulges) for r in geo.regions)
+        if not has_arcs(dom.bulges) and not region_arcs:
+            return self
+        scale = 1.0
+        amr = self.mesh.amr
+        if self.mesh.mode == "cartesian" and amr is not None:
+            scale = 0.5 ** max([amr.max_level, *(r.level for r in amr.regions)])
+        local = {ls.region: ls.size for ls in self.mesh.local_sizes}
+        for r in geo.regions:
+            if r.polygon is not None and has_arcs(r.bulges):
+                r.polygon, _ = flatten_path(r.polygon, r.bulges, local.get(r.id, self.mesh.size) * scale)
+                r.bulges = None
+        if not has_arcs(dom.bulges):
+            return self
+        n = len(dom.polygon)
+        pts, origin = flatten_path(dom.polygon, dom.bulges, self.mesh.size * scale)
+        expand: dict[int, list[int]] = {}
+        for k, o in enumerate(origin):
+            expand.setdefault(o, []).append(k)
+
+        def remap(edges: list[int], what: str) -> list[int]:
+            out: list[int] = []
+            for e in edges:
+                if not 0 <= e < n:
+                    raise ValueError(f"{what} の辺の番号 {e} が範囲外です (0..{n - 1})")
+                out.extend(expand[e])
+            return out
+
+        for bc in geo.boundaries:
+            bc.edges = remap(bc.edges, "境界条件")
+        if self.particles is not None and self.particles.fn is not None:
+            self.particles.fn.edges = remap(self.particles.fn.edges, "particles.fn")
+        if self.pic is not None:
+            self.pic.reflect_edges = remap(self.pic.reflect_edges, "pic.reflect_edges")
+            if self.pic.fn is not None:
+                self.pic.fn.edges = remap(self.pic.fn.edges, "pic.fn")
+        if self.dsmc is not None:
+            for b in self.dsmc.boundaries:
+                b.edges = remap(b.edges, "dsmc.boundaries")
+        dom.polygon = pts
+        dom.bulges = None
+        # 弦に分けたあとは辺と ID が 1 対 1 でなくなる (ソルバーは使わない)
+        dom.edge_ids = None
+        geo._edge_origin = origin
+        return self
 
     @model_validator(mode="after")
     def _check_b_field(self) -> "Project":

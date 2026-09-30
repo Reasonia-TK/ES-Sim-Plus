@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EXAMPLES } from "../src/io/examples";
 import {
-  axisEdge,
+  axisEdges,
   boundaryOfEdge,
   isRectDomain,
   newProject,
@@ -51,12 +51,12 @@ describe("geometry helpers", () => {
   it("recognises rectangular domains and the symmetry axis edge", () => {
     const p: Project = newProject();
     expect(isRectDomain(p)).toBe(true);
-    expect(axisEdge(p)).toBeNull();
-    expect(axisEdge({ ...p, coord: "rz" })).toBe(0);
-    expect(axisEdge({ ...p, coord: "rz_x0" })).toBe(3);
+    expect(axisEdges(p)).toEqual([]);
+    expect(axisEdges({ ...p, coord: "rz" })).toEqual([0]);
+    expect(axisEdges({ ...p, coord: "rz_x0" })).toEqual([3]);
     const coax = normalizeProject(EXAMPLES.find((e) => e.key === "coaxial")!.data).project;
     expect(isRectDomain(coax)).toBe(false);
-    expect(axisEdge({ ...coax, coord: "rz" })).toBeNull();
+    expect(axisEdges({ ...coax, coord: "rz" })).toEqual([]);
   });
 
   it("finds the boundary condition of an edge and makes unique region ids", () => {

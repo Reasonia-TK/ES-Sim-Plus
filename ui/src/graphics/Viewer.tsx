@@ -23,7 +23,8 @@ import {
   MAX_SHEATH_LINES,
   type PlaceResult,
 } from "../model/placements";
-import { coordOf, polygonBounds, type Point, type Project } from "../model/project";
+import { moveVertex, splitEdge, type PathData } from "../cad/path";
+import { coordOf, domainBounds, edgeIdOf, edgeIndexOf, regionPath, type Point, type Project } from "../model/project";
 import {
   addCircleRegionAt,
   addPolygonRegion,
@@ -31,7 +32,7 @@ import {
   moveRegion,
   removeRegionVertex,
   setCircleRadius,
-  setRegionPolygon,
+  setRegionPath,
 } from "../model/regionOps";
 import { usePrefs } from "../prefs/prefs";
 import { getIn, setIn } from "../schema/schema";
@@ -45,6 +46,7 @@ import {
   CLICK_TOLERANCE_PX,
   dedupeTail,
   EDGE_TOLERANCE_PX,
+  findDomainEdgeAt,
   findMidpointHandle,
   findRegionAt,
   findVertexHandle,
@@ -52,7 +54,6 @@ import {
   hitRadiusHandle,
   hitRegion,
   hitSegment,
-  insertMidpoint,
   rectFromCorners,
 } from "./hitTest";
 import { isoLevels, isolineSegments } from "./isolines";
@@ -68,7 +69,7 @@ import { ViewerToolbar } from "./ViewerToolbar";
 type Drag =
   | { kind: "pan"; lastX: number; lastY: number; x: number; y: number }
   | { kind: "click"; x: number; y: number }
-  | { kind: "vertex"; x: number; y: number; id: string; index: number; poly: Point[] }
+  | { kind: "vertex"; x: number; y: number; id: string; index: number; path: PathData }
   | { kind: "radius"; x: number; y: number; id: string }
   | { kind: "move"; x: number; y: number; id: string; start: Point };
 
@@ -135,6 +136,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
   const docSerial = useDocument((s) => s.docSerial);
   const selectedRegion = useSelection((s) => s.selectedRegion);
   const selectedPlacement = useSelection((s) => s.selectedPlacement);
+  const activeNode = useSelection((s) => s.activeNode);
   const lengthUnit = usePrefs((s) => s.lengthUnit);
   const theme = usePrefs((s) => s.theme);
   const vs = useViewer();
@@ -199,7 +201,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
   const rulerPx = rulers ? rulerSize(RULER_FONTS[vs.rulerFont]) : 0;
   const fit = (w = size.w, h = size.h): Camera | null => {
     if (w <= 0 || h <= 0) return null;
-    const b = polygonBounds(project.geometry.domain.polygon);
+    const b = domainBounds(project);
     const c = fitCamera(b, Math.max(1, w - rulerPx), Math.max(1, h - rulerPx));
     return { ...c, ox: c.ox + rulerPx, oy: c.oy + rulerPx };
   };
@@ -221,7 +223,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
     const s = f?.scale ?? 1;
     return { min: s / 200, max: s * 1e6 };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.geometry.domain.polygon, size.w, size.h]);
+  }, [project.geometry.domain, size.w, size.h]);
 
   // ホイール (React の onWheel は passive なので自前で付ける)
   useEffect(() => {
@@ -291,9 +293,10 @@ export function Viewer({ active }: { active: ActiveScene }) {
   const injector = useMemo(() => (vs.overlays.emitter ? injectorOf(project) : null), [project, vs.overlays.emitter]);
   const amrBoxes = useMemo(() => amrBoxesOf(project), [project]);
   const origin = useMemo<[number, number]>(() => {
-    const b = polygonBounds(project.geometry.domain.polygon);
+    const b = domainBounds(project);
     return [(b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2];
-  }, [project.geometry.domain.polygon]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.geometry.domain]);
 
   const snapStep = camera ? gridStep(camera) / 10 : 0;
   const snap = (p: Point): Point => (vs.snap && snapStep > 0 ? snapPoint(p, snapStep) : p);
@@ -384,6 +387,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
         fieldShown: scene.field !== null || scene.mesh !== null,
         selectedRegion,
         selectedPlacement: selectedPlacement as OverlayState["selectedPlacement"],
+        selectedEdge: selectedEdgeIndex(project, activeNode),
         tool: vs.tool,
         preview,
         drawing: { tool: vs.tool, pts, cursor },
@@ -535,15 +539,16 @@ export function Viewer({ active }: { active: ActiveScene }) {
       else if (hitCircle(world, sel.shape, tol)) dragRef.current = { kind: "move", x: sx, y: sy, id: sel.id, start: world };
       return;
     }
-    const poly = sel.polygon ?? [];
-    const v = findVertexHandle(poly, camera, sx, sy);
+    const path = regionPath(sel);
+    const v = findVertexHandle(path.polygon, camera, sx, sy);
     if (v !== null) {
-      dragRef.current = { kind: "vertex", x: sx, y: sy, id: sel.id, index: v, poly: poly.map((q) => [q[0], q[1]] as Point) };
+      dragRef.current = { kind: "vertex", x: sx, y: sy, id: sel.id, index: v, path };
       return;
     }
-    const m = findMidpointHandle(poly, camera, sx, sy);
+    const m = findMidpointHandle(path, camera, sx, sy);
     if (m !== null) {
-      dragRef.current = { kind: "vertex", x: sx, y: sy, id: sel.id, index: m + 1, poly: insertMidpoint(poly, m) };
+      // 辺の中点をつかむと頂点を足す (円弧は同じ円の 2 つの円弧に分ける)
+      dragRef.current = { kind: "vertex", x: sx, y: sy, id: sel.id, index: m + 1, path: splitEdge(path, m) };
       return;
     }
     if (hitRegion(world, sel, tol)) dragRef.current = { kind: "move", x: sx, y: sy, id: sel.id, start: world };
@@ -569,9 +574,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
     const moved = Math.hypot(sx - d.x, sy - d.y) >= CLICK_TOLERANCE_PX;
     if (!moved) return;
     if (d.kind === "vertex") {
-      const poly = d.poly.slice();
-      poly[d.index] = snap(raw);
-      setPreview({ polygon: poly });
+      setPreview({ path: moveVertex(d.path, d.index, snap(raw)) });
     } else if (d.kind === "radius") {
       const sel = project.geometry.regions.find((r) => r.id === d.id);
       if (sel?.shape) {
@@ -603,9 +606,9 @@ export function Viewer({ active }: { active: ActiveScene }) {
     const raw = toWorld(camera, sx, sy);
     const pt = snap(raw);
     if (!isClick) {
-      if (d.kind === "vertex" && preview.polygon) {
-        const poly = preview.polygon;
-        edit(t("cad.editVertices"), (dr) => setRegionPolygon(dr, d.id, poly));
+      if (d.kind === "vertex" && preview.path) {
+        const path = preview.path;
+        edit(t("cad.editVertices"), (dr) => setRegionPath(dr, d.id, path));
       } else if (d.kind === "radius" && preview.radius && preview.radius > 0) {
         const r = preview.radius;
         edit(t("cad.editRadius"), (dr) => setCircleRadius(dr, d.id, r));
@@ -629,8 +632,15 @@ export function Viewer({ active }: { active: ActiveScene }) {
         sel.select(PLACEMENT_NODES[hitP.kind]);
         return;
       }
-      const hit = findRegionAt(raw, project.geometry.regions, tol);
       sel.selectPlacement(null);
+      // 外周の辺 (輪郭から数 px 以内) を領域より先に: 境界条件のページを開く
+      const edge = findDomainEdgeAt(raw, project, tol);
+      if (edge !== null) {
+        sel.selectRegion(null);
+        sel.select(`edge:${edgeIdOf(project, edge)}`);
+        return;
+      }
+      const hit = findRegionAt(raw, project.geometry.regions, tol);
       sel.selectRegion(hit ? hit.id : null);
     } else if (tool === "polyline") {
       setPts((prev) => [...prev, pt]);
@@ -655,7 +665,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
       const sel = project.geometry.regions.find((r) => r.id === selectedRegion);
       if (sel?.polygon) {
         const v = findVertexHandle(sel.polygon, camera, sx, sy);
-        if (v !== null && sel.polygon.length > 3) edit(t("cad.deleteVertex"), (d) => void removeRegionVertex(d, sel.id, v));
+        if (v !== null) edit(t("cad.deleteVertex"), (d) => void removeRegionVertex(d, sel.id, v));
       }
       return;
     }
@@ -666,7 +676,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
     const tool = vs.tool;
     if (e.key === "Escape") {
       e.preventDefault();
-      const busy = pts.length > 0 || dragRef.current !== null || preview.polygon || preview.move || preview.radius != null;
+      const busy = pts.length > 0 || dragRef.current !== null || preview.path || preview.move || preview.radius != null;
       setPts([]);
       setPreview({});
       dragRef.current = null;
@@ -777,6 +787,13 @@ export function Viewer({ active }: { active: ActiveScene }) {
       </div>
     </div>
   );
+}
+
+/** 選んだ外周の辺 (ツリーの "edge:<ID>") の番号 */
+function selectedEdgeIndex(p: Project, node: string): number | null {
+  if (!node.startsWith("edge:")) return null;
+  const i = edgeIndexOf(p, node.slice(5));
+  return i >= 0 ? i : null;
 }
 
 function hitRect(pt: Point, a: Point, b: Point, tol: number): boolean {

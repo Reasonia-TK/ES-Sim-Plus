@@ -2,10 +2,11 @@
 
 import { create } from "zustand";
 import { useDocument } from "./documentStore";
+import { edgeIndexOf } from "./project";
 
 /**
  * ツリーのノード ID:
- * "project" / "geometry" / "domain" / "regions" / "region:<id>" / "boundaries" / "edge:<i>" / "mesh" / "bfield" /
+ * "project" / "geometry" / "domain" / "regions" / "region:<id>" / "boundaries" / "edge:<辺の ID>" / "mesh" / "bfield" /
  * "studies" / "study:<kind>" / "results"
  */
 export type NodeId = string;
@@ -74,6 +75,8 @@ useDocument.subscribe((s, prev) => {
     patch.selectedRegion = null;
     if (sel.activeNode === `region:${sel.selectedRegion}`) patch.activeNode = "regions";
   }
+  // 消えた外周の辺 (頂点を消した・元に戻したなど) は境界条件の一覧へ
+  if (sel.activeNode.startsWith("edge:") && edgeIndexOf(s.project, sel.activeNode.slice(5)) < 0) patch.activeNode = "boundaries";
   const pl = sel.selectedPlacement;
   if (pl) {
     const [a, b] = PLACEMENT_PATHS[pl.kind];

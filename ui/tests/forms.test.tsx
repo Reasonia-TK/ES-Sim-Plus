@@ -110,7 +110,7 @@ describe("settings pages", () => {
     });
     doc().replace(p, null);
     usePrefs.setState({ showAdvanced: true });
-    const nodes = ["project", "domain", "regions", "region:c1", "region:d1", "boundaries", "edge:0", "edge:1", "mesh", "bfield",
+    const nodes = ["project", "domain", "regions", "region:c1", "region:d1", "boundaries", "edge:e1", "edge:e2", "mesh", "bfield",
       "study:fem", "study:trace", "study:pic", "study:pic1d", "study:fluid1d", "study:fluid2d", "study:dsmc", "study:tl", "study:sweep", "results"];
     for (const n of nodes) {
       act(() => useSelection.setState({ activeNode: n }));
@@ -121,7 +121,7 @@ describe("settings pages", () => {
   });
 
   it("changes an edge to periodic and pairs it with the opposite edge", () => {
-    useSelection.setState({ activeNode: "edge:0" });
+    useSelection.setState({ activeNode: "edge:e1" });
     render(<SettingsPanel />);
     fireEvent.change(screen.getByLabelText("種類"), { target: { value: "periodic" } });
     expect(doc().project.geometry.boundaries.find((b) => b.type === "periodic")?.edges).toEqual([0, 2]);
@@ -141,7 +141,7 @@ describe("settings pages", () => {
   });
 
   it("adds an RF component with v1's defaults", () => {
-    useSelection.setState({ activeNode: "edge:1" });
+    useSelection.setState({ activeNode: "edge:e2" });
     render(<SettingsPanel />);
     fireEvent.click(screen.getByLabelText("RF を重ねる"));
     expect(doc().project.geometry.boundaries[1].voltage_rf).toEqual({ amplitude: 100, freq_hz: 13.56e6, phase_deg: 0 });

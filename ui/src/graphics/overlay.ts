@@ -2,7 +2,9 @@
 // 色分け・対称軸・領域)・配置物・選択とハンドル・作図中の線・計測・プローブ・カラーバー・ルーラー。
 // 場とメッシュは間の WebGL の層が描く。色はテーマの CSS 変数から読む。
 
-import { axisEdge, boundaryOfEdge, type Point, type Project, type Region } from "../model/project";
+import { pathBounds, segFromBulge, type ArcSeg } from "../cad/geom";
+import { bulgesOf, pathHandles, type PathData } from "../cad/path";
+import { axisEdges, boundaryOfEdge, domainPath, regionPath, type Point, type Project, type Region } from "../model/project";
 import { lengthUnitLabel, toDisplayLength, type LengthUnit } from "../util/format";
 import { gridStep, toScreen, toWorld, type Camera } from "./camera";
 import { colormapCss, type ColormapKey } from "./colormaps";
@@ -86,15 +88,54 @@ function pathPolygon(ctx: CanvasRenderingContext2D, v: View, poly: Point[]): voi
   ctx.closePath();
 }
 
+/**
+ * 頂点 a から b への辺を今の道に足す (円弧は ctx.arc。画面は y が下向きなので角度の符号を反転し、ワールドの
+ * 反時計回りは画面の反時計回り (角度の減る向き) になる)。現在の点は a にあるとする
+ */
+function edgeTo(ctx: CanvasRenderingContext2D, v: View, a: Point, b: Point, bulge: number): void {
+  if (!bulge) {
+    const [x, y] = toScreen(v.camera, b);
+    ctx.lineTo(x, y);
+    return;
+  }
+  const s = segFromBulge(a, b, bulge) as ArcSeg;
+  const [cx, cy] = toScreen(v.camera, s.center);
+  ctx.arc(cx, cy, s.r * v.camera.scale, -s.a0, -s.a1, s.ccw);
+}
+
+/** 閉じた経路 (頂点 + 円弧) */
+function tracePath(ctx: CanvasRenderingContext2D, v: View, path: PathData, offset: Point = [0, 0]): void {
+  const poly = path.polygon.map(([x, y]) => [x + offset[0], y + offset[1]] as Point);
+  const b = bulgesOf(path);
+  ctx.beginPath();
+  if (poly.length === 0) return;
+  const [x0, y0] = toScreen(v.camera, poly[0]);
+  ctx.moveTo(x0, y0);
+  for (let i = 0; i < poly.length; i++) edgeTo(ctx, v, poly[i], poly[(i + 1) % poly.length], b[i]);
+  ctx.closePath();
+}
+
+/** 外周の辺 i だけの道 */
+function traceDomainEdge(ctx: CanvasRenderingContext2D, v: View, p: Project, i: number): void {
+  const poly = p.geometry.domain.polygon;
+  const a = poly[i];
+  const [x, y] = toScreen(v.camera, a);
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  edgeTo(ctx, v, a, poly[(i + 1) % poly.length], bulgesOf(domainPath(p))[i]);
+}
+
 function pathRegion(ctx: CanvasRenderingContext2D, v: View, r: Region, offset: Point = [0, 0], radius?: number): void {
   if (r.shape) {
     const [cx, cy] = toScreen(v.camera, [r.shape.center[0] + offset[0], r.shape.center[1] + offset[1]]);
     ctx.beginPath();
     ctx.arc(cx, cy, (radius ?? r.shape.radius) * v.camera.scale, 0, 2 * Math.PI);
   } else {
-    pathPolygon(ctx, v, (r.polygon ?? []).map(([x, y]) => [x + offset[0], y + offset[1]] as Point));
+    tracePath(ctx, v, regionPath(r), offset);
   }
 }
+
+
 
 function segment(ctx: CanvasRenderingContext2D, v: View, a: Point, b: Point): void {
   const [x0, y0] = toScreen(v.camera, a);
@@ -157,7 +198,7 @@ export function tickLabel(valueM: number, stepM: number, unit: LengthUnit): stri
 export function drawBase(ctx: CanvasRenderingContext2D, v: View, project: Project, colors: OverlayColors, showGrid: boolean): void {
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, v.width, v.height);
-  pathPolygon(ctx, v, project.geometry.domain.polygon);
+  tracePath(ctx, v, domainPath(project));
   ctx.fillStyle = colors.domain;
   ctx.fill();
   if (!showGrid) return;
@@ -214,8 +255,8 @@ export interface Drawing {
 }
 
 export interface Preview {
-  /** 頂点のドラッグ中の多角形 */
-  polygon?: Point[] | null;
+  /** 頂点のドラッグ中の輪郭 (頂点 + 円弧) */
+  path?: PathData | null;
   /** 半径のドラッグ中の半径 */
   radius?: number | null;
   /** 移動のドラッグ中のずれ */
@@ -245,6 +286,8 @@ export interface OverlayState {
   fieldShown: boolean;
   selectedRegion: string | null;
   selectedPlacement: { kind: Placement["kind"]; index: number } | null;
+  /** 選んだ外周の辺の番号 */
+  selectedEdge: number | null;
   tool: Tool;
   preview: Preview;
   drawing: Drawing;
@@ -286,17 +329,17 @@ function drawGeometry(ctx: CanvasRenderingContext2D, s: OverlayState): void {
   const { view: v, project: p, colors: c } = s;
   const poly = p.geometry.domain.polygon;
   // ドメインの輪郭と境界条件の辺
-  pathPolygon(ctx, v, poly);
+  tracePath(ctx, v, domainPath(p));
   ctx.strokeStyle = c.edge;
   ctx.lineWidth = 1;
   ctx.stroke();
-  const axis = axisEdge(p);
+  const axis = new Set(axisEdges(p));
   for (let i = 0; i < poly.length; i++) {
     const bc = boundaryOfEdge(p, i);
     let color: string | null = null;
     let width = 1;
     let dash: number[] = [];
-    if (axis === i) {
+    if (axis.has(i)) {
       color = c.axis;
       width = 2;
       dash = [10, 4, 2, 4];
@@ -313,12 +356,30 @@ function drawGeometry(ctx: CanvasRenderingContext2D, s: OverlayState): void {
       dash = [8, 5];
     }
     if (!color) continue;
-    segment(ctx, v, poly[i], poly[(i + 1) % poly.length]);
+    traceDomainEdge(ctx, v, p, i);
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
     ctx.setLineDash(dash);
     ctx.stroke();
     ctx.setLineDash([]);
+  }
+  // 選んだ外周の辺 (境界条件の色の上に、選択の色の縁取り)
+  if (s.selectedEdge !== null && s.selectedEdge < poly.length) {
+    traceDomainEdge(ctx, v, p, s.selectedEdge);
+    ctx.strokeStyle = c.selection;
+    ctx.lineWidth = 6;
+    ctx.globalAlpha = 0.55;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = "#ffffff";
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (const q of [poly[s.selectedEdge], poly[(s.selectedEdge + 1) % poly.length]]) {
+      const [x, y] = toScreen(v.camera, q);
+      dot(ctx, x, y, 3.5, c.selection, "#1b1e24");
+    }
   }
   // 領域
   for (const r of p.geometry.regions) {
@@ -335,31 +396,27 @@ function drawGeometry(ctx: CanvasRenderingContext2D, s: OverlayState): void {
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
-  // 領域の名前 (小さすぎる領域には出さない)
+  // 領域の名前 (小さすぎる領域には出さない)。位置は頂点と辺の中点 (円弧は弧の中点) の平均
   for (const r of p.geometry.regions) {
-    const pts = r.shape ? [r.shape.center] : (r.polygon ?? []);
-    if (pts.length === 0) continue;
+    let pts: Point[];
+    let size: number;
+    if (r.shape) {
+      pts = [r.shape.center];
+      size = 2 * r.shape.radius * v.camera.scale;
+    } else {
+      const path = regionPath(r);
+      if (path.polygon.length === 0) continue;
+      const h = pathHandles(path);
+      pts = [...h.vertices, ...h.midpoints];
+      const b = pathBounds(path.polygon, path.bulges);
+      size = Math.min(b.x1 - b.x0, b.y1 - b.y0) * v.camera.scale;
+    }
     const cx = pts.reduce((a, q) => a + q[0], 0) / pts.length;
     const cy = pts.reduce((a, q) => a + q[1], 0) / pts.length;
     const [x, y] = toScreen(v.camera, [cx, cy]);
-    const size = r.shape ? 2 * r.shape.radius * v.camera.scale : bboxPx(pts, v.camera);
     if (size < 28) continue;
     label(ctx, r.id, x, y, c.text, "center", "middle");
   }
-}
-
-function bboxPx(pts: Point[], cam: Camera): number {
-  let x0 = Infinity;
-  let x1 = -Infinity;
-  let y0 = Infinity;
-  let y1 = -Infinity;
-  for (const [x, y] of pts) {
-    x0 = Math.min(x0, x);
-    x1 = Math.max(x1, x);
-    y0 = Math.min(y0, y);
-    y1 = Math.max(y1, y);
-  }
-  return Math.min(x1 - x0, y1 - y0) * cam.scale;
 }
 
 function placementColor(s: OverlayState, pl: Placement): string {
@@ -484,19 +541,18 @@ function drawSelection(ctx: CanvasRenderingContext2D, s: OverlayState): void {
       squareHandle(ctx, hx, hy, c.selection);
     }
   } else {
-    const poly = s.preview.polygon ?? sel.polygon ?? [];
-    pathPolygon(ctx, v, poly);
+    const path = s.preview.path ?? regionPath(sel);
+    tracePath(ctx, v, path);
     ctx.stroke();
     ctx.setLineDash([]);
     if (handles) {
-      for (const q of poly) {
+      const h = pathHandles(path);
+      for (const q of h.vertices) {
         const [x, y] = toScreen(v.camera, q);
         squareHandle(ctx, x, y, c.selection);
       }
-      for (let i = 0; i < poly.length; i++) {
-        const a = poly[i];
-        const b = poly[(i + 1) % poly.length];
-        const [x, y] = toScreen(v.camera, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+      for (const q of h.midpoints) {
+        const [x, y] = toScreen(v.camera, q);
         dot(ctx, x, y, 4, c.handleMid);
       }
     }

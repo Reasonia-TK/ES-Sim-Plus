@@ -1,30 +1,90 @@
 // ジオメトリの設定ページ: プロジェクト・ドメイン・領域 (一覧と各領域)・境界条件 (一覧と各辺)・磁場。
 
+import type { TFunction } from "i18next";
+import type { Draft } from "immer";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { askConfirm } from "../app/dialogs";
+import { segFromBulge, segLength, type ArcSeg } from "../cad/geom";
+import { bulgesOf, hasArcs, moveVertex, setBulge } from "../cad/path";
 import { SchemaField } from "../forms/SchemaField";
 import { setValue } from "../forms/useField";
-import { edgeBcType, oppositeEdge, setEdgeType, boundaryIndexOfEdge, type EdgeBcType } from "../model/boundaryOps";
+import { edgeBcType, periodicPartnerOf, setEdgeType, boundaryIndexOfEdge, type EdgeBcType } from "../model/boundaryOps";
 import { documentName, useDocument, useIsDirty } from "../model/documentStore";
+import {
+  applyDomainEdit,
+  moveDomainVertex,
+  periodicPartners,
+  removeDomainVertex,
+  reshapeDomain,
+  setDomainBulge,
+  splitDomainEdge,
+  type DomainEdit,
+} from "../model/domainOps";
 import { unionPolygons } from "../model/mergeRegions";
-import { axisEdge, coordOf, isRectDomain, polygonBounds, type Coord, type Project, type Region, type RegionType } from "../model/project";
-import { addCircleRegion, addRectRegion, deleteRegion, renameRegion, setRegionType, validateRegionId } from "../model/regionOps";
+import {
+  axisEdges,
+  coordOf,
+  domainBounds,
+  domainPath,
+  edgeIdsOf,
+  edgeIndexOf,
+  isRectDomain,
+  regionPath,
+  type Coord,
+  type Project,
+  type Region,
+  type RegionType,
+} from "../model/project";
+import {
+  addCircleRegion,
+  addRectRegion,
+  deleteRegion,
+  removeRegionVertex,
+  renameRegion,
+  setRegionPath,
+  setRegionType,
+  splitRegionEdge,
+  validateRegionId,
+} from "../model/regionOps";
 import { useSelection } from "../model/selection";
 import { usePrefs } from "../prefs/prefs";
 import { edgeLabel, edgeSummary } from "../tree/treeModel";
-import type { LengthUnit } from "../util/format";
+import { formatNumber, lengthUnitLabel, toDisplayLength, type LengthUnit } from "../util/format";
 import { rfComponents, type VoltageWaveform } from "../util/waveform";
 import { CommitText, Field, LengthInput, Select } from "./inputs";
 import { useLengthUnitLabel } from "./useLengthUnitLabel";
 import { DefQuantity, Hint } from "./widgets/common";
+import { PathTable, type PathTableOps } from "./widgets/PathTable";
 import { RfEditor } from "./widgets/RfEditor";
-import { VertexTable } from "./widgets/VertexTable";
 import { VoltagePreview } from "./widgets/VoltagePreview";
 import { WaveformEditor } from "./widgets/WaveformEditor";
 import { logInfo } from "../app/messages";
 
 const useUpdate = () => useDocument((s) => s.update);
+
+/** 外周を変える (辺の番号の参照も付け替える)。外れた境界条件があれば知らせる */
+export function editDomain(t: TFunction, label: string, build: (p: Project) => DomainEdit | null): void {
+  let removed = 0;
+  useDocument.getState().update(label, (d) => {
+    const e = build(d as Project);
+    if (!e) return;
+    const r = applyDomainEdit(d, e);
+    removed = r.boundariesRemoved + r.periodicRemoved;
+  });
+  if (removed > 0) logInfo(t("msg.source.app"), t("settings.bcRemoved", { n: removed }));
+}
+
+/** 対称軸 (軸対称で r = 0 の辺) の境界条件を外す。周期境界は対の片方だけ残すと backend が拒むのでまるごと外す */
+function removeAxisBoundaries(d: Draft<Project>): boolean {
+  const axis = axisEdges(d as Project);
+  if (axis.length === 0) return false;
+  const before = JSON.stringify(d.geometry.boundaries);
+  d.geometry.boundaries = d.geometry.boundaries.filter((b) => !(b.type === "periodic" && b.edges.some((e) => axis.includes(e))));
+  for (const b of d.geometry.boundaries) b.edges = b.edges.filter((e) => !axis.includes(e));
+  d.geometry.boundaries = d.geometry.boundaries.filter((b) => b.edges.length > 0);
+  return JSON.stringify(d.geometry.boundaries) !== before;
+}
 
 export function CoordSelect() {
   const { t } = useTranslation();
@@ -43,18 +103,11 @@ export function CoordSelect() {
             let removed = false;
             update(t("action.coord"), (d) => {
               d.coord = c;
-              // 軸対称に切り替えたら対称軸の辺の境界条件を外す (v1 と同じ)。周期境界は対の片方だけ残すと backend が
-              // 拒むので、軸の辺を含むものはまるごと外す
-              const axis = axisEdge(d as Project);
-              if (axis !== null) {
-                const before = JSON.stringify(d.geometry.boundaries);
-                d.geometry.boundaries = d.geometry.boundaries.filter((b) => !(b.type === "periodic" && b.edges.includes(axis)));
-                for (const b of d.geometry.boundaries) b.edges = b.edges.filter((e) => e !== axis);
-                d.geometry.boundaries = d.geometry.boundaries.filter((b) => b.edges.length > 0);
-                removed = JSON.stringify(d.geometry.boundaries) !== before;
-                // 磁場は平面 2D だけ (軸対称では backend が拒む)
-                if (d.b_field) d.b_field = null;
-              }
+              if (c === "xy") return;
+              // 軸対称に切り替えたら対称軸 (r = 0 の上の辺) の境界条件を外す (v1 と同じ)
+              removed = removeAxisBoundaries(d);
+              // 磁場は平面 2D だけ (軸対称では backend が拒む)
+              if (d.b_field) d.b_field = null;
             });
             if (removed) logInfo(t("msg.source.app"), t("settings.axisBcRemoved"));
           }
@@ -104,26 +157,33 @@ export function ProjectPage() {
 export function DomainPage() {
   const { t } = useTranslation();
   const project = useDocument((s) => s.project);
-  const update = useUpdate();
   const u = useLengthUnitLabel();
   const coord = coordOf(project);
-  const b = polygonBounds(project.geometry.domain.polygon);
+  const b = domainBounds(project);
+  const rect = isRectDomain(project);
+  const mode = project.mesh.mode ?? "unstructured";
   const setSize = (w: number, h: number) =>
-    update(t("action.domainSize"), (d) => {
-      d.geometry.domain.polygon = [
+    editDomain(t, t("action.domainSize"), (p) =>
+      reshapeDomain(p, [
         [b.x0, b.y0],
         [b.x0 + w, b.y0],
         [b.x0 + w, b.y0 + h],
         [b.x0, b.y0 + h],
-      ];
-    });
+      ]),
+    );
+  const ops: PathTableOps = {
+    setVertex: (i, q) => editDomain(t, t("action.domainShape"), (p) => moveDomainVertex(p, i, q)),
+    setBulge: (i, bulge) => editDomain(t, t("action.domainShape"), (p) => setDomainBulge(p, i, bulge)),
+    split: (i) => editDomain(t, t("action.splitEdge"), (p) => splitDomainEdge(p, i)),
+    removeVertex: (i) => editDomain(t, t("action.domainShape"), (p) => removeDomainVertex(p, i)),
+  };
   const wLabel = coord === "rz" ? t("settings.widthZ") : coord === "rz_x0" ? t("settings.widthR") : t("settings.width");
   const hLabel = coord === "rz" ? t("settings.heightR") : coord === "rz_x0" ? t("settings.heightZ") : t("settings.height");
   return (
     <>
       <CoordSelect />
       {coord !== "xy" && <Hint>{t("settings.axisHint")}</Hint>}
-      {isRectDomain(project) ? (
+      {rect ? (
         <>
           <Field label={wLabel} unit={u}>
             {(id, onError) => <LengthInput id={id} onError={onError} value={b.x1 - b.x0} min={0} exclusive onCommit={(w) => setSize(w, b.y1 - b.y0)} />}
@@ -133,11 +193,14 @@ export function DomainPage() {
           </Field>
         </>
       ) : (
-        <>
-          <p className="hint">{t("settings.nonRectDomain", { n: project.geometry.domain.polygon.length })}</p>
-          <VertexTable path={["geometry", "domain", "polygon"]} label={t("tree.domain")} />
-        </>
+        <p className="hint">{t("settings.nonRectDomain", { n: project.geometry.domain.polygon.length })}</p>
       )}
+      {!rect && mode !== "unstructured" && <Hint tone="warn">{t("settings.gridNeedsRect", { mode })}</Hint>}
+      {/* 矩形でも頂点を足す・辺を円弧にすると任意の形にできる (矩形のうちは閉じておく) */}
+      <details className="subsection" open={!rect}>
+        <summary className="subsection-title">{t("settings.domainVertices")}</summary>
+        <PathTable path={domainPath(project)} label={t("tree.domain")} ops={ops} />
+      </details>
     </>
   );
 }
@@ -185,10 +248,12 @@ export function RegionsPage() {
 function RegionMerge({ region }: { region: Region }) {
   const { t } = useTranslation();
   const regions = useDocument((s) => s.project.geometry.regions);
-  const others = regions.filter((r) => r.id !== region.id && r.polygon);
+  const others = regions.filter((r) => r.id !== region.id && r.polygon && !hasArcs(regionPath(r)));
   const [other, setOther] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   if (!region.polygon) return <Hint>{t("merge.onlyPolygons")}</Hint>;
+  // 円弧を含む領域は多角形の結合では形が崩れる (P7e のブーリアンで扱う)
+  if (hasArcs(regionPath(region))) return <Hint>{t("merge.arcs")}</Hint>;
   if (others.length === 0) return null;
   const target = others.find((r) => r.id === other) ?? others[0];
   return (
@@ -256,6 +321,21 @@ function RegionLocalSize({ id }: { id: string }) {
       <Hint>{mode === "unstructured" ? t("settings.localMeshSizeHint") : t("settings.localMeshSizeIgnored")}</Hint>
     </>
   );
+}
+
+/** 領域の頂点の表の操作 (円弧を保つ) */
+function regionPathOps(id: string, t: TFunction): PathTableOps {
+  const edit = (recipe: (d: Draft<Project>, r: Region) => void) =>
+    useDocument.getState().update(t("action.regionShape"), (d) => {
+      const r = d.geometry.regions.find((x) => x.id === id);
+      if (r) recipe(d, r as Region);
+    });
+  return {
+    setVertex: (i, q) => edit((d, r) => setRegionPath(d, id, moveVertex(regionPath(r), i, q))),
+    setBulge: (i, bulge) => edit((d, r) => setRegionPath(d, id, setBulge(regionPath(r), i, bulge))),
+    split: (i) => edit((d) => void splitRegionEdge(d, id, i)),
+    removeVertex: (i) => edit((d) => void removeRegionVertex(d, id, i)),
+  };
 }
 
 export function RegionPage({ id }: { id: string }) {
@@ -327,7 +407,7 @@ export function RegionPage({ id }: { id: string }) {
         </>
       ) : (
         <>
-          <VertexTable path={[...base, "polygon"]} label={t("action.regionShape")} />
+          <PathTable path={regionPath(r)} label={t("action.regionShape")} ops={regionPathOps(r.id, t)} />
           <RegionMerge region={r} />
         </>
       )}
@@ -358,8 +438,8 @@ export function BoundariesPage() {
     <>
       <table className="table">
         <tbody>
-          {project.geometry.domain.polygon.map((_, i) => (
-            <tr key={i} className="clickable" onClick={() => select(`edge:${i}`)}>
+          {edgeIdsOf(project).map((id, i) => (
+            <tr key={id} className="clickable" onClick={() => select(`edge:${id}`)}>
               <td>{edgeLabel(project, i, t)}</td>
               <td>{edgeSummary(project, i, t)}</td>
             </tr>
@@ -371,42 +451,87 @@ export function BoundariesPage() {
   );
 }
 
-export function EdgePage({ edge }: { edge: number }) {
+/** 辺の形の説明 (直線は長さ、円弧は中心角と半径) */
+function edgeShapeText(p: Project, i: number, t: TFunction, unit: LengthUnit): string {
+  const poly = p.geometry.domain.polygon;
+  const s = segFromBulge(poly[i], poly[(i + 1) % poly.length], bulgesOf(domainPath(p))[i]);
+  const len = (m: number) => `${formatNumber(toDisplayLength(m, unit))} ${lengthUnitLabel(unit)}`;
+  if (s.kind === "line") return t("bcPage.line", { len: len(segLength(s)) });
+  const deg = (4 * Math.atan(bulgesOf(domainPath(p))[i]) * 180) / Math.PI;
+  return t("bcPage.arc", { angle: formatNumber(deg), r: len((s as ArcSeg).r) });
+}
+
+export function EdgePage({ id }: { id: string }) {
   const { t } = useTranslation();
   const project = useDocument((s) => s.project);
+  const unit = usePrefs((s) => s.lengthUnit);
   const update = useUpdate();
   const [error, setError] = useState<string | null>(null);
+  const edge = edgeIndexOf(project, id);
+  if (edge < 0) return <Hint>{t("bcPage.missing")}</Hint>;
   const type = edgeBcType(project, edge);
-  if (type === "axis") return <Hint>{t("bcPage.axisLocked")}</Hint>;
+  const shape = (
+    <>
+      <div className="subsection-title">{t("bcPage.shape")}</div>
+      <p className="muted">{edgeShapeText(project, edge, t, unit)}</p>
+      <div className="button-row">
+        <button type="button" className="button small" onClick={() => editDomain(t, t("action.splitEdge"), (p) => splitDomainEdge(p, edgeIndexOf(p, id)))}>
+          {t("bcPage.split")}
+        </button>
+      </div>
+      <Hint>{t("bcPage.splitHint")}</Hint>
+    </>
+  );
+  if (type === "axis")
+    return (
+      <>
+        <Hint>{t("bcPage.axisLocked")}</Hint>
+        {shape}
+      </>
+    );
   const bi = boundaryIndexOfEdge(project, edge);
   const bc = bi >= 0 ? project.geometry.boundaries[bi] : null;
-  const opp = oppositeEdge(project, edge);
+  const partners = periodicPartners(project, edge);
+  const partner = periodicPartnerOf(project, edge);
   const types: EdgeBcType[] = ["neumann", "dirichlet", "symmetry", "periodic"];
   const base = ["geometry", "boundaries", bi] as const;
+  const setType = (ty: EdgeBcType, with_?: number) => {
+    let ok = true;
+    update(t("bcPage.changeType"), (d) => {
+      ok = setEdgeType(d, edge, ty, with_ ?? (ty === "periodic" ? partners[0] : undefined));
+    });
+    setError(ok ? null : t("bcPage.periodicNeedsPartner"));
+  };
   return (
     <>
       <Field label={t("bcPage.typeLabel")}>
-        {(id) => (
+        {(fid) => (
           <Select<EdgeBcType>
-            id={id}
+            id={fid}
             value={type}
             options={types.map((ty) => ({
               value: ty,
               label: t(`bcPage.type.${ty}`),
-              disabled: ty === "periodic" && (opp === null || axisEdge(project) === opp),
+              disabled: ty === "periodic" && partners.length === 0,
             }))}
-            onChange={(ty) => {
-              let ok = true;
-              update(t("bcPage.changeType"), (d) => {
-                ok = setEdgeType(d, edge, ty);
-              });
-              setError(ok ? null : t("bcPage.periodicNeedsRect"));
-            }}
+            onChange={(ty) => setType(ty)}
           />
         )}
       </Field>
       {error && <Hint tone="error">{error}</Hint>}
-      {type === "periodic" && opp !== null && <Hint>{t("bcPage.periodicPair", { edge: edgeLabel(project, opp, t) })}</Hint>}
+      {type === "periodic" && partner !== null && partners.length > 1 && (
+        <Field label={t("bcPage.periodicPartner")}>
+          {(fid) => (
+            <Select<string>
+              id={fid}
+              value={String(partner)}
+              options={partners.map((j) => ({ value: String(j), label: edgeLabel(project, j, t) }))}
+              onChange={(j) => setType("periodic", Number(j))}
+            />
+          )}
+        </Field>
+      )}
+      {type === "periodic" && partner !== null && partners.length <= 1 && <Hint>{t("bcPage.periodicPair", { edge: edgeLabel(project, partner, t) })}</Hint>}
       {bc && bc.edges.length > 1 && type !== "periodic" && <Hint>{t("bcPage.shared", { n: bc.edges.length })}</Hint>}
       {type === "dirichlet" && bc && (
         <>
@@ -424,6 +549,7 @@ export function EdgePage({ edge }: { edge: number }) {
       )}
       {type === "symmetry" && <Hint>{t("bcPage.symmetryHint")}</Hint>}
       {type === "neumann" && <Hint>{t("bcPage.neumannHint")}</Hint>}
+      {shape}
     </>
   );
 }

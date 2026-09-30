@@ -12,7 +12,6 @@ import {
   findRegionAt,
   findVertexHandle,
   hitRadiusHandle,
-  insertMidpoint,
   pointInPolygon,
   rectFromCorners,
 } from "../src/graphics/hitTest";
@@ -33,14 +32,15 @@ import {
   placeGasBoundary,
   placeSheathLine,
 } from "../src/model/placements";
-import { newProject, tidy, type Point, type Project, type Region } from "../src/model/project";
+import { splitEdge } from "../src/cad/path";
+import { newProject, regionPath, tidy, type Point, type Project, type Region } from "../src/model/project";
 import {
   addCircleRegionAt,
   addPolygonRegion,
   moveRegion,
   removeRegionVertex,
   setCircleRadius,
-  setRegionPolygon,
+  setRegionPath,
 } from "../src/model/regionOps";
 import { meshKey, solveKey, toViewMesh, type MeshEntry, type SolveEntry } from "../src/results/staticResults";
 
@@ -197,10 +197,10 @@ describe("hit testing (v1 rules)", () => {
     expect(findVertexHandle(small.polygon!, cam, vx + 5, vy)).toBe(1);
     expect(findVertexHandle(small.polygon!, cam, vx + 12, vy)).toBeNull();
     const [mx, my] = toScreen(cam, [0.05, 0.04]);
-    expect(findMidpointHandle(small.polygon!, cam, mx, my + 3)).toBe(0);
+    expect(findMidpointHandle(regionPath(small), cam, mx, my + 3)).toBe(0);
     const [rx, ry] = toScreen(cam, [0.21, 0.05]);
     expect(hitRadiusHandle(circ.shape!, cam, rx - 4, ry)).toBe(true);
-    expect(insertMidpoint(small.polygon!, 0)).toEqual([[0.04, 0.04], [0.05, 0.04], [0.06, 0.04], [0.06, 0.06], [0.04, 0.06]]);
+    expect(splitEdge(regionPath(small), 0).polygon).toEqual([[0.04, 0.04], [0.05, 0.04], [0.06, 0.04], [0.06, 0.06], [0.04, 0.06]]);
     expect(rectFromCorners([0.3, 0.1], [0.1, 0.2])).toEqual([[0.1, 0.1], [0.3, 0.1], [0.3, 0.2], [0.1, 0.2]]);
     expect(dedupeTail([[0, 0], [1, 1], [1, 1]])).toEqual([[0, 0], [1, 1]]);
   });
@@ -214,7 +214,7 @@ describe("canvas edits", () => {
     expect(produce(p, (d) => void addPolygonRegion(d, [[0, 0], [1, 1]])).geometry.regions).toHaveLength(1);
     p = produce(p, (d) => moveRegion(d, "region1", 0.1 + 0.2 - 0.3 + 0.005, 0.005));
     expect(p.geometry.regions[0].polygon![0]).toEqual([0.015, 0.015]);
-    p = produce(p, (d) => setRegionPolygon(d, "region1", [[0, 0], [0.1, 0], [0.1, 0.1], [0, 0.1]]));
+    p = produce(p, (d) => setRegionPath(d, "region1", { polygon: [[0, 0], [0.1, 0], [0.1, 0.1], [0, 0.1]] }));
     p = produce(p, (d) => void removeRegionVertex(d, "region1", 3));
     expect(p.geometry.regions[0].polygon).toHaveLength(3);
     // 3 点のときは消さない

@@ -17,16 +17,16 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 
 import gmsh
 import numpy as np
 
+# 円形状の多角形分割数の下限・上限 (仕様書 §8 スキーマ契約参照)。円弧 (bulges) の弦への分割と同じ値を使うので
+# paths.py に置いてある
+from .paths import CIRCLE_SEGMENTS_MAX, CIRCLE_SEGMENTS_MIN
 from .schema import EdgeMeshSize, Project, Region, VoltageWaveform, rf_components
-
-# 円形状の多角形分割数の下限・上限 (仕様書 §8 スキーマ契約参照)
-CIRCLE_SEGMENTS_MIN = 24
-CIRCLE_SEGMENTS_MAX = 720
 
 
 @dataclass
@@ -159,8 +159,25 @@ def generate_mesh(project: Project) -> Mesh:
     はこの関数を通るため、同じ矩形 domain 前提の構造格子 (階段近似) にフォールバックする。
     """
     if project.mesh.mode in ("structured", "cartesian"):
-        return _generate_structured(project)
-    return _generate_unstructured(project)
+        mesh = _generate_structured(project)
+    else:
+        mesh = _generate_unstructured(project)
+    _relabel_arc_edges(project, mesh)
+    return mesh
+
+
+_EDGE_LABEL = re.compile(r"edge(\d+)")
+
+
+def _relabel_arc_edges(project: Project, mesh: Mesh) -> None:
+    """外周の円弧を弦に分けたとき (schema.Project._flatten_arcs)、電極ラベル "edge{k}" を元の辺の番号に直す
+    (同じ円弧の弦は 1 つの電極にまとまる)。円弧が無ければ何もしない。"""
+    if project.geometry._edge_origin is None:
+        return
+    for node, label in mesh.electrode.items():
+        m = _EDGE_LABEL.fullmatch(label)
+        if m:
+            mesh.electrode[node] = project.geometry.edge_label(int(m.group(1)))
 
 
 def _generate_unstructured(project: Project) -> Mesh:

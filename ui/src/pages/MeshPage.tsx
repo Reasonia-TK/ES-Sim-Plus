@@ -5,7 +5,7 @@ import { OptionalBlock } from "../forms/blocks";
 import { SchemaField, Toggle } from "../forms/SchemaField";
 import { setValue } from "../forms/useField";
 import { useDocument } from "../model/documentStore";
-import { polygonBounds, type Point } from "../model/project";
+import { domainBounds, type Point } from "../model/project";
 import { DEFAULT_AMR } from "../schema/defaults";
 import { formatNumber, lengthUnitLabel, toDisplayLength } from "../util/format";
 import { usePrefs } from "../prefs/prefs";
@@ -28,7 +28,7 @@ function AmrEditor() {
   const project = useDocument((s) => s.project);
   const amr = (project.mesh.amr ?? null) as Amr | null;
   const base = ["mesh", "amr"] as const;
-  const b = polygonBounds(project.geometry.domain.polygon);
+  const b = domainBounds(project);
   const label = t("mesh.amr");
   return (
     <OptionalBlock path={base} title={label} defaults={() => structuredClone(DEFAULT_AMR)} hint={t("mesh.amrHint")}>

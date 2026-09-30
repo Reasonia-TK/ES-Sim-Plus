@@ -5,7 +5,8 @@ import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useJobs } from "../jobs/jobsStore";
 import type { JobSummary } from "../jobs/types";
-import { coordOf, type Project } from "../model/project";
+import { hasArcs, pathHandles } from "../cad/path";
+import { coordOf, domainPath, type Project } from "../model/project";
 import { formatNumber, formatSi } from "../util/format";
 import { ampAtF0, center1d } from "./charts/Charts1d";
 import { timingRows, useLength } from "./charts/common";
@@ -190,10 +191,12 @@ function PicSummary({ job, project }: { job: JobSummary; project: Project | null
 
 // ---- 流体 2D ----
 
-/** ドメインの頂点の平均にいちばん近い節点 (v1 と同じ) */
+/** ドメインの頂点 (円弧は弧の中点も) の平均にいちばん近い節点 (v1 と同じ) */
 function centerNode(project: Project | null, nodes: [number, number][] | undefined): number | null {
-  const poly = project?.geometry.domain.polygon;
-  if (!poly?.length || !nodes?.length) return null;
+  const path = project ? domainPath(project) : null;
+  if (!path?.polygon.length || !nodes?.length) return null;
+  const h = pathHandles(path);
+  const poly = hasArcs(path) ? [...h.vertices, ...h.midpoints] : h.vertices;
   const cx = poly.reduce((a, p) => a + p[0], 0) / poly.length;
   const cy = poly.reduce((a, p) => a + p[1], 0) / poly.length;
   let best = 0;

@@ -4,7 +4,7 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { AdvancedSwitch } from "../forms/blocks";
 import { useDocument } from "../model/documentStore";
-import type { Project } from "../model/project";
+import { edgeIndexOf, type Project } from "../model/project";
 import { useSelection } from "../model/selection";
 import { edgeLabel, type StudyKind } from "../tree/treeModel";
 import { BFieldPage, BoundariesPage, DomainPage, EdgePage, ProjectPage, RegionPage, RegionsPage } from "./GeometryPages";
@@ -23,7 +23,10 @@ function pageTitle(node: string, project: Project, t: TFunction, jobs: Record<st
     const job = jobs[node.slice(7)];
     return `${t("tree.results")} › ${job ? jobName(job) : "-"}`;
   }
-  if (node.startsWith("edge:")) return `${t("tree.boundaries")} › ${edgeLabel(project, Number(node.slice(5)), t)}`;
+  if (node.startsWith("edge:")) {
+    const i = edgeIndexOf(project, node.slice(5));
+    return `${t("tree.boundaries")} › ${i >= 0 ? edgeLabel(project, i, t) : "-"}`;
+  }
   if (node.startsWith("study:")) return t(`study.${node.slice(6) as StudyKind}`);
   const titles: Record<string, string> = {
     project: t("tree.project"),
@@ -58,7 +61,7 @@ function PageBody({ node }: { node: string }) {
   if (node === "regions") return <RegionsPage />;
   if (node.startsWith("region:")) return <RegionPage id={node.slice(7)} />;
   if (node === "boundaries") return <BoundariesPage />;
-  if (node.startsWith("edge:")) return <EdgePage edge={Number(node.slice(5))} />;
+  if (node.startsWith("edge:")) return <EdgePage id={node.slice(5)} />;
   if (node === "mesh") return <MeshPage />;
   if (node === "bfield") return <BFieldPage />;
   if (node.startsWith("study:")) {

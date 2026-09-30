@@ -1342,8 +1342,28 @@ details > summary {
   background: var(--bg-hover);
 }
 
+/* 頂点の表 (x・y・円弧の中心角): 欄の幅を固定して狭い設定欄でも数値が切れないようにする */
+.vertex-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.vertex-table th:first-child {
+  width: 1.8em;
+}
+
+.vertex-table th:nth-child(4) {
+  width: 22%;
+}
+
+.vertex-table th:last-child {
+  width: 4.4em;
+}
+
 .vertex-table td .input {
   height: 22px;
+  width: 100%;
+  min-width: 0;
 }
 
 .line-chart {

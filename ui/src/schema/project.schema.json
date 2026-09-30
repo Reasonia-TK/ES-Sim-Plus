@@ -445,7 +445,7 @@
   "Domain": {
    "properties": {
     "polygon": {
-     "description": "解析領域の外周 (閉ポリゴン、反時計回り)",
+     "description": "解析領域の外周 (閉じた経路、反時計回り)。直線だけなら 3 頂点以上、円弧を含めば 2 頂点以上",
      "items": {
       "maxItems": 2,
       "minItems": 2,
@@ -459,11 +459,43 @@
       ],
       "type": "array"
      },
-     "minItems": 3,
+     "minItems": 2,
      "title": "Polygon",
      "type": "array",
      "x-geom": true,
      "x-unit": "m"
+    },
+    "bulges": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "number"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "辺ごとの円弧 (辺 i は頂点 i → i+1)。bulge = tan(θ/4)、θ は中心角で正は反時計回り、0 は直線 (DXF の LWPOLYLINE と同じ)。ソルバーには検証の段階でメッシュ幅に合わせた弦に分けて渡す (paths.py)",
+     "title": "Bulges",
+     "x-unit": "1"
+    },
+    "edge_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Edge Ids"
     }
    },
    "required": [
@@ -2341,7 +2373,7 @@
         ],
         "type": "array"
        },
-       "minItems": 3,
+       "minItems": 2,
        "type": "array"
       },
       {
@@ -2352,6 +2384,23 @@
      "title": "Polygon",
      "x-geom": true,
      "x-unit": "m"
+    },
+    "bulges": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "number"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "辺ごとの円弧 (辺 i は頂点 i → i+1)。bulge = tan(θ/4)、θ は中心角で正は反時計回り、0 は直線 (DXF の LWPOLYLINE と同じ)。ソルバーには検証の段階でメッシュ幅に合わせた弦に分けて渡す (paths.py)",
+     "title": "Bulges",
+     "x-unit": "1"
     },
     "shape": {
      "anyOf": [
