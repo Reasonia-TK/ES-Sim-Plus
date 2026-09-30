@@ -206,3 +206,82 @@ test("enters coordinates by typing: relative, polar and a bare length (P7c)", as
   await expect(page.locator(".settings-panel")).toContainText("(10, 30) → (25, 30) mm");
   await expect(page.locator(".settings-panel")).toContainText("(75, 25), r = 5 mm");
 });
+
+async function menuTool(page: Page, menu: string, item: string): Promise<void> {
+  await page.getByRole("button", { name: new RegExp(`^${menu}`) }).click();
+  await page.getByRole("menuitem", { name: new RegExp(`^${item}`) }).click();
+}
+
+test("fillets a region corner with a typed radius (P7d)", async ({ page }) => {
+  await openApp(page);
+  const at = await fitView(page);
+  await menuTool(page, "編集", "フィレット");
+  const canvas = page.getByRole("application");
+  // 半径を 3 mm に (数字を打つ)
+  await canvas.press("3");
+  await page.getByLabel("座標の入力", { exact: true }).press("Enter");
+  // diel1 の右下の角 (60, 10)
+  await clickAt(page, at(60.3, 10.3));
+  await selectNode(page, "diel1");
+  await expect(page.locator(".vertex-table tbody tr")).toHaveCount(5);
+  await expect(page.getByLabel("円弧 [°] 2", { exact: true })).toHaveValue("90");
+});
+
+test("trims a sketch line between two others (P7d)", async ({ page }) => {
+  await openApp(page);
+  const at = await fitView(page);
+  await tool(page, "線 (スケッチ)");
+  await clickAt(page, at(5, 15));
+  await clickAt(page, at(35, 15));
+  await page.keyboard.press("Escape");
+  for (const x of [15, 25]) {
+    await clickAt(page, at(x, 5));
+    await clickAt(page, at(x, 25));
+    await page.keyboard.press("Escape");
+  }
+  await menuTool(page, "編集", "トリム");
+  await clickAt(page, at(20, 15));
+  await selectNode(page, "スケッチ");
+  await expect(page.getByText("スケッチ 4 個")).toBeVisible();
+  await expect(page.locator(".settings-panel")).toContainText("(5, 15) → (15, 15) mm");
+  await expect(page.locator(".settings-panel")).toContainText("(25, 15) → (35, 15) mm");
+});
+
+test("moves a region by a typed displacement and mirrors a copy (P7d)", async ({ page }) => {
+  await openApp(page);
+  const at = await fitView(page);
+  await tool(page, "選択");
+  await clickAt(page, at(50, 25));
+  await menuTool(page, "変換", "移動");
+  // 基点 (角にスナップ) → @10, 0
+  await clickAt(page, at(40, 10));
+  await page.getByRole("application").press("@");
+  const box = page.getByLabel("座標の入力", { exact: true });
+  await box.fill("@10, 0");
+  await box.press("Enter");
+  await selectNode(page, "diel1");
+  await expect(page.getByLabel("x 1", { exact: true })).toHaveValue("50");
+  // 数値のパネル: 元を残して縦の軸でミラー → diel1_1
+  await page.getByText("元を残してコピーを作る", { exact: true }).first().click();
+  await page.getByRole("button", { name: "縦の軸で" }).click();
+  await expect(page.locator(".tree")).toContainText("diel1_1");
+});
+
+test("makes a polar array of a circle from the panel (P7d)", async ({ page }) => {
+  await openApp(page);
+  const at = await fitView(page);
+  await page.getByRole("radio", { name: "スケッチ" }).click();
+  await tool(page, "円");
+  await clickAt(page, at(20, 25));
+  await clickAt(page, at(22, 25));
+  // 選んだ円の配列: 円周・6 個、中心は (30, 25)
+  await page.getByLabel("並べ方", { exact: true }).selectOption("polar");
+  await page.getByLabel("変換の中心 x", { exact: true }).fill("30");
+  await page.getByLabel("変換の中心 x", { exact: true }).press("Enter");
+  await page.getByLabel("変換の中心 y", { exact: true }).fill("25");
+  await page.getByLabel("変換の中心 y", { exact: true }).press("Enter");
+  await page.getByRole("button", { name: "配列のコピーを作る" }).click();
+  await selectNode(page, "スケッチ");
+  await expect(page.getByText("スケッチ 6 個")).toBeVisible();
+  await expect(page.locator(".settings-panel")).toContainText("(40, 25), r = 2 mm");
+});

@@ -21,6 +21,7 @@ import {
   IconChevron,
   IconCircle,
   IconDisplay,
+  IconEdit,
   IconExport,
   IconFill,
   IconFit,
@@ -32,9 +33,12 @@ import {
   IconRect,
   IconSelect,
   IconSnap,
+  IconTransform,
 } from "./icons";
 import type { Scene } from "./scene";
-import { PLACE_TOOLS, RULER_FONTS, useViewer, type DrawTarget, type OverlayKey, type PlaceTool, type RulerFont, type Tool } from "./viewerStore";
+import { EDIT_TOOLS, PLACE_TOOLS, RULER_FONTS, TRANSFORM_TOOLS, useViewer, type DrawTarget, type EditTool, type OverlayKey, type PlaceTool, type RulerFont, type Tool, type TransformTool } from "./viewerStore";
+import { usePrefs } from "../prefs/prefs";
+import { lengthUnitLabel, toDisplayLength } from "../util/format";
 
 function ToolButton({ tool, icon, label, disabled, title }: { tool: Tool; icon: ReactNode; label: string; disabled?: boolean; title?: string }) {
   const active = useViewer((s) => s.tool === tool);
@@ -51,6 +55,90 @@ function ToolButton({ tool, icon, label, disabled, title }: { tool: Tool; icon: 
     >
       {icon}
     </button>
+  );
+}
+
+/** 変換 (移動・回転・ミラー・尺度) とコピーを作るか */
+function TransformMenu() {
+  const { t } = useTranslation();
+  const tool = useViewer((s) => s.tool);
+  const setTool = useViewer((s) => s.setTool);
+  const copy = useViewer((s) => s.transformCopy);
+  const setCopy = useViewer((s) => s.setTransformCopy);
+  const active = (TRANSFORM_TOOLS as Tool[]).includes(tool);
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          className={`tool-button with-label${active ? " active" : ""}`}
+          aria-label={active ? `${t("viewer.transform")} (${t(`viewer.tool.${tool as TransformTool}`)})` : t("viewer.transform")}
+          title={t("viewer.transformHint")}
+        >
+          <IconTransform />
+          {/* 道具の帯が折り返さないよう、使っている道具の名前だけ出す */}
+          {active && <span>{t(`viewer.tool.${tool as TransformTool}`)}</span>}
+          <IconChevron />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="menu-content" align="start" sideOffset={4}>
+          {TRANSFORM_TOOLS.map((k) => (
+            <DropdownMenu.Item key={k} className="menu-item" onSelect={() => setTool(k)}>
+              {tool === k && <span className="menu-indicator">●</span>}
+              {t(`viewer.tool.${k}`)}
+            </DropdownMenu.Item>
+          ))}
+          <DropdownMenu.Separator className="menu-separator" />
+          <DropdownMenu.CheckboxItem className="menu-item menu-radio" checked={copy} onCheckedChange={(v) => setCopy(v === true)} onSelect={(e) => e.preventDefault()}>
+            <DropdownMenu.ItemIndicator className="menu-indicator">✓</DropdownMenu.ItemIndicator>
+            {t("viewer.transformCopy")}
+          </DropdownMenu.CheckboxItem>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+/** 編集 (フィレット・面取り・オフセット・トリム・延長)。半径・長さを添える */
+function EditMenu() {
+  const { t } = useTranslation();
+  const tool = useViewer((s) => s.tool);
+  const setTool = useViewer((s) => s.setTool);
+  // 値ごとに選ぶ (新しいオブジェクトを返す選択は描き直しが止まらない)
+  const fillet = useViewer((s) => s.filletRadius);
+  const chamfer = useViewer((s) => s.chamferDistance);
+  const offset = useViewer((s) => s.offsetDistance);
+  const sizes = { fillet, chamfer, offset };
+  const unit = usePrefs((s) => s.lengthUnit);
+  const active = (EDIT_TOOLS as Tool[]).includes(tool);
+  const size = (k: EditTool) => (k === "fillet" || k === "chamfer" || k === "offset" ? `${toDisplayLength(sizes[k], unit)} ${lengthUnitLabel(unit)}` : null);
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          className={`tool-button with-label${active ? " active" : ""}`}
+          aria-label={active ? `${t("viewer.edit")} (${t(`viewer.tool.${tool as EditTool}`)})` : t("viewer.edit")}
+          title={t("viewer.editHint")}
+        >
+          <IconEdit />
+          {active && <span>{t(`viewer.tool.${tool as EditTool}`)}</span>}
+          <IconChevron />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="menu-content" align="start" sideOffset={4}>
+          {EDIT_TOOLS.map((k) => (
+            <DropdownMenu.Item key={k} className="menu-item" onSelect={() => setTool(k)}>
+              {tool === k && <span className="menu-indicator">●</span>}
+              {t(`viewer.tool.${k}`)}
+              {size(k) && <span className="menu-shortcut">{size(k)}</span>}
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
@@ -387,6 +475,9 @@ export function ViewerToolbar({
       <ToolButton tool="line" icon={<IconLine />} label={t("viewer.tool.line")} />
       <ToolButton tool="arc" icon={<IconArc />} label={t("viewer.tool.arc")} />
       <ToolButton tool="fill" icon={<IconFill />} label={t("viewer.tool.fill")} title={`${t("viewer.tool.fill")} — ${t("viewer.hint.fill")}`} />
+      <span className="toolbar-sep" />
+      <TransformMenu />
+      <EditMenu />
       <span className="toolbar-sep" />
       <PlaceMenu />
       <span className="toolbar-sep" />

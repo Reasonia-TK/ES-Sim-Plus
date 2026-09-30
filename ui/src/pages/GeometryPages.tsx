@@ -57,6 +57,7 @@ import { CommitText, Field, LengthInput, Select } from "./inputs";
 import { useLengthUnitLabel } from "./useLengthUnitLabel";
 import { DefQuantity, Hint } from "./widgets/common";
 import { PathTable, type PathTableOps } from "./widgets/PathTable";
+import { TransformPanel } from "./widgets/TransformPanel";
 import { RfEditor } from "./widgets/RfEditor";
 import { VoltagePreview } from "./widgets/VoltagePreview";
 import { WaveformEditor } from "./widgets/WaveformEditor";
@@ -413,6 +414,7 @@ export function RegionPage({ id }: { id: string }) {
         </>
       )}
       <RegionLocalSize id={r.id} />
+      <TransformPanel />
       <div className="button-row">
         <button
           type="button"

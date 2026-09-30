@@ -8,9 +8,13 @@
 // - スナップ (P7c): 端点・中点・中心・交点・垂線・接線 (オブジェクト) のあとグリッド。Alt を押している間は合わせない。
 //   F3 でスナップ全体のオン・オフ
 // - 数値入力 (P7c): 点を置く道具で数字・@ などを打つと座標の欄が開く (cad/coordInput.ts の書き方)
+// - 変換 (P7d): 移動 (基点 → 先)・回転 (中心 → 向きか角度)・ミラー (軸の 2 点)・尺度 (基点 → 倍率か基準の点 → 点)。
+//   形を選んでいなければクリックで選ぶ (Shift で足す)。コピーを作るかは道具の帯で
+// - 編集 (P7d): フィレット・面取り (角をクリック、2 本の線は残す側を順に)、オフセット (形 → 側)、トリム (消す部分)、
+//   延長 (端の近く)。半径・長さ・距離は数字を打って変える
 
 import type { TFunction } from "i18next";
-import type { Draft } from "immer";
+import { produce, type Draft } from "immer";
 import {
   useEffect,
   useMemo,
@@ -25,10 +29,12 @@ import {
 import { logInfo, logWarning } from "../app/messages";
 import { Arrangement } from "../cad/arrangement";
 import { parseCoordInput } from "../cad/coordInput";
+import { trimRemovedAt } from "../cad/edit";
 import { buildSnapScene, findSnap, type SnapResult, type SnapSource } from "../cad/snap";
 import { bulgeThrough, closestPoint, midpoint, pathSegs, segFromBulge, type Seg } from "../cad/geom";
-import { bulgesOf, type PathData } from "../cad/path";
+import { bulgesOf, mirror, rotation, scaling, translation, type Affine, type PathData } from "../cad/path";
 import { useDocument } from "../model/documentStore";
+import { cornerEdit, cutterSegs, extendSketch, filletSketchLines, itemSegs, offsetItem, transformItems, trimSketch, type CornerTarget } from "../model/editOps";
 import { usePrefs } from "../prefs/prefs";
 import type { EdgeRemapReport } from "../model/domainOps";
 import {
@@ -49,6 +55,8 @@ import { addCircleRegionAt, addPolygonRegion } from "../model/regionOps";
 import { PLACEMENT_NODES, PLACEMENT_PATHS, useSelection, type PickRef, type PlacementKind } from "../model/selection";
 import { addSketch, editBend, editMove, editRemove, editSplit, edgeCountOf, sketchOf, sketchSegs, type EditPath } from "../model/sketch";
 import { getIn, setIn } from "../schema/schema";
+import { evalExpression, parseQuantity } from "../schema/units";
+import { formatNumber, lengthUnitLabel, toDisplayLength } from "../util/format";
 import { gridStep, panBy, snapPoint, snapValue, toScreen, toWorld, type Camera } from "./camera";
 import { commitEdit, commitRadius, deleteItems, editObjectOf, findSketchAt, itemsInBox, moveItems, type EditHow, type EditObject, type EditTarget } from "./editTargets";
 import {
@@ -64,9 +72,9 @@ import {
   hitSegment,
   rectFromCorners,
 } from "./hitTest";
-import type { Drawing, Placement, Preview } from "./overlay";
+import type { Drawing, Placement, Preview, ToolPreview } from "./overlay";
 import type { Scene } from "./scene";
-import { useViewer, type Tool } from "./viewerStore";
+import { EDIT_TOOLS, TRANSFORM_TOOLS, useViewer, type Tool } from "./viewerStore";
 
 type Drag =
   | { kind: "pan"; lastX: number; lastY: number; x: number; y: number }
@@ -87,8 +95,17 @@ const STRAIGHTEN_PX = 4;
 /** オブジェクトスナップの届く距離 [px] */
 const SNAP_APERTURE_PX = 10;
 
-/** 点を置く道具 (数値入力を受ける) */
-const POINT_TOOLS: Tool[] = ["polyline", "line", "arc", "fill", "probe", ...TWO_POINT];
+/** 点を置く道具と、値を打つ道具 (数値入力を受ける) */
+const POINT_TOOLS: Tool[] = ["polyline", "line", "arc", "fill", "probe", ...TWO_POINT, ...TRANSFORM_TOOLS, "fillet", "chamfer", "offset"];
+
+/** 数値入力の欄が受けるもの: 点・角度 [°]・倍率・長さ */
+export type CoordMode = "point" | "angle" | "factor" | "length";
+
+/** 途中まで選んだもの (オフセットの元・フィレットの 1 本目の線) */
+type Pending = { kind: "offset"; item: PickRef } | { kind: "filletLine"; id: string; pick: Point };
+
+/** 形を選ぶだけの道具 (点をスナップしない) */
+const NO_SNAP_TOOLS: Tool[] = ["fill", "fillet", "chamfer", "offset", "trim", "extend"];
 
 /** 数値入力を始める文字 */
 const COORD_START = /^[0-9.@+\-(]$/;
@@ -173,6 +190,10 @@ export interface CanvasTools {
   snapMark: SnapResult | null;
   /** 数値入力の欄 (null は閉じている) */
   coordText: string | null;
+  /** 欄が受けるもの (説明の出し分け) */
+  coordMode: CoordMode;
+  /** 編集の道具の見せる形 (トリムで消える部分・オフセット・延長の結果・フィレットの角) */
+  toolPreview: ToolPreview | null;
   coordError: string | null;
   setCoordText: (s: string) => void;
   /** 数値入力を確定する (点を置けたら true) */
@@ -196,6 +217,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
   const [snapMark, setSnapMark] = useState<SnapResult | null>(null);
   const [coordText, setCoordText] = useState<string | null>(null);
   const [coordError, setCoordError] = useState<string | null>(null);
+  const [pending, setPending] = useState<Pending | null>(null);
   const lengthUnit = usePrefs((st) => st.lengthUnit);
   const dragRef = useRef<Drag | null>(null);
   const spaceRef = useRef(false);
@@ -233,6 +255,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     setMeasure(null);
     setCoordText(null);
     setSnapMark(null);
+    setPending(null);
   }, [tool]);
   // 選択・形が変わったら (元に戻す・削除など) ドラッグをやめる
   useEffect(() => {
@@ -284,6 +307,95 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     return { point: raw, mark: null };
   };
   const snap = (p: Point, alt = false): Point => snapAt(p, { alt }).point;
+
+  const isTransform = (TRANSFORM_TOOLS as Tool[]).includes(tool);
+  const isEdit = (EDIT_TOOLS as Tool[]).includes(tool);
+  const coordMode: CoordMode =
+    tool === "fillet" || tool === "chamfer" || tool === "offset" ? "length" : tool === "rotate" && pts.length === 1 ? "angle" : tool === "scale" && pts.length === 1 ? "factor" : "point";
+
+  /** 変換の道具で、カーソルまでの変換 (選んだものの見せる形) */
+  const transformAffine = useMemo((): Affine | null => {
+    if (!isTransform || !cursor || pts.length === 0 || picked.length === 0) return null;
+    const base = pts[0];
+    if (tool === "move") return translation(cursor[0] - base[0], cursor[1] - base[1]);
+    if (tool === "rotate") return cursor[0] === base[0] && cursor[1] === base[1] ? null : rotation(Math.atan2(cursor[1] - base[1], cursor[0] - base[0]), base);
+    if (tool === "mirror") return cursor[0] === base[0] && cursor[1] === base[1] ? null : mirror(base, cursor);
+    if (tool === "scale" && pts.length === 2) {
+      const r0 = Math.hypot(pts[1][0] - base[0], pts[1][1] - base[1]);
+      const r1 = Math.hypot(cursor[0] - base[0], cursor[1] - base[1]);
+      return r0 > 0 && r1 > 0 ? scaling(r1 / r0, base) : null;
+    }
+    return null;
+  }, [isTransform, tool, cursor, pts, picked]);
+
+  /** フィレット・面取りする角 (スケッチのポリライン・多角形の領域・ドメインの頂点のうち画面で近いもの) */
+  const cornerAt = (q: Point): { target: CornerTarget; index: number; point: Point } | null => {
+    if (!camera) return null;
+    let best: { target: CornerTarget; index: number; point: Point } | null = null;
+    let bestD = HANDLE_TOLERANCE_PX;
+    const [sx, sy] = toScreen(camera, q);
+    const consider = (target: CornerTarget, points: Point[], closed: boolean) => {
+      points.forEach((v, i) => {
+        if (!closed && (i === 0 || i === points.length - 1)) return;
+        const [x, y] = toScreen(camera, v);
+        const dd = Math.hypot(x - sx, y - sy);
+        if (dd <= bestD) {
+          bestD = dd;
+          best = { target, index: i, point: v };
+        }
+      });
+    };
+    for (const e of sketch) if (e.kind === "polyline") consider({ kind: "sketch", id: e.id }, e.points, e.closed);
+    for (const r of project.geometry.regions) if (r.polygon) consider({ kind: "region", id: r.id }, r.polygon, true);
+    consider({ kind: "domain" }, project.geometry.domain.polygon, true);
+    return best;
+  };
+
+  /** クリックした形 (スケッチ > 領域) */
+  const itemAt = (q: Point): PickRef | null => {
+    if (!camera) return null;
+    const tol = EDGE_TOLERANCE_PX / camera.scale;
+    const e = findSketchAt(q, sketch, tol);
+    if (e) return { kind: "sketch", id: e.id };
+    const r = findRegionAt(q, project.geometry.regions, tol);
+    return r ? { kind: "region", id: r.id } : null;
+  };
+
+  const toolPreview = useMemo((): ToolPreview | null => {
+    if (!isEdit || !camera || !hover) return null;
+    const tol = EDGE_TOLERANCE_PX / camera.scale;
+    const pendingSegs = pending?.kind === "offset" ? itemSegs(project, pending.item) : pending?.kind === "filletLine" ? itemSegs(project, { kind: "sketch", id: pending.id }) : [];
+    if (tool === "trim") {
+      const e = findSketchAt(hover, sketch, tol);
+      if (!e) return null;
+      const closed = e.kind === "circle" || (e.kind === "polyline" && e.closed);
+      const removed = trimRemovedAt(sketchSegs(e), closed, cutterSegs(project, e.id), hover);
+      return removed ? { segs: removed, tone: "remove", pending: [] } : null;
+    }
+    if (tool === "extend") {
+      const e = findSketchAt(hover, sketch, tol);
+      if (!e) return null;
+      let ok = false;
+      const next = produce(project, (d) => void (ok = extendSketch(d, e.id, hover, cutterSegs(project, e.id)).ok));
+      const ne = ok ? sketchOf(next).find((x) => x.id === e.id) : null;
+      return ne ? { segs: sketchSegs(ne), tone: "add", pending: [] } : null;
+    }
+    if (tool === "offset" && pending?.kind === "offset") {
+      let made: PickRef | null = null;
+      const next = produce(project, (d) => {
+        const r = offsetItem(d, pending.item, vs.offsetDistance, hover);
+        if (r.ok) made = r.value;
+      });
+      return { segs: made ? itemSegs(next, made) : [], tone: "add", pending: pendingSegs };
+    }
+    if (tool === "fillet" || tool === "chamfer") {
+      const c = cornerAt(hover);
+      return { segs: [], tone: "add", pending: pendingSegs, points: c ? [c.point] : [] };
+    }
+    return pendingSegs.length ? { segs: [], tone: "add", pending: pendingSegs } : null;
+    // cornerAt・itemAt は文書と画面から決まる
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEdit, tool, hover, pending, project, camera, vs.offsetDistance]);
 
   // 囲まれた所から領域を作る道具: 平面の配置は文書が変わったときだけ作り直す
   const arrangement = useMemo(() => (tool === "fill" ? new Arrangement(allCurves(project)) : null), [tool, project]);
@@ -513,7 +625,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     const d = dragRef.current;
     // ドラッグしている形の自分自身には合わせない
     const exclude = d && (d.kind === "path" || d.kind === "radius") ? ownerOf(d.target) : null;
-    const sn = snapAt(raw, { alt: e.altKey, exclude });
+    const sn = snapAt(raw, { alt: e.altKey || NO_SNAP_TOOLS.includes(tool), exclude });
     setCursor(sn.point);
     setSnapMark(sn.mark);
     if (!d) return;
@@ -593,7 +705,108 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     // クリック
     const shift = d.kind === "click" || d.kind === "box" ? d.shift : false;
     if (tool === "select") selectAt(raw, shift);
+    else if (isTransform) transformClick(pt, raw, shift);
+    else if (isEdit) editClick(raw);
     else placePoint(pt, raw, nearFirst(sx, sy));
+  };
+
+  /** 変換を文書に (コピーならコピーを選ぶ) */
+  const commitTransform = (m: Affine) => {
+    const items = picked;
+    let res: PickRef[] = [];
+    update(t(`viewer.tool.${tool as "move"}`), (d) => void (res = transformItems(d, items, m, vs.transformCopy)));
+    if (res.length) useSelection.getState().pick(res);
+    resetDrawing();
+  };
+
+  const transformClick = (pt: Point, raw: Point, shift: boolean) => {
+    // 選んでいなければ (Shift なら足す・外す) クリックで選ぶ
+    if (shift || picked.length === 0) {
+      selectAt(raw, shift);
+      return;
+    }
+    if (pts.length === 0) {
+      setPts([pt]);
+      return;
+    }
+    const base = pts[0];
+    const same = pt[0] === base[0] && pt[1] === base[1];
+    if (tool === "move") commitTransform(translation(pt[0] - base[0], pt[1] - base[1]));
+    else if (tool === "rotate") {
+      if (!same) commitTransform(rotation(Math.atan2(pt[1] - base[1], pt[0] - base[0]), base));
+    } else if (tool === "mirror") {
+      if (!same) commitTransform(mirror(base, pt));
+    } else if (tool === "scale") {
+      if (pts.length === 1) {
+        if (!same) setPts([base, pt]);
+        return;
+      }
+      const r0 = Math.hypot(pts[1][0] - base[0], pts[1][1] - base[1]);
+      const r1 = Math.hypot(pt[0] - base[0], pt[1] - base[1]);
+      if (r0 > 0 && r1 > 0) commitTransform(scaling(r1 / r0, base));
+    }
+  };
+
+  const warnEdit = (err: string) => logWarning(t("msg.source.app"), t(`editError.${err as "noTarget"}`));
+
+  const editClick = (raw: Point) => {
+    if (tool === "fillet" || tool === "chamfer") {
+      const size = tool === "fillet" ? vs.filletRadius : vs.chamferDistance;
+      const c = cornerAt(raw);
+      if (c) {
+        let res: ReturnType<typeof cornerEdit> | null = null;
+        update(t(`viewer.tool.${tool}`), (d) => void (res = cornerEdit(d, c.target, c.index, size, tool)));
+        const r = res as ReturnType<typeof cornerEdit> | null;
+        if (r && !r.ok) warnEdit(r.error);
+        else if (r) reportRemap(r.value);
+        setPending(null);
+        return;
+      }
+      const e = tool === "fillet" && camera ? findSketchAt(raw, sketch, EDGE_TOLERANCE_PX / camera.scale) : null;
+      if (e?.kind === "line") {
+        if (pending?.kind !== "filletLine") {
+          setPending({ kind: "filletLine", id: e.id, pick: raw });
+          return;
+        }
+        if (pending.id === e.id) return;
+        const first = pending;
+        let res: ReturnType<typeof filletSketchLines> | null = null;
+        update(t("viewer.tool.fillet"), (d) => void (res = filletSketchLines(d, first.id, first.pick, e.id, raw, vs.filletRadius)));
+        const r = res as ReturnType<typeof filletSketchLines> | null;
+        if (r && !r.ok) warnEdit(r.error);
+        setPending(null);
+        return;
+      }
+      warnEdit("noCorner");
+      return;
+    }
+    if (tool === "offset") {
+      if (pending?.kind !== "offset") {
+        const item = itemAt(raw);
+        if (item) setPending({ kind: "offset", item });
+        else warnEdit("noTarget");
+        return;
+      }
+      const src = pending.item;
+      let res: ReturnType<typeof offsetItem> | null = null;
+      update(t("viewer.tool.offset"), (d) => void (res = offsetItem(d, src, vs.offsetDistance, raw)));
+      const r = res as ReturnType<typeof offsetItem> | null;
+      if (r && !r.ok) warnEdit(r.error);
+      else if (r) useSelection.getState().pick([r.value]);
+      setPending(null);
+      return;
+    }
+    const e = camera ? findSketchAt(raw, sketch, EDGE_TOLERANCE_PX / camera.scale) : null;
+    if (!e) {
+      warnEdit("noTarget");
+      return;
+    }
+    const cut = cutterSegs(project, e.id);
+    let res: { ok: boolean; error?: string } | null = null;
+    if (tool === "trim") update(t("viewer.tool.trim"), (d) => void (res = trimSketch(d, e.id, raw, cut)));
+    else if (tool === "extend") update(t("viewer.tool.extend"), (d) => void (res = extendSketch(d, e.id, raw, cut)));
+    const r = res as { ok: boolean; error?: string } | null;
+    if (r && !r.ok && r.error) warnEdit(r.error);
   };
 
   /** 点を置く (クリック・数値入力)。closing は折れ線の最初の点に戻った */
@@ -672,6 +885,24 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
 
   const submitCoord = (): boolean => {
     if (coordText === null) return false;
+    if (coordMode !== "point") {
+      const text = coordText.trim().replace(/(°|deg)$/i, "");
+      let v: number | null = null;
+      if (coordMode === "length") {
+        const r = parseQuantity(coordText, undefined, true, { lengthUnit, axisymmetric: false });
+        v = r.ok ? r.value : null;
+      } else v = evalExpression(text);
+      if (v === null || !Number.isFinite(v) || (coordMode !== "angle" && !(v > 0))) {
+        setCoordError(t("coordInput.error.value"));
+        return false;
+      }
+      setCoordText(null);
+      setCoordError(null);
+      if (coordMode === "length") vs.setEditSize(tool === "fillet" ? "filletRadius" : tool === "chamfer" ? "chamferDistance" : "offsetDistance", v);
+      else if (coordMode === "angle") commitTransform(rotation((v * Math.PI) / 180, pts[0]));
+      else commitTransform(scaling(v, pts[0]));
+      return true;
+    }
     const last = pts.length ? pts[pts.length - 1] : null;
     const direction: Point | null = last && hover ? [hover[0] - last[0], hover[1] - last[1]] : null;
     const r = parseCoordInput(coordText, { last, direction, units: { lengthUnit, axisymmetric: false } });
@@ -685,7 +916,9 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     const closing = tool === "polyline" && pts.length >= 2 && Math.hypot(pt[0] - pts[0][0], pt[1] - pts[0][1]) <= tol && (pts.length >= 3 || bulges.some((b) => b) || through !== null);
     setCoordText(null);
     setCoordError(null);
-    placePoint(pt, pt, closing);
+    // 変換の道具は基点・先などの点として
+    if (isTransform) transformClick(pt, pt, false);
+    else placePoint(pt, pt, closing);
     return true;
   };
 
@@ -722,10 +955,11 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
       vs.setSnap(!vs.snap);
       return;
     }
-    const busy = pts.length > 0 || through !== null || dragRef.current !== null || !!preview.edit || !!preview.move || preview.radius != null || !!preview.box;
+    const busy = pts.length > 0 || through !== null || pending !== null || dragRef.current !== null || !!preview.edit || !!preview.move || preview.radius != null || !!preview.box;
     if (e.key === "Escape") {
       e.preventDefault();
       resetDrawing();
+      setPending(null);
       setPreview({});
       dragRef.current = null;
       setMeasure(null);
@@ -789,14 +1023,16 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     cursor,
     hover,
     panning,
-    drawing: { tool, target, pts, bulges, through, arcMode, cursor, closing },
-    preview,
+    drawing: { tool, target, pts, bulges, through, arcMode, cursor, closing, selected: picked.length, pending: pending !== null },
+    preview: transformAffine ? { ...preview, affine: transformAffine } : preview,
     measure: measure ?? (tool === "measure" && pts.length === 1 && cursor ? [pts[0], cursor] : null),
     fillPreview,
     edit,
     picked,
     snapMark,
     coordText,
+    coordMode,
+    toolPreview,
     coordError,
     setCoordText: (text: string) => {
       setCoordText(text);
@@ -822,9 +1058,36 @@ function hitRect(pt: Point, a: Point, b: Point, tol: number): boolean {
 }
 
 /** 作図の道具の説明 (状況ごと) */
-export function toolHint(tool: Tool, d: Pick<Drawing, "pts" | "through" | "arcMode" | "target">, t: TFunction): string {
+/** 編集の道具の半径・長さ (説明に出す) */
+export interface EditSizes {
+  filletRadius: number;
+  chamferDistance: number;
+  offsetDistance: number;
+}
+
+export function toolHint(tool: Tool, d: Pick<Drawing, "pts" | "through" | "arcMode" | "target" | "selected" | "pending">, t: TFunction, sizes?: EditSizes, unit: "mm" | "um" = "mm"): string {
   const n = d.pts.length;
+  const len = (m: number) => `${formatNumber(toDisplayLength(m, unit))} ${lengthUnitLabel(unit)}`;
+  if ((TRANSFORM_TOOLS as Tool[]).includes(tool) && d.selected === 0) return t("viewer.hint.transformSelect");
   switch (tool) {
+    case "move":
+      return n === 0 ? t("viewer.hint.moveBase") : t("viewer.hint.moveTo");
+    case "rotate":
+      return n === 0 ? t("viewer.hint.rotateCenter") : t("viewer.hint.rotateAngle");
+    case "mirror":
+      return n === 0 ? t("viewer.hint.mirrorFirst") : t("viewer.hint.mirrorSecond");
+    case "scale":
+      return n === 0 ? t("viewer.hint.scaleBase") : n === 1 ? t("viewer.hint.scaleFactor") : t("viewer.hint.scaleTo");
+    case "fillet":
+      return d.pending ? t("viewer.hint.filletSecond") : t("viewer.hint.fillet", { r: sizes ? len(sizes.filletRadius) : "" });
+    case "chamfer":
+      return t("viewer.hint.chamfer", { d: sizes ? len(sizes.chamferDistance) : "" });
+    case "offset":
+      return d.pending ? t("viewer.hint.offsetSide") : t("viewer.hint.offset", { d: sizes ? len(sizes.offsetDistance) : "" });
+    case "trim":
+      return t("viewer.hint.trim");
+    case "extend":
+      return t("viewer.hint.extend");
     case "select":
       return t("viewer.hint.select");
     case "polyline":

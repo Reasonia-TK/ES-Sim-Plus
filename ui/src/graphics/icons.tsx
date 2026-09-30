@@ -118,3 +118,20 @@ export const IconFill = () => (
     <path d="M4.5 11.5 L8 4.5 L11.5 11.5 Z" fill="currentColor" fillOpacity="0.35" />
   </Svg>
 );
+
+export const IconTransform = () => (
+  <Svg>
+    <path d="M2.5 13.5 L2.5 8 L8 8 L8 13.5 Z" strokeDasharray="1.6 1.4" />
+    <path d="M7 2.5 L13.5 2.5 L13.5 9 L7 9 Z" />
+    <path d="M5 8 L8.5 4.5" />
+    <path d="M6.3 4.5 L8.5 4.5 L8.5 6.7" />
+  </Svg>
+);
+
+export const IconEdit = () => (
+  <Svg>
+    <path d="M2.5 13.5 L2.5 7 A 4.5 4.5 0 0 1 7 2.5 L13.5 2.5" />
+    <circle cx="2.5" cy="13.5" r="1.1" fill="currentColor" />
+    <circle cx="13.5" cy="2.5" r="1.1" fill="currentColor" />
+  </Svg>
+);

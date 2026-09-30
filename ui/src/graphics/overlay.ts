@@ -2,9 +2,10 @@
 // 色分け・対称軸・領域・スケッチ)・配置物・選択とハンドル・作図中の線・計測・プローブ・カラーバー・ルーラー。
 // 場とメッシュは間の WebGL の層が描く。色はテーマの CSS 変数から読む。
 
-import { bulgeOf, bulgeThrough, midpoint, pathBounds, segFromBulge, type ArcSeg } from "../cad/geom";
-import { bulgesOf, pathHandles, type PathData } from "../cad/path";
+import { bulgeOf, bulgeThrough, midpoint, pathBounds, segFromBulge, type ArcSeg, type Seg } from "../cad/geom";
+import { bulgesOf, pathHandles, type Affine, type PathData } from "../cad/path";
 import type { SnapResult } from "../cad/snap";
+import { transformRegionShape, transformSketch } from "../model/editOps";
 import { axisEdges, boundaryOfEdge, domainPath, regionPath, type Point, type Project, type Region } from "../model/project";
 import type { PickRef } from "../model/selection";
 import { edgeCountOf, sketchSegs, type EditPath, type SketchEntity } from "../model/sketch";
@@ -297,6 +298,18 @@ export interface Drawing {
   cursor: Point | null;
   /** 折れ線の最初の点に近い (クリックで閉じる) */
   closing: boolean;
+  /** 選んでいる形の数 (変換の道具の説明) */
+  selected: number;
+  /** 編集の道具で途中まで選んだ (オフセットの元・フィレットの 1 本目) */
+  pending: boolean;
+}
+
+/** 編集の道具の見せる形: 足す形 (add) か消える部分 (remove)、途中まで選んだ形、角の印 */
+export interface ToolPreview {
+  segs: Seg[];
+  tone: "add" | "remove";
+  pending: Seg[];
+  points?: Point[];
 }
 
 export interface Preview {
@@ -308,6 +321,8 @@ export interface Preview {
   move?: Point | null;
   /** 範囲選択の 2 隅 (ワールド座標) */
   box?: [Point, Point] | null;
+  /** 変換の道具で、選んだものをカーソルまで変換した形 */
+  affine?: Affine | null;
 }
 
 export interface Colorbar {
@@ -341,6 +356,8 @@ export interface OverlayState {
   sketch: SketchEntity[];
   /** 囲まれた所から領域を作る道具の、カーソルの下の面 */
   fillPreview: PathData | null;
+  /** 編集の道具の見せる形 */
+  toolPreview: ToolPreview | null;
   /** いま合っているオブジェクトスナップと、その名前 */
   snapMark: SnapResult | null;
   snapLabel: string | null;
@@ -648,6 +665,31 @@ function drawSelection(ctx: CanvasRenderingContext2D, s: OverlayState): void {
       ctx.setLineDash([]);
     }
   }
+  // 変換の道具: 選んだものを変換した形
+  const m = s.preview.affine;
+  if (m) {
+    for (const it of s.picked) {
+      if (it.kind === "region") {
+        const r = p.geometry.regions.find((x) => x.id === it.id);
+        if (!r) continue;
+        pathRegion(ctx, v, { ...r, ...transformRegionShape(r, m) });
+        ctx.save();
+        ctx.globalAlpha = 0.15;
+        ctx.fillStyle = c.selection;
+        ctx.fill();
+        ctx.restore();
+      } else {
+        const e = s.sketch.find((x) => x.id === it.id);
+        if (!e) continue;
+        traceSketch(ctx, v, transformSketch(e, m));
+      }
+      ctx.strokeStyle = c.selection;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
   // ハンドル (選択の道具で、1 つを編集しているとき)
   if (!edit || s.tool !== "select" || d) return;
   if (edit.circle) {
@@ -821,6 +863,49 @@ function drawSnapMark(ctx: CanvasRenderingContext2D, s: OverlayState, m: SnapRes
   ctx.stroke();
   ctx.restore();
   if (text) label(ctx, text, x + 10, y - 9, s.colors.snap, "left", "bottom");
+}
+
+/** 曲線の並びをたどる (つながっていなくてよい) */
+function traceSegs(ctx: CanvasRenderingContext2D, v: View, segs: Seg[]): void {
+  ctx.beginPath();
+  for (const sg of segs) {
+    const [x, y] = toScreen(v.camera, sg.a as Point);
+    ctx.moveTo(x, y);
+    edgeTo(ctx, v, sg.a as Point, sg.b as Point, bulgeOf(sg));
+  }
+}
+
+/** 編集の道具: 途中まで選んだ形 (選択の色)、足す形 (破線) か消える部分 (赤)、角の印 */
+function drawToolPreview(ctx: CanvasRenderingContext2D, s: OverlayState, tp: ToolPreview): void {
+  const { view: v, colors: c } = s;
+  if (tp.pending.length) {
+    traceSegs(ctx, v, tp.pending);
+    ctx.strokeStyle = c.selection;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
+  if (tp.segs.length) {
+    traceSegs(ctx, v, tp.segs);
+    if (tp.tone === "remove") {
+      ctx.strokeStyle = "#ff5a5a";
+      ctx.lineWidth = 4;
+      ctx.setLineDash([5, 3]);
+    } else {
+      ctx.strokeStyle = c.selection;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  for (const q of tp.points ?? []) {
+    const [x, y] = toScreen(v.camera, q);
+    ctx.strokeStyle = c.selection;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, 7, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
 }
 
 /** 範囲選択の矩形 */
@@ -1052,6 +1137,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, s: OverlayState): voi
   if (s.measure) drawMeasure(ctx, s, s.measure);
   drawRubberBand(ctx, s);
   if (s.preview.box) drawBox(ctx, s, s.preview.box);
+  if (s.toolPreview) drawToolPreview(ctx, s, s.toolPreview);
   if (s.snapMark) drawSnapMark(ctx, s, s.snapMark, s.snapLabel);
   if (s.colorbar) drawColorbar(ctx, s, s.colorbar);
   if (s.probe) drawProbe(ctx, s, s.probe);

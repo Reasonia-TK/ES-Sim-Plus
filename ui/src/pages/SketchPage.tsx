@@ -30,6 +30,7 @@ import { Field, LengthInput } from "./inputs";
 import { useLengthUnitLabel } from "./useLengthUnitLabel";
 import { Hint } from "./widgets/common";
 import { PathTable, type PathTableOps } from "./widgets/PathTable";
+import { TransformPanel } from "./widgets/TransformPanel";
 import { Toggle } from "../forms/SchemaField";
 import { CommitText } from "./inputs";
 import { parseNumber } from "../util/format";
@@ -213,6 +214,7 @@ export function SketchPage() {
         </div>
       )}
       {cur && <SketchEditor key={cur.id} e={cur} />}
+      <TransformPanel />
       <Hint>{t("sketchPage.hint")}</Hint>
     </>
   );

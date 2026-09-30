@@ -766,6 +766,11 @@ details > summary {
   display: flex;
   gap: 4px;
   min-width: 0;
+  align-items: center;
+}
+
+.point-input .button {
+  flex: 0 0 auto;
 }
 
 .point-input .input {

@@ -25,7 +25,7 @@ import { sampleField, sampleVector, statsOf, type Scene } from "./scene";
 import { PlaybackBar } from "./PlaybackBar";
 import { ViewerRfStrip } from "./ViewerRfStrip";
 import type { ActiveScene } from "./useScene";
-import { localPoint, toolHint, useCanvasTools } from "./useCanvasTools";
+import { localPoint, toolHint, useCanvasTools, type CoordMode } from "./useCanvasTools";
 import { RULER_FONTS, useViewer } from "./viewerStore";
 import { ViewerToolbar } from "./ViewerToolbar";
 
@@ -303,6 +303,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
         edit: tools.edit,
         sketch,
         fillPreview: tools.fillPreview,
+        toolPreview: tools.toolPreview,
         snapMark: tools.snapMark,
         snapLabel: tools.snapMark ? t(`snapKind.${tools.snapMark.kind}`) : null,
         tool: vs.tool,
@@ -356,7 +357,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
 
   // ---- 表示 ----
 
-  const hint = toolHint(vs.tool, tools.drawing, t);
+  const hint = toolHint(vs.tool, tools.drawing, t, vs, lengthUnit);
   const unit = lengthUnitLabel(lengthUnit);
   const hoverValue = hover && scene.field ? sampleField(scene.field, hover[0], hover[1]) : null;
   const cursorText = cursor
@@ -401,6 +402,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
           <CoordBox
             text={tools.coordText}
             error={tools.coordError}
+            mode={tools.coordMode}
             at={camera && hover ? toScreen(camera, hover) : null}
             size={size}
             onChange={tools.setCoordText}
@@ -451,6 +453,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
 function CoordBox({
   text,
   error,
+  mode,
   at,
   size,
   onChange,
@@ -459,6 +462,7 @@ function CoordBox({
 }: {
   text: string;
   error: string | null;
+  mode: CoordMode;
   at: Point | null;
   size: { w: number; h: number };
   onChange: (s: string) => void;
@@ -489,7 +493,7 @@ function CoordBox({
           }
         }}
       />
-      <div className={error ? "coord-error" : "coord-hint"}>{error ?? t("coordInput.hint")}</div>
+      <div className={error ? "coord-error" : "coord-hint"}>{error ?? t(mode === "point" ? "coordInput.hint" : `coordInput.hint_${mode}`)}</div>
     </div>
   );
 }

@@ -15,11 +15,17 @@ export type DrawTarget = "region" | "sketch";
 export type PlaceTool = "profile" | "emitter" | "injector" | "collector" | "gasbc" | "eedfbox" | "meshref" | "sheathline";
 /** 調べる道具 (文書は変えない) */
 export type InspectTool = "probe" | "measure";
-export type Tool = DrawTool | PlaceTool | InspectTool;
+/** 変換の道具 (選んだ領域・スケッチ、P7d) */
+export type TransformTool = "move" | "rotate" | "mirror" | "scale";
+/** 編集の道具 (P7d) */
+export type EditTool = "fillet" | "chamfer" | "offset" | "trim" | "extend";
+export type Tool = DrawTool | PlaceTool | InspectTool | TransformTool | EditTool;
 
 export const DRAW_TOOLS: DrawTool[] = ["select", "polyline", "rect", "circle", "line", "arc", "fill"];
 export const PLACE_TOOLS: PlaceTool[] = ["profile", "emitter", "injector", "collector", "gasbc", "eedfbox", "meshref", "sheathline"];
 export const INSPECT_TOOLS: InspectTool[] = ["probe", "measure"];
+export const TRANSFORM_TOOLS: TransformTool[] = ["move", "rotate", "mirror", "scale"];
+export const EDIT_TOOLS: EditTool[] = ["fillet", "chamfer", "offset", "trim", "extend"];
 
 /** ルーラーの文字の大きさ (v1 と同じ 3 段) */
 export const RULER_FONTS = { s: 9, m: 11, l: 14 } as const;
@@ -92,6 +98,12 @@ interface ViewerState {
   snap: boolean;
   /** スナップの種類ごと (オブジェクトスナップとグリッド) */
   snapKinds: Record<SnapKind, boolean>;
+  /** 変換で元を残してコピーを作る */
+  transformCopy: boolean;
+  /** フィレットの半径・面取りの長さ・オフセットの距離 [m] */
+  filletRadius: number;
+  chamferDistance: number;
+  offsetDistance: number;
   rulerFont: RulerFont;
   quantity: StaticQuantity;
   colormap: ColormapKey;
@@ -108,6 +120,8 @@ interface ViewerState {
   setDrawTarget: (t: DrawTarget) => void;
   setSnap: (v: boolean) => void;
   setSnapKind: (k: SnapKind, v: boolean) => void;
+  setTransformCopy: (v: boolean) => void;
+  setEditSize: (k: "filletRadius" | "chamferDistance" | "offsetDistance", v: number) => void;
   setRulerFont: (f: RulerFont) => void;
   setQuantity: (q: StaticQuantity) => void;
   setColormap: (c: ColormapKey) => void;
@@ -126,6 +140,10 @@ export const useViewer = create<ViewerState>()(
       drawTarget: "region",
       snap: true,
       snapKinds: { ...DEFAULT_SNAP_KINDS },
+      transformCopy: false,
+      filletRadius: 0.001,
+      chamferDistance: 0.001,
+      offsetDistance: 0.001,
       rulerFont: "m",
       quantity: "v",
       colormap: DEFAULT_COLORMAP,
@@ -140,6 +158,8 @@ export const useViewer = create<ViewerState>()(
       setDrawTarget: (drawTarget) => set({ drawTarget }),
       setSnap: (snap) => set({ snap }),
       setSnapKind: (k, v) => set((st) => ({ snapKinds: { ...st.snapKinds, [k]: v } })),
+      setTransformCopy: (transformCopy) => set({ transformCopy }),
+      setEditSize: (k, v) => set(v > 0 ? { [k]: v } : {}),
       setRulerFont: (rulerFont) => set({ rulerFont }),
       // 量を変えたら手動の範囲は外す (単位が違う)
       setQuantity: (quantity) => set((s) => (s.quantity === quantity ? {} : { quantity, range: { min: null, max: null }, probe: null })),
@@ -154,7 +174,18 @@ export const useViewer = create<ViewerState>()(
     {
       name: "es-sim-ui.viewer",
       storage: createJSONStorage(() => localStorage),
-      partialize: (s) => ({ snap: s.snap, snapKinds: s.snapKinds, drawTarget: s.drawTarget, rulerFont: s.rulerFont, colormap: s.colormap, overlays: s.overlays }),
+      partialize: (s) => ({
+        snap: s.snap,
+        snapKinds: s.snapKinds,
+        drawTarget: s.drawTarget,
+        transformCopy: s.transformCopy,
+        filletRadius: s.filletRadius,
+        chamferDistance: s.chamferDistance,
+        offsetDistance: s.offsetDistance,
+        rulerFont: s.rulerFont,
+        colormap: s.colormap,
+        overlays: s.overlays,
+      }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<ViewerState>;
         return { ...current, ...p, overlays: { ...DEFAULT_OVERLAYS, ...(p.overlays ?? {}) }, snapKinds: { ...DEFAULT_SNAP_KINDS, ...(p.snapKinds ?? {}) } };
