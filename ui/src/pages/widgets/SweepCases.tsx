@@ -1,5 +1,5 @@
 // スイープのケースの一覧 (いちばん新しいスイープ): 値・状態 (待ち・実行中のステップ・完了・失敗)・
-// 完了したケースを文書に読み込む (元に戻せる、v1 と同じ。結果の読み込みは P6e)。
+// 完了したケースを文書に読み込む (元に戻せる、v1 と同じ)・ケースの結果を「読み込んだ実行」にして表示する。
 
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
@@ -9,6 +9,9 @@ import { sweepCase } from "../../jobs/api";
 import type { SweepCase } from "../../jobs/types";
 import { useDocument } from "../../model/documentStore";
 import { normalizeProject } from "../../model/project";
+import { VIEWER_KINDS } from "../../graphics/runScene";
+import { importResultsBundle } from "../../results/bundle";
+import { useResultsView } from "../../results/resultsView";
 import { formatNumber } from "../../util/format";
 import { t } from "../../i18n";
 
@@ -29,6 +32,23 @@ export async function loadSweepCase(jobId: string, i: number, label: string): Pr
     logInfo(t("msg.source.jobs"), label);
   } catch (e) {
     logError(t("msg.source.jobs"), `${label}: ${errorText(e)}`);
+  }
+}
+
+/** ケースの結果を読み込んだ実行にしてビューア・グラフに出す */
+export async function showSweepCase(jobId: string, i: number, source: string): Promise<void> {
+  try {
+    const raw = await sweepCase(jobId, i);
+    const { project, results } = normalizeProject(raw);
+    const added = importResultsBundle(results, project, source);
+    const last = added[added.length - 1];
+    if (!last) return;
+    const rv = useResultsView.getState();
+    rv.setActiveRun(last.id);
+    rv.setGraphicsTab(VIEWER_KINDS.includes(last.kind) ? "view" : "charts");
+    logInfo(t("msg.source.jobs"), t("jobs.sweepShown", { name: jobName(last) }));
+  } catch (e) {
+    logError(t("msg.source.jobs"), `${source}: ${errorText(e)}`);
   }
 }
 
@@ -84,9 +104,14 @@ export function SweepCases({ jobId }: { jobId?: string }) {
                 <td className={c?.ok === false ? "text-error" : undefined}>{status}</td>
                 <td>
                   {c?.ok === true && (
-                    <button type="button" className="button small" onClick={() => void loadSweepCase(job.id, i, t("jobs.sweepLoad", { i, v: formatNumber(v) }))}>
-                      {t("jobs.sweepLoadButton")}
-                    </button>
+                    <div className="button-row tight">
+                      <button type="button" className="button small" onClick={() => void loadSweepCase(job.id, i, t("jobs.sweepLoad", { i, v: formatNumber(v) }))}>
+                        {t("jobs.sweepLoadButton")}
+                      </button>
+                      <button type="button" className="button small" onClick={() => void showSweepCase(job.id, i, t("jobs.sweepCaseSource", { name: jobName(job), i, v: formatNumber(v) }))}>
+                        {t("jobs.sweepShowButton")}
+                      </button>
+                    </div>
                   )}
                 </td>
               </tr>

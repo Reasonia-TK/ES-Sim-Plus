@@ -9,6 +9,8 @@ import { GraphicsPanel } from "../graphics/GraphicsPanel";
 import { documentName, useDocument, useIsDirty } from "../model/documentStore";
 import { SettingsPanel } from "../pages/SettingsPanel";
 import { usePrefs } from "../prefs/prefs";
+import { usePlaybackDriver } from "../graphics/PlaybackBar";
+import { useForgetRemovedRun, useWatchActiveRun } from "../results/runData";
 import { ModelTree } from "../tree/ModelTree";
 import { isTauri } from "../util/env";
 import { BottomPanel } from "./BottomPanel";
@@ -96,6 +98,9 @@ export function App() {
   useShortcuts();
   useDocumentChrome();
   useConnectionLog();
+  useWatchActiveRun();
+  useForgetRemovedRun();
+  usePlaybackDriver();
   const epoch = useLayoutEpoch((s) => s.epoch);
   return (
     <div className="app">

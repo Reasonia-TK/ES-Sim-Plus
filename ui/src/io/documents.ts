@@ -1,6 +1,7 @@
 // 文書の操作 (新規・開く・保存・名前を付けて保存・最近使ったファイル・サンプル)。
 // 未保存の変更があるときは先に確認する (v1 には確認が無かった)。ファイルを開くと新しい文書になり、
-// 履歴は消える (v1 は読込を元に戻せたが、代わりに開く前に保存を促す)。
+// 履歴は消える (v1 は読込を元に戻せたが、代わりに開く前に保存を促す)。結果付きのファイルは結果を「読み込んだ実行」
+// として並べる。結果付きで保存は種類ごとに 1 つの結果と静電場の結果を書き出す (文書の保存先は変えない)。
 
 import { askUnsaved } from "../app/dialogs";
 import { errorText, logError, logInfo, logWarning } from "../app/messages";
@@ -9,6 +10,8 @@ import { documentName, isDirty, useDocument, type DocFile } from "../model/docum
 import { newProject, normalizeProject, serializeProject } from "../model/project";
 import { useSelection } from "../model/selection";
 import { usePrefs, type RecentFile } from "../prefs/prefs";
+import { buildResultsBundle, importResultsBundle } from "../results/bundle";
+import { useResultsView } from "../results/resultsView";
 import { clearRecovery } from "./autosave";
 import { findExample } from "./examples";
 import { pickAndRead, pickAndWrite, readRecent, writeInPlace } from "./fileAccess";
@@ -38,8 +41,13 @@ function openText(text: string, file: DocFile | null, opts?: { untitledName?: st
   resetSelection();
   clearRecovery();
   const name = file?.name ?? opts?.untitledName ?? t("app.untitled");
-  if (results) logWarning(src(), t("msg.openedWithResults", { name }));
+  const added = results ? importResultsBundle(results, project, name) : [];
+  if (results) logInfo(src(), t("msg.openedWithResults", { name, n: added.length }));
   else logInfo(src(), t("msg.opened", { name }));
+  if (added.length) {
+    const rv = useResultsView.getState();
+    rv.setActiveRun(added[added.length - 1].id);
+  }
 }
 
 export async function newDocument(): Promise<void> {
@@ -108,6 +116,26 @@ export async function saveDocument(): Promise<boolean> {
     useDocument.getState().markSaved(file);
     clearRecovery();
     logInfo(src(), t("msg.saved", { name: file.name }));
+    return true;
+  } catch (e) {
+    logError(src(), t("msg.saveFailed", { error: errorText(e) }));
+    return false;
+  }
+}
+
+/** 結果付きで保存 (v1 と同じ形の書き出し。文書の保存先と未保存の印は変えない) */
+export async function saveDocumentWithResults(): Promise<boolean> {
+  const { project } = useDocument.getState();
+  try {
+    const results = await buildResultsBundle();
+    if (!results) {
+      logWarning(src(), t("msg.noResultsToSave"));
+      return false;
+    }
+    const name = suggestedFileName().replace(/.json$/i, "") + "_results.json";
+    const file = await pickAndWrite(name, JSON.stringify({ ...project, results }));
+    if (!file) return false;
+    logInfo(src(), t("msg.savedWithResults", { name: file.name }));
     return true;
   } catch (e) {
     logError(src(), t("msg.saveFailed", { error: errorText(e) }));

@@ -2,6 +2,7 @@
 // 作図・プローブ・カラーバー・ルーラー) と、作図・編集・配置・調べる道具のマウスとキーボードの操作。
 // 拡大はホイール (カーソル中心)、移動は中ボタンか Space + ドラッグ (v1 と同じ)。
 
+import type { TFunction } from "i18next";
 import type { Draft } from "immer";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -32,7 +33,6 @@ import {
   setRegionPolygon,
 } from "../model/regionOps";
 import { usePrefs } from "../prefs/prefs";
-import { useStatic } from "../results/staticResults";
 import { getIn, setIn } from "../schema/schema";
 import { formatNumber, lengthUnitLabel, toDisplayLength } from "../util/format";
 import { fitCamera, gridStep, panBy, snapPoint, snapValue, toWorld, zoomAt, ZOOM_STEP, type Camera } from "./camera";
@@ -58,7 +58,9 @@ import { isoLevels, isolineSegments } from "./isolines";
 import { drawBase, drawOverlay, readColors, rulerSize, type Arrow, type OverlayState, type Placement, type Preview } from "./overlay";
 import { amrBoxesOf, emitterOf, placementsOf } from "./projectOverlays";
 import { sampleField, sampleVector, statsOf, type Scene } from "./scene";
-import { staticScene } from "./staticScene";
+import { PlaybackBar } from "./PlaybackBar";
+import { ViewerRfStrip } from "./ViewerRfStrip";
+import type { ActiveScene } from "./useScene";
 import { RULER_FONTS, useViewer, type Tool } from "./viewerStore";
 import { ViewerToolbar } from "./ViewerToolbar";
 
@@ -126,7 +128,7 @@ function vectorArrows(scene: Scene, cam: Camera, w: number, h: number, top: numb
   return out;
 }
 
-export function Viewer() {
+export function Viewer({ active }: { active: ActiveScene }) {
   const { t } = useTranslation();
   const project = useDocument((s) => s.project);
   const docSerial = useDocument((s) => s.docSerial);
@@ -135,9 +137,7 @@ export function Viewer() {
   const lengthUnit = usePrefs((s) => s.lengthUnit);
   const theme = usePrefs((s) => s.theme);
   const vs = useViewer();
-  const stMesh = useStatic((s) => s.mesh);
-  const stSolve = useStatic((s) => s.solve);
-  const stLatest = useStatic((s) => s.latest);
+  const { scene, controls, run } = active;
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
@@ -257,16 +257,16 @@ export function Viewer() {
 
   // ---- 表示するもの ----
 
-  const scene = useMemo(
-    () =>
-      staticScene({ mesh: stMesh, solve: stSolve, latest: stLatest }, vs.quantity, project, {
-        meshTitle: (nodes, elements) => t("viewer.meshTitle", { nodes, elements }),
-        potential: t("viewer.potential"),
-        field: t("viewer.fieldAbs"),
-      }),
-    [stMesh, stSolve, stLatest, vs.quantity, project, t],
-  );
-  const range = useMemo(() => (scene.field ? resolveRange(statsOf(scene.field), vs.log, vs.range) : null), [scene.field, vs.log, vs.range]);
+  const playback = "playback" in scene ? scene.playback : undefined;
+  // 塗る量が変わったら手動の範囲は外す (単位が違う)
+  const fieldKey = scene.field ? `${scene.field.label}|${scene.field.unit}` : "";
+  const lastFieldKey = useRef(fieldKey);
+  useEffect(() => {
+    if (lastFieldKey.current !== fieldKey && (vs.range.min !== null || vs.range.max !== null)) vs.setRange({ min: null, max: null });
+    lastFieldKey.current = fieldKey;
+  }, [fieldKey, vs]);
+  const log = controls.log;
+  const range = useMemo(() => (scene.field ? resolveRange(statsOf(scene.field), log, vs.range) : null), [scene.field, log, vs.range]);
   const isoSegs = useMemo(() => {
     if (!vs.overlays.isolines || !scene.iso) return null;
     const iso = scene.iso;
@@ -353,8 +353,14 @@ export function Viewer() {
         }
         const segments: SegmentDraw[] = [];
         if (isoSegs && isoSegs.length) segments.push({ data: isoSegs, color: parseColor(colors.isoline), width: 1 });
-        if (vs.overlays.trajectories) for (const s of scene.segments) segments.push({ data: s.segments, color: parseColor(s.color), width: s.width });
-        const points: PointDraw[] = vs.overlays.particles ? scene.points.map((p) => ({ data: p.xy, color: parseColor(p.color), size: p.size })) : [];
+        // 軌道 (と吸収点) は「軌道」、粒子は「粒子」で出し分ける。シース端はいつも
+        for (const s of scene.segments) {
+          if (s.id === "trajectories" && !vs.overlays.trajectories) continue;
+          segments.push({ data: s.segments, color: parseColor(s.color), width: s.width });
+        }
+        const points: PointDraw[] = scene.points
+          .filter((p) => (p.id === "absorbed" ? vs.overlays.trajectories : p.id === "sheathS" ? vs.overlays.sheathLines : vs.overlays.particles))
+          .map((p) => ({ data: p.xy, color: parseColor(p.color), size: p.size }));
         renderer.render({ width: size.w, height: size.h, dpr, camera, origin, meshes, segments, points });
       }
 
@@ -413,7 +419,7 @@ export function Viewer() {
   const exportCsv = async () => {
     if (!scene.field) return;
     try {
-      const name = scene.field.label.replace(/[^A-Za-z0-9]+/g, "") || "field";
+      const name = (controls.quantity ?? scene.field.label).replace(/[^A-Za-z0-9_]+/g, "") || "field";
       await saveTextFile(`${name}-${stamp()}.csv`, fieldCsv(scene.field, axes), "csv", "CSV");
     } catch (e) {
       logError(t("msg.source.app"), t("viewer.exportFailed", { error: errorText(e) }));
@@ -693,7 +699,7 @@ export function Viewer() {
 
   return (
     <div className="viewer" data-scheme={theme}>
-      <ViewerToolbar scene={scene} onExportPng={exportPng} onExportCsv={exportCsv} />
+      <ViewerToolbar scene={scene} controls={controls} run={run} onExportPng={exportPng} onExportCsv={exportCsv} />
       <div ref={wrapRef} className="viewer-canvas">
         <canvas ref={baseRef} className="viewer-layer" aria-hidden="true" />
         <canvas ref={glRef} className="viewer-layer" aria-hidden="true" />
@@ -749,6 +755,8 @@ export function Viewer() {
           </div>
         )}
       </div>
+      {playback && <PlaybackBar playback={playback} />}
+      {run && run.kind === "pic" && controls.mode === "live" && <ViewerRfStrip run={run} />}
       <div className="viewer-status">
         <span className="viewer-cursor mono">{cursorText}</span>
         {hoverValue !== null && scene.field && (
@@ -774,7 +782,7 @@ function hitRect(pt: Point, a: Point, b: Point, tol: number): boolean {
   return inside && !deep;
 }
 
-function axisEdgeLegend(p: Project, t: ReturnType<typeof useTranslation>["t"]) {
+function axisEdgeLegend(p: Project, t: TFunction) {
   if (coordOf(p) === "xy") return null;
   return (
     <span>
@@ -784,7 +792,7 @@ function axisEdgeLegend(p: Project, t: ReturnType<typeof useTranslation>["t"]) {
   );
 }
 
-export function toolHint(tool: Tool, n: number, t: ReturnType<typeof useTranslation>["t"]): string {
+export function toolHint(tool: Tool, n: number, t: TFunction): string {
   switch (tool) {
     case "select":
       return t("viewer.hint.select");

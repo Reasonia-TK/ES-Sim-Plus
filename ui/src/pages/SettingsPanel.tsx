@@ -1,5 +1,6 @@
 // 設定欄: 選んだノードのページを出す (見出しに「詳細設定」の切り替え)。
 
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { AdvancedSwitch } from "../forms/blocks";
 import { useDocument } from "../model/documentStore";
@@ -16,7 +17,7 @@ import { Fluid1dPage, Fluid2dPage, Pic1dPage } from "./studies/OneDimStudies";
 import { DsmcPage, SweepPage, TlPage } from "./studies/OtherStudies";
 import { PicPage } from "./studies/PicPage";
 
-function pageTitle(node: string, project: Project, t: ReturnType<typeof useTranslation>["t"], jobs: Record<string, JobSummary>): string {
+function pageTitle(node: string, project: Project, t: TFunction, jobs: Record<string, JobSummary>): string {
   if (node.startsWith("region:")) return `${t("tree.regions")} › ${node.slice(7)}`;
   if (node.startsWith("result:")) {
     const job = jobs[node.slice(7)];

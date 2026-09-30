@@ -9,6 +9,7 @@ import { wsUrl } from "../backend/port";
 import { t } from "../i18n";
 import { useDocument } from "../model/documentStore";
 import type { Project } from "../model/project";
+import { useResultsView } from "../results/resultsView";
 import { continueJob, deleteJob, jobResult, stopJob, submitJob } from "./api";
 import { TERMINAL_STATES, type JobEvent, type JobKind, type JobLimits, type JobSummary, type SweepCase } from "./types";
 
@@ -22,6 +23,10 @@ interface JobsState {
   /** watch したジョブの開始時の情報 (表示用メッシュ付き) と最新のフレーム (P6e のライブ表示) */
   startedFull: Record<string, Record<string, unknown>>;
   frames: Record<string, Record<string, unknown>>;
+  /** 再格子化で変わった表示用メッシュ (それを運んだフレームの後もこれを使う) */
+  liveMesh: Record<string, unknown>;
+  /** ライブの履歴 (受けたフレームの診断 diag・counts を並べたもの、実行ごと) */
+  liveHistory: Record<string, Record<string, number>[]>;
   /** スイープのケースごとの状態 */
   cases: Record<string, Record<number, SweepCase>>;
   /** 取ってきた結果 (runs が変わったら取り直す) */
@@ -40,6 +45,8 @@ const empty: JobsState = {
   started: {},
   startedFull: {},
   frames: {},
+  liveMesh: {},
+  liveHistory: {},
   cases: {},
   results: {},
   inputs: {},
@@ -89,11 +96,26 @@ function without<T>(rec: Record<string, T>, id: string): Record<string, T> {
   return next;
 }
 
+const MAX_LIVE_HISTORY = 4000;
+
+/** フレームの診断 (PIC は diag、流体は counts) に時刻とステップを足した 1 行 */
+function historyRow(frame: Record<string, unknown>): Record<string, number> | null {
+  const d = (frame.diag ?? frame.counts) as Record<string, unknown> | undefined;
+  if (!d || typeof d !== "object") return null;
+  const row: Record<string, number> = {};
+  for (const [k, v] of Object.entries(d)) if (typeof v === "number") row[k] = v;
+  if (typeof frame.step === "number") row.step = frame.step;
+  if (typeof frame.t === "number" && row.t === undefined) row.t = frame.t;
+  return row;
+}
+
 export function handleEvent(ev: JobEvent): void {
   const set = useJobs.setState;
   switch (ev.type) {
     case "hello": {
-      const jobs = Object.fromEntries(ev.jobs.map((j) => [j.id, j]));
+      // 読み込んだ実行 (この画面だけにある) は残す
+      const imported = Object.fromEntries(Object.values(useJobs.getState().jobs).filter((j) => j.imported).map((j) => [j.id, j]));
+      const jobs = { ...Object.fromEntries(ev.jobs.map((j) => [j.id, j])), ...imported };
       const now = performance.now();
       set((s) => ({
         jobs,
@@ -116,6 +138,8 @@ export function handleEvent(ev: JobEvent): void {
           jobs: { ...s.jobs, [ev.job.id]: ev.job },
           results,
           frames: restarted ? without(s.frames, ev.job.id) : s.frames,
+          liveMesh: restarted ? without(s.liveMesh, ev.job.id) : s.liveMesh,
+          liveHistory: restarted ? without(s.liveHistory, ev.job.id) : s.liveHistory,
           runSince: startedNow
             ? { ...s.runSince, [ev.job.id]: performance.now() - ev.job.elapsed_s * 1000 }
             : running
@@ -130,6 +154,8 @@ export function handleEvent(ev: JobEvent): void {
         started: without(s.started, ev.id),
         startedFull: without(s.startedFull, ev.id),
         frames: without(s.frames, ev.id),
+        liveMesh: without(s.liveMesh, ev.id),
+        liveHistory: without(s.liveHistory, ev.id),
         cases: without(s.cases, ev.id),
         results: without(s.results, ev.id),
         inputs: without(s.inputs, ev.id),
@@ -152,7 +178,12 @@ export function handleEvent(ev: JobEvent): void {
     case "frame": {
       const { type: _type, id, ...frame } = ev;
       void _type;
-      set((s) => ({ frames: { ...s.frames, [id]: frame } }));
+      const row = historyRow(frame);
+      set((s) => ({
+        frames: { ...s.frames, [id]: frame },
+        liveMesh: frame.mesh ? { ...s.liveMesh, [id]: frame.mesh } : s.liveMesh,
+        liveHistory: row ? { ...s.liveHistory, [id]: [...(s.liveHistory[id] ?? []).slice(-(MAX_LIVE_HISTORY - 1)), row] } : s.liveHistory,
+      }));
       break;
     }
     case "case":
@@ -197,6 +228,9 @@ export async function runJob(kind: JobKind, project: Project | null, options: Re
       inputs: { ...s.inputs, [job.id]: { project, docSerial: useDocument.getState().docSerial } },
     }));
     logInfo(t("msg.source.jobs"), t("jobs.msgSubmitted", { name: jobName(job) }));
+    const rv = useResultsView.getState();
+    // 係数の表づくりとスイープは出さない (スイープはケースの「結果」で見る)
+    if (rv.follow && kind !== "boltz" && kind !== "sweep") rv.setActiveRun(job.id);
     return job;
   } catch (e) {
     logError(t("msg.source.jobs"), t("jobs.msgSubmitFailed", { kind: t(`jobs.kind.${kind}`), error: errorText(e) }));
@@ -221,6 +255,10 @@ export async function continueRun(id: string, options: Record<string, unknown>):
 }
 
 export async function removeRun(id: string): Promise<void> {
+  if (useJobs.getState().jobs[id]?.imported) {
+    handleEvent({ type: "removed", id });
+    return;
+  }
   try {
     await deleteJob(id);
     handleEvent({ type: "removed", id });
@@ -315,7 +353,12 @@ export function startJobEvents(): void {
     if (instanceChanged) {
       close();
       // 前のバックエンドのジョブは消えている
-      useJobs.setState({ ...empty, inputs: {} });
+      // 読み込んだ実行 (この画面だけにある) は残す
+      useJobs.setState((s) => {
+        const keep = Object.values(s.jobs).filter((j) => j.imported).map((j) => j.id);
+        const pick = <T,>(m: Record<string, T>) => Object.fromEntries(keep.filter((id) => id in m).map((id) => [id, m[id]]));
+        return { ...empty, jobs: pick(s.jobs), results: pick(s.results), inputs: pick(s.inputs) };
+      });
     }
     open();
   };

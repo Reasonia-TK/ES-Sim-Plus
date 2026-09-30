@@ -3,7 +3,7 @@
 import { Menubar } from "radix-ui";
 import { useTranslation } from "react-i18next";
 import { EXAMPLES } from "../io/examples";
-import { newDocument, openDocument, openExample, openRecentFile, saveDocument, saveDocumentAs } from "../io/documents";
+import { newDocument, openDocument, openExample, openRecentFile, saveDocument, saveDocumentAs, saveDocumentWithResults } from "../io/documents";
 import { useDocument, useRedoLabel, useUndoLabel } from "../model/documentStore";
 import { usePrefs, type Language, type Theme } from "../prefs/prefs";
 import type { LengthUnit } from "../util/format";
@@ -100,7 +100,7 @@ export function MenuBar() {
         <Sep />
         <Item label={t("menu.save")} shortcut={`${MOD}+S`} onSelect={() => void saveDocument()} />
         <Item label={t("menu.saveAs")} shortcut={`${MOD}+Shift+S`} onSelect={() => void saveDocumentAs()} />
-        <Item label={t("menu.saveWithResults")} onSelect={() => {}} disabled />
+        <Item label={t("menu.saveWithResults")} onSelect={() => void saveDocumentWithResults()} />
       </Menu>
       <Menu label={t("menu.edit")}>
         <Item

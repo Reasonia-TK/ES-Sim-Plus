@@ -65,8 +65,12 @@ class AsyncSubscriber:
         if key is None:
             self._items.append(("e", event))
         else:
-            if key not in self._latest:
+            prev = self._latest.get(key)
+            if prev is None:
                 self._items.append(("k", key))
+            elif "mesh" in prev and "mesh" not in event:
+                # 置き換えるフレームが新しいメッシュを運んでいたら引き継ぐ (v1 の server と同じ)
+                event = {**event, "mesh": prev["mesh"], "mesh_version": prev.get("mesh_version")}
             self._latest[key] = event
         self._wake.set()
 

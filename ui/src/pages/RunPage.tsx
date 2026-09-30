@@ -1,6 +1,8 @@
 // 実行 (ジョブ) のページ: 状態・時刻・経過時間・実行回数・開始時の情報・警告・エラー・設定、操作 (停止・続き・
-// 削除)、結果の保存 (JSON)、その実行の設定を文書に読み込む (元に戻せる)。結果の表示 (グラフ・場) は P6e。
+// 削除)、結果の保存 (JSON)、その実行の設定を文書に読み込む (元に戻せる)、数値のサマリ。開くとその実行の結果を
+// グラフィックス (2D ビュー・グラフ) に出す。
 
+import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { errorText, logError, logInfo } from "../app/messages";
 import { saveTextFile } from "../io/fileAccess";
@@ -8,7 +10,12 @@ import { jobProject } from "../jobs/api";
 import { JobRow, useTicker } from "../jobs/JobRow";
 import { fetchResult, jobElapsed, jobName, useJobs } from "../jobs/jobsStore";
 import { useDocument } from "../model/documentStore";
+import { VIEWER_KINDS } from "../graphics/runScene";
 import { normalizeProject, type Project } from "../model/project";
+import { CHART_KINDS } from "../results/ResultsCharts";
+import { useResultsView, type GraphicsTab } from "../results/resultsView";
+import { RunSummary } from "../results/RunSummary";
+import { useWatchJob } from "../results/runData";
 import { formatElapsed, formatNumber, formatSi } from "../util/format";
 import { Hint } from "./widgets/common";
 import { SweepCases } from "./widgets/SweepCases";
@@ -25,6 +32,11 @@ export function RunPage({ id }: { id: string }) {
   const input = useJobs((s) => s.inputs[id]);
   const runSince = useJobs((s) => s.runSince[id]);
   useTicker(job?.state === "running");
+  useWatchJob(job?.state === "running" ? id : null);
+  const exists = Boolean(job);
+  useEffect(() => {
+    if (exists) useResultsView.getState().setActiveRun(id);
+  }, [id, exists]);
   if (!job) return <p className="hint">{t("jobs.gone")}</p>;
   const name = jobName(job);
   const p = job.progress;
@@ -38,6 +50,12 @@ export function RunPage({ id }: { id: string }) {
     } catch (e) {
       logError(t("msg.source.jobs"), errorText(e));
     }
+  };
+
+  const show = (tab: GraphicsTab) => {
+    const rv = useResultsView.getState();
+    rv.setActiveRun(job.id);
+    rv.setGraphicsTab(tab);
   };
 
   const loadSettings = async () => {
@@ -116,8 +134,18 @@ export function RunPage({ id }: { id: string }) {
         <button type="button" className="button" onClick={() => void loadSettings()}>
           {t("jobs.loadSettings")}
         </button>
+        {VIEWER_KINDS.includes(job.kind) && job.kind !== "trace" && (
+          <button type="button" className="button" onClick={() => show("view")}>
+            {t("results.showInView")}
+          </button>
+        )}
+        {CHART_KINDS.includes(job.kind) && (
+          <button type="button" className="button" onClick={() => show("charts")}>
+            {t("results.showInCharts")}
+          </button>
+        )}
       </div>
-      <Hint>{t("jobs.viewsLater")}</Hint>
+      <RunSummary job={job} />
     </>
   );
 }

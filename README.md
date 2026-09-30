@@ -178,7 +178,8 @@ PIC-MCC統合ではTurnerベンチマーク(M. M. Turner et al., *Phys. Plasmas*
   5%以内)、圧力駆動チャネル流の質量収支(10%以内)
 - WebSocketライブ実行(`/ws/pic`: 進捗・φ・粒子・診断のストリーミング、停止可)
 - UI v2 はジョブ (`/v2/jobs`・`WS /v2/events`、[prompts/130](prompts/130-ui-v2-plan.md) P6d) で実行する: 同じソルバーの
-  同時実行・待ち行列・停止・続き・実行ごとの結果
+  同時実行・待ち行列・停止・続き・実行ごとの結果。結果は実行ごとに 2D ビュー (ライブ・時間平均・位相分解の再生) と
+  グラフ (1D のプロファイルと比較・IEDF/IADF・EEDF・シース端・RF 波形など) で見られ、結果付きで保存・読み込みできる (P6e)
 
 ### v2 エンジン(`mesh.mode: "cartesian"`、再構築中 — [prompts/119](prompts/119-v2-rebuild-plan.md))
 

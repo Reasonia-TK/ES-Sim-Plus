@@ -131,6 +131,19 @@ export function sampleField(f: ScalarField, x: number, y: number): number | null
   return hit.w[0] * f.values[a] + hit.w[1] * f.values[b] + hit.w[2] * f.values[c];
 }
 
+/** 線分の上の値 (端を含む n 点、s は始点からの距離 [m]。メッシュの外は null) */
+export function sampleLine(f: ScalarField, a: [number, number], b: [number, number], n = 200): { s: number[]; v: (number | null)[] } {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const s: number[] = [];
+  const v: (number | null)[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0 : i / (n - 1);
+    s.push(len * t);
+    v.push(sampleField(f, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t));
+  }
+  return { s, v };
+}
+
 /** 点でのベクトル (その点を含む三角形の値)。メッシュの外は null */
 export function sampleVector(v: VectorField, x: number, y: number): [number, number] | null {
   const hit = meshIndexOf(v.mesh).locate(x, y);

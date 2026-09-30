@@ -299,6 +299,41 @@ def test_progress_and_frames_are_rate_limited_but_end_complete():
     assert 1 <= len(frames) <= 3 and frames[-1]["step"] == 200
 
 
+def test_regridded_mesh_survives_frame_throttling():
+    """再格子化の新しいメッシュを運ぶフレームが間引かれても、次に送るフレームがメッシュを持つ (GPU PIC の AMR)。"""
+
+    class RegridRunner(FakeRunner):
+        def run(self, st, emit, should_stop):
+            assert self.gate.wait(10)
+            for i in range(1, 6):
+                frame = {"step": i}
+                if i == 2:
+                    frame |= {"mesh": {"nodes": [[1.0, 1.0]]}, "mesh_version": 1}
+                emit.frame(frame)
+            return {}
+
+    r = RegridRunner()
+    m = JobManager([r], frame_interval=10.0)
+    w = ListSub()
+    m.subscribe(w)
+    r.gate.clear()
+    job = m.submit("fake", None, {})
+    w.watch = {job.id}
+    r.gate.set()
+    wait_for(lambda: _state(m, job.id) == "done")
+    frames = w.of(job.id, "frame")
+    assert frames[-1]["step"] == 5 and frames[-1]["mesh"] == {"nodes": [[1.0, 1.0]]} and frames[-1]["mesh_version"] == 1
+
+    async def main():
+        sub = AsyncSubscriber(asyncio.get_running_loop())
+        sub.push({"type": "frame", "step": 1, "mesh": {"a": 1}, "mesh_version": 3}, ("j", "frame"))
+        sub.push({"type": "frame", "step": 2}, ("j", "frame"))
+        await asyncio.sleep(0)
+        return await asyncio.wait_for(sub.next(), 1)
+
+    assert asyncio.run(main()) == {"type": "frame", "step": 2, "mesh": {"a": 1}, "mesh_version": 3}
+
+
 def test_async_subscriber_keeps_latest_per_key_in_order():
     async def main():
         sub = AsyncSubscriber(asyncio.get_running_loop())

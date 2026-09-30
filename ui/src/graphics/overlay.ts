@@ -659,8 +659,10 @@ function drawColorbar(ctx: CanvasRenderingContext2D, s: OverlayState, cb: Colorb
   const barW = 14;
   const barH = Math.min(160, Math.max(80, v.height * 0.35));
   ctx.font = FONT;
-  const ticks = colorbarTicks(cb.range, 5);
-  const texts = ticks.map((x, i) => (i === 0 ? cb.range.labelMin : i === ticks.length - 1 ? cb.range.labelMax : x)).map(formatColorbarValue);
+  // 一定の場 (最小 = 最大) は真ん中に 1 つだけ
+  const flat = cb.range.hi === cb.range.lo;
+  const ticks = flat ? [cb.range.labelMin] : colorbarTicks(cb.range, 5);
+  const texts = ticks.map((x, i) => (flat ? x : i === 0 ? cb.range.labelMin : i === ticks.length - 1 ? cb.range.labelMax : x)).map(formatColorbarValue);
   const title = cb.unit ? `${cb.label} [${cb.unit}]` : cb.label;
   const textW = Math.max(...texts.map((t) => ctx.measureText(t).width));
   const x = v.width - 12 - textW - 8 - barW;
@@ -673,7 +675,7 @@ function drawColorbar(ctx: CanvasRenderingContext2D, s: OverlayState, cb: Colorb
   ctx.lineWidth = 1;
   ctx.strokeRect(x + 0.5, y + 0.5, barW - 1, barH - 1);
   texts.forEach((t, i) => {
-    const ty = y + barH - (barH * i) / (texts.length - 1);
+    const ty = flat ? y + barH / 2 : y + barH - (barH * i) / (texts.length - 1);
     ctx.beginPath();
     ctx.moveTo(x + barW, ty);
     ctx.lineTo(x + barW + 3, ty);

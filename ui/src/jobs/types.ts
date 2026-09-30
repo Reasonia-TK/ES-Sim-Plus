@@ -37,6 +37,8 @@ export interface JobSummary {
   has_result: boolean;
   queue_position: number | null;
   options: Record<string, unknown>;
+  /** 結果付きのファイルやスイープのケースから読み込んだ実行 (この画面だけにある、バックエンドの操作はできない) */
+  imported?: boolean;
 }
 
 export interface JobLimits {

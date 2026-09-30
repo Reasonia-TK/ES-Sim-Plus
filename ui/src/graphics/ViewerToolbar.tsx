@@ -9,7 +9,10 @@ import { useDocument } from "../model/documentStore";
 import { MAX_COLLECTORS, MAX_EEDF_REGIONS, MAX_SHEATH_LINES } from "../model/placements";
 import type { Project } from "../model/project";
 import { CommitText } from "../pages/inputs";
-import { useStatic } from "../results/staticResults";
+import { jobName } from "../jobs/jobsStore";
+import type { JobSummary } from "../jobs/types";
+import { useChartPref, useResultsView } from "../results/resultsView";
+import type { SceneControls } from "./useScene";
 import { formatNumber, parseNumber } from "../util/format";
 import { colormapCss, COLORMAP_KEYS, type ColormapKey } from "./colormaps";
 import {
@@ -118,14 +121,15 @@ function RangeInput({ value, onCommit, label }: { value: number | null; onCommit
   );
 }
 
-const FIELD_OVERLAYS: OverlayKey[] = ["mesh", "isolines", "vectors"];
+const FIELD_OVERLAYS: OverlayKey[] = ["mesh", "isolines", "vectors", "particles", "trajectories"];
 const PLACEMENT_OVERLAYS: OverlayKey[] = ["emitter", "collectors", "gasBoundaries", "eedf", "edgeSizes", "sheathLines", "amr"];
 const CANVAS_OVERLAYS: OverlayKey[] = ["grid", "rulers", "legend"];
 
-function DisplayPopover({ scene }: { scene: Scene }) {
+function DisplayPopover({ scene, controls, run }: { scene: Scene; controls: SceneControls; run: JobSummary | undefined }) {
   const { t } = useTranslation();
   const vs = useViewer();
-  const hasSolve = useStatic((s) => s.solve !== null);
+  const follow = useResultsView((s) => s.follow);
+  const [rfMonitor, setRfMonitor] = useChartPref("viewer.rfMonitor", true);
   const overlay = (k: OverlayKey) => (
     <div key={k} className="display-toggle">
       <Toggle checked={vs.overlays[k]} onChange={(v) => vs.setOverlay(k, v)} label={t(`viewer.overlay.${k}`)} />
@@ -142,16 +146,52 @@ function DisplayPopover({ scene }: { scene: Scene }) {
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content className="popover-content viewer-display" align="end" sideOffset={4} collisionPadding={8}>
-          {hasSolve && (
+          {run && (
             <div className="display-row">
-              <span className="display-label">{t("viewer.quantity")}</span>
-              <div className="segmented" role="radiogroup" aria-label={t("viewer.quantity")}>
-                {(["v", "e_abs"] as const).map((q) => (
-                  <button key={q} type="button" role="radio" aria-checked={vs.quantity === q} className={vs.quantity === q ? "active" : ""} onClick={() => vs.setQuantity(q)}>
-                    {t(`viewer.quantity_${q}`)}
+              <span className="display-label">{t("results.showing")}</span>
+              <div className="range-row">
+                <span className="ellipsis">{jobName(run)}</span>
+                <button type="button" className="button small" onClick={() => useResultsView.getState().setActiveRun(null)}>
+                  {t("results.showStatic")}
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="display-toggle">
+            <Toggle checked={follow} onChange={(v) => useResultsView.getState().setFollow(v)} label={t("results.follow")} />
+          </div>
+          {controls.modes.length > 0 && (
+            <div className="display-row">
+              <span className="display-label">{t("results.modeLabel")}</span>
+              <div className="segmented" role="radiogroup" aria-label={t("results.modeLabel")}>
+                {controls.modes.map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={controls.mode === m.value}
+                    className={controls.mode === m.value ? "active" : ""}
+                    disabled={!controls.setMode}
+                    onClick={() => controls.setMode?.(m.value)}
+                  >
+                    {m.label}
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+          {controls.quantities.length > 0 && (
+            <div className="display-row">
+              <label className="display-label" htmlFor="viewer-quantity">
+                {t("viewer.quantity")}
+              </label>
+              <select id="viewer-quantity" className="input" value={controls.quantity ?? ""} onChange={(e) => controls.setQuantity(e.target.value)}>
+                {controls.quantities.map((q) => (
+                  <option key={q.value} value={q.value}>
+                    {q.label}
+                  </option>
+                ))}
+              </select>
             </div>
           )}
           <div className="display-row">
@@ -185,11 +225,14 @@ function DisplayPopover({ scene }: { scene: Scene }) {
               <button type="button" className="button small" disabled={vs.range.min === null && vs.range.max === null} onClick={() => vs.setRange({ min: null, max: null })}>
                 {t("viewer.auto")}
               </button>
-              <Toggle checked={vs.log} onChange={vs.setLog} label={t("viewer.log")} />
+              <Toggle checked={controls.log} onChange={controls.setLog} label={t("viewer.log")} />
             </div>
           </div>
           <div className="display-group">{t("viewer.groupField")}</div>
           {FIELD_OVERLAYS.map(overlay)}
+          <div className="display-toggle">
+            <Toggle checked={rfMonitor} onChange={setRfMonitor} label={t("results.rfMonitor")} />
+          </div>
           <div className="display-group">{t("viewer.groupPlacements")}</div>
           {PLACEMENT_OVERLAYS.map(overlay)}
           <div className="display-group">{t("viewer.groupCanvas")}</div>
@@ -234,7 +277,19 @@ function ExportMenu({ scene, onExportPng, onExportCsv }: { scene: Scene; onExpor
   );
 }
 
-export function ViewerToolbar({ scene, onExportPng, onExportCsv }: { scene: Scene; onExportPng: () => void; onExportCsv: () => void }) {
+export function ViewerToolbar({
+  scene,
+  controls,
+  run,
+  onExportPng,
+  onExportCsv,
+}: {
+  scene: Scene;
+  controls: SceneControls;
+  run: JobSummary | undefined;
+  onExportPng: () => void;
+  onExportCsv: () => void;
+}) {
   const { t } = useTranslation();
   const snap = useViewer((s) => s.snap);
   const setSnap = useViewer((s) => s.setSnap);
@@ -258,7 +313,7 @@ export function ViewerToolbar({ scene, onExportPng, onExportCsv }: { scene: Scen
         <IconFit />
       </button>
       <span className="spacer" />
-      <DisplayPopover scene={scene} />
+      <DisplayPopover scene={scene} controls={controls} run={run} />
       <ExportMenu scene={scene} onExportPng={onExportPng} onExportCsv={onExportCsv} />
     </div>
   );

@@ -115,6 +115,10 @@ class Job:
     progress_sent: float = 0.0
     frame_sent: float = 0.0
     frame_pending: bool = False
+    #: 再格子化で変わった表示用メッシュ (その後のフレームはこの上の値。間引いたフレームが運んでいても失わない)
+    live_mesh: dict | None = None
+    live_mesh_version: Any = None
+    mesh_unsent: bool = False
 
     def summary(self, continuable: bool, queue_position: int | None = None) -> dict:
         elapsed = self.elapsed_s
@@ -355,7 +359,8 @@ class JobManager:
             if job.started is not None:
                 sub.push({"type": "started", "id": job.id, "run": job.runs, "full": True, **job.started})
             if job.frame is not None and job.state == "running":
-                sub.push({"type": "frame", "id": job.id, **job.frame}, (job.id, "frame"))
+                frame = job.frame if "mesh" in job.frame or job.live_mesh is None else {**job.frame, "mesh": job.live_mesh, "mesh_version": job.live_mesh_version}
+                sub.push({"type": "frame", "id": job.id, **frame}, (job.id, "frame"))
 
     def _publish(self, event: dict, key: tuple | None = None, watchers_only: str | None = None) -> None:
         with self._lock:
@@ -431,6 +436,9 @@ class JobManager:
             job.frame = None
             job.progress_sent = job.frame_sent = 0.0
             job.frame_pending = False
+            job.live_mesh = None
+            job.live_mesh_version = None
+            job.mesh_unsent = False
             light = {k: v for k, v in started.items() if k not in HEAVY_STARTED_KEYS}
             self._publish({"type": "started", "id": job.id, "run": job.runs, "full": False, **light})
             if any(k in started for k in HEAVY_STARTED_KEYS):
@@ -438,7 +446,7 @@ class JobManager:
             result = runner.run(state, emit, job.stop_event.is_set)
             if job.frame_pending and job.frame is not None:
                 # 間引いて送らなかった最後のフレーム
-                self._publish({"type": "frame", "id": job.id, **job.frame}, (job.id, "frame"), watchers_only=job.id)
+                self._publish({"type": "frame", "id": job.id, **self._with_mesh(job, job.frame)}, (job.id, "frame"), watchers_only=job.id)
             with self._lock:
                 job.result = result
                 job.state = "stopped" if job.stop_event.is_set() else "done"
@@ -479,13 +487,24 @@ class JobManager:
         job.prev_state = None
         job.finished_at = time.time()
 
+    def _with_mesh(self, job: Job, frame: dict) -> dict:
+        """まだ送っていない新しいメッシュがあれば、送るフレームに添える。"""
+        if job.mesh_unsent and "mesh" not in frame and job.live_mesh is not None:
+            frame = {**frame, "mesh": job.live_mesh, "mesh_version": job.live_mesh_version}
+        job.mesh_unsent = False
+        return frame
+
     def _on_frame(self, job: Job, frame: dict) -> None:
         job.frame = frame
+        if "mesh" in frame:
+            job.live_mesh = frame["mesh"]
+            job.live_mesh_version = frame.get("mesh_version")
+            job.mesh_unsent = True
         now = time.perf_counter()
         if now - job.frame_sent >= self.frame_interval:
             job.frame_sent = now
             job.frame_pending = False
-            self._publish({"type": "frame", "id": job.id, **frame}, (job.id, "frame"), watchers_only=job.id)
+            self._publish({"type": "frame", "id": job.id, **self._with_mesh(job, frame)}, (job.id, "frame"), watchers_only=job.id)
         else:
             job.frame_pending = True
         step = frame.get("step")

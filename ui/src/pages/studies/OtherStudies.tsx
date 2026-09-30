@@ -15,6 +15,7 @@ import { CommitText, Field } from "../inputs";
 import { Hint } from "../widgets/common";
 import { ListEditor } from "../widgets/ListEditor";
 import { SweepCases } from "../widgets/SweepCases";
+import { TlImport } from "../widgets/TlImport";
 import { RunControls } from "../widgets/RunControls";
 import { StudyShell } from "./StudyShell";
 import { useSelection } from "../../model/selection";
@@ -168,7 +169,7 @@ export function TlPage() {
         <SchemaField path={[...P, "n_e_m3"]} />
         <SchemaField path={[...P, "n_s_ratio"]} />
         <SchemaField path={[...P, "nu_m_hz"]} />
-        <Hint>{t("tlPage.importLater")}</Hint>
+        <TlImport />
       </Section>
       <Section title={t("tlPage.drive")}>
         <SchemaField path={[...P, "freq_hz"]} />

@@ -8,6 +8,8 @@ import { useDocument } from "../../model/documentStore";
 import { getIn, type Path } from "../../schema/schema";
 import { computeProcessesHash, type XsProcessLike } from "../../util/boltzHash";
 import { formatNumber } from "../../util/format";
+import { BoltzCharts } from "../../results/charts/OtherCharts";
+import type { BoltzTable as FullBoltzTable } from "../../results/types";
 import { BoltzGenerate } from "./BoltzGenerate";
 import { Hint } from "./common";
 
@@ -71,6 +73,10 @@ export function BoltzSection({ path }: { path: Path }) {
               {w}
             </Hint>
           ))}
+          <details className="boltz-charts">
+            <summary>{t("charts.boltzChartsTitle")}</summary>
+            <BoltzCharts table={table as unknown as FullBoltzTable} />
+          </details>
           {/* 表を消すと Maxwell に戻す (v1 と同じ) */}
           <button
             type="button"
