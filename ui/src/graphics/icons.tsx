@@ -94,3 +94,27 @@ export const IconChevron = () => (
     <path d="M2 3.5 L5 6.5 L8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
   </svg>
 );
+
+export const IconLine = () => (
+  <Svg>
+    <path d="M2.5 13 L13.5 3" />
+    <circle cx="2.5" cy="13" r="1.2" fill="currentColor" />
+    <circle cx="13.5" cy="3" r="1.2" fill="currentColor" />
+  </Svg>
+);
+
+export const IconArc = () => (
+  <Svg>
+    <path d="M2.5 12.5 A 6.2 6.2 0 0 1 13.5 12.5" />
+    <circle cx="2.5" cy="12.5" r="1.2" fill="currentColor" />
+    <circle cx="8" cy="5.4" r="1.1" />
+    <circle cx="13.5" cy="12.5" r="1.2" fill="currentColor" />
+  </Svg>
+);
+
+export const IconFill = () => (
+  <Svg>
+    <path d="M2.5 2.5 L13.5 2.5 L13.5 13.5 L2.5 13.5 Z" strokeDasharray="2 1.6" />
+    <path d="M4.5 11.5 L8 4.5 L11.5 11.5 Z" fill="currentColor" fillOpacity="0.35" />
+  </Svg>
+);

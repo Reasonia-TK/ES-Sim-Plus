@@ -7,13 +7,16 @@ import type { Point } from "../model/project";
 import { DEFAULT_COLORMAP, type ColormapKey } from "./colormaps";
 import type { ManualRange } from "./fieldScale";
 
-export type DrawTool = "select" | "polyline" | "rect" | "circle";
+/** 作図の道具 (P7b: 線・3 点の円弧はスケッチに、囲まれた所から領域 (fill))。折れ線・矩形・円は描く先 (drawTarget) に */
+export type DrawTool = "select" | "polyline" | "rect" | "circle" | "line" | "arc" | "fill";
+/** 折れ線・矩形・円を描く先 (領域かスケッチ) */
+export type DrawTarget = "region" | "sketch";
 export type PlaceTool = "profile" | "emitter" | "injector" | "collector" | "gasbc" | "eedfbox" | "meshref" | "sheathline";
 /** 調べる道具 (文書は変えない) */
 export type InspectTool = "probe" | "measure";
 export type Tool = DrawTool | PlaceTool | InspectTool;
 
-export const DRAW_TOOLS: DrawTool[] = ["select", "polyline", "rect", "circle"];
+export const DRAW_TOOLS: DrawTool[] = ["select", "polyline", "rect", "circle", "line", "arc", "fill"];
 export const PLACE_TOOLS: PlaceTool[] = ["profile", "emitter", "injector", "collector", "gasbc", "eedfbox", "meshref", "sheathline"];
 export const INSPECT_TOOLS: InspectTool[] = ["probe", "measure"];
 
@@ -80,6 +83,7 @@ const DEFAULT_OVERLAYS: Record<OverlayKey, boolean> = {
 
 interface ViewerState {
   tool: Tool;
+  drawTarget: DrawTarget;
   snap: boolean;
   rulerFont: RulerFont;
   quantity: StaticQuantity;
@@ -94,6 +98,7 @@ interface ViewerState {
   /** 全体表示の要求 (増えたらビューアが合わせる) */
   fitSerial: number;
   setTool: (t: Tool) => void;
+  setDrawTarget: (t: DrawTarget) => void;
   setSnap: (v: boolean) => void;
   setRulerFont: (f: RulerFont) => void;
   setQuantity: (q: StaticQuantity) => void;
@@ -110,6 +115,7 @@ export const useViewer = create<ViewerState>()(
   persist(
     (set) => ({
       tool: "select",
+      drawTarget: "region",
       snap: true,
       rulerFont: "m",
       quantity: "v",
@@ -122,6 +128,7 @@ export const useViewer = create<ViewerState>()(
       fitSerial: 0,
       // プローブはプローブのツールの間だけ (v1 と同じ)
       setTool: (tool) => set((s) => ({ tool, probe: tool === "probe" ? s.probe : null })),
+      setDrawTarget: (drawTarget) => set({ drawTarget }),
       setSnap: (snap) => set({ snap }),
       setRulerFont: (rulerFont) => set({ rulerFont }),
       // 量を変えたら手動の範囲は外す (単位が違う)
@@ -137,7 +144,7 @@ export const useViewer = create<ViewerState>()(
     {
       name: "es-sim-ui.viewer",
       storage: createJSONStorage(() => localStorage),
-      partialize: (s) => ({ snap: s.snap, rulerFont: s.rulerFont, colormap: s.colormap, overlays: s.overlays }),
+      partialize: (s) => ({ snap: s.snap, drawTarget: s.drawTarget, rulerFont: s.rulerFont, colormap: s.colormap, overlays: s.overlays }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<ViewerState>;
         return { ...current, ...p, overlays: { ...DEFAULT_OVERLAYS, ...(p.overlays ?? {}) } };

@@ -11,6 +11,7 @@ import {
   type Project,
 } from "../model/project";
 import type { NodeId } from "../model/selection";
+import { sketchOf } from "../model/sketch";
 import type { JobKind, JobSummary } from "../jobs/types";
 import { formatNumber, lengthUnitLabel, toDisplayLength, type LengthUnit } from "../util/format";
 
@@ -202,6 +203,7 @@ export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: s
             detail: String(regions.length),
             children: regions.length ? regions : [{ id: "regions.empty", label: t("tree.noRegions"), placeholder: true }],
           },
+          { id: "sketch", label: t("tree.sketch"), detail: String(sketchOf(p).length) },
           { id: "boundaries", label: t("tree.boundaries"), detail: String(edges.length), children: edges },
           { id: "mesh", label: t("tree.mesh"), detail: meshDetail(p, unit) },
           { id: "bfield", label: t("tree.bfield"), detail: bfieldDetail(p) },

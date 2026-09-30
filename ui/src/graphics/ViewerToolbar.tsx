@@ -1,4 +1,4 @@
-// ビューアの道具の帯: 作図 (選択・折れ線・矩形・円)、配置 (プロファイル線・エミッタ・コレクタ・ガス境界・EEDF 領域・
+// ビューアの道具の帯: 作図 (選択・折れ線・矩形・円と描く先 (領域かスケッチ)、線・3 点の円弧・囲まれた所から領域)、配置 (プロファイル線・エミッタ・コレクタ・ガス境界・EEDF 領域・
 // 辺のメッシュ幅・シース評価線)、調べる (プローブ・計測)、スナップ・全体表示、表示の設定、書き出し。
 
 import { DropdownMenu, Popover } from "radix-ui";
@@ -16,11 +16,14 @@ import type { SceneControls } from "./useScene";
 import { formatNumber, parseNumber } from "../util/format";
 import { colormapCss, COLORMAP_KEYS, type ColormapKey } from "./colormaps";
 import {
+  IconArc,
   IconChevron,
   IconCircle,
   IconDisplay,
   IconExport,
+  IconFill,
   IconFit,
+  IconLine,
   IconMeasure,
   IconPlace,
   IconPolyline,
@@ -30,7 +33,7 @@ import {
   IconSnap,
 } from "./icons";
 import type { Scene } from "./scene";
-import { PLACE_TOOLS, RULER_FONTS, useViewer, type OverlayKey, type PlaceTool, type RulerFont, type Tool } from "./viewerStore";
+import { PLACE_TOOLS, RULER_FONTS, useViewer, type DrawTarget, type OverlayKey, type PlaceTool, type RulerFont, type Tool } from "./viewerStore";
 
 function ToolButton({ tool, icon, label, disabled, title }: { tool: Tool; icon: ReactNode; label: string; disabled?: boolean; title?: string }) {
   const active = useViewer((s) => s.tool === tool);
@@ -47,6 +50,23 @@ function ToolButton({ tool, icon, label, disabled, title }: { tool: Tool; icon: 
     >
       {icon}
     </button>
+  );
+}
+
+/** 折れ線・矩形・円を描く先 (領域かスケッチ) */
+function TargetSwitch() {
+  const { t } = useTranslation();
+  const target = useViewer((s) => s.drawTarget);
+  const setTarget = useViewer((s) => s.setDrawTarget);
+  const targets: DrawTarget[] = ["region", "sketch"];
+  return (
+    <div className="segmented draw-target" role="radiogroup" aria-label={t("viewer.target.label")} title={t("viewer.target.hint")}>
+      {targets.map((k) => (
+        <button key={k} type="button" role="radio" aria-checked={target === k} className={target === k ? "active" : ""} onClick={() => setTarget(k)}>
+          {t(`viewer.target.${k}`)}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -322,6 +342,10 @@ export function ViewerToolbar({
       <ToolButton tool="polyline" icon={<IconPolyline />} label={t("viewer.tool.polyline")} title={`${t("viewer.tool.polyline")} — ${t("viewer.clipHint")}`} />
       <ToolButton tool="rect" icon={<IconRect />} label={t("viewer.tool.rect")} title={`${t("viewer.tool.rect")} — ${t("viewer.clipHint")}`} />
       <ToolButton tool="circle" icon={<IconCircle />} label={t("viewer.tool.circle")} title={`${t("viewer.tool.circle")} — ${t("viewer.clipHint")}`} />
+      <TargetSwitch />
+      <ToolButton tool="line" icon={<IconLine />} label={t("viewer.tool.line")} />
+      <ToolButton tool="arc" icon={<IconArc />} label={t("viewer.tool.arc")} />
+      <ToolButton tool="fill" icon={<IconFill />} label={t("viewer.tool.fill")} title={`${t("viewer.tool.fill")} — ${t("viewer.hint.fill")}`} />
       <span className="toolbar-sep" />
       <PlaceMenu />
       <span className="toolbar-sep" />

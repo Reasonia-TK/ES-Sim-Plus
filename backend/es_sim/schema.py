@@ -1053,6 +1053,9 @@ class Project(BaseModel):
     # VHF 定在波 (非線形径方向伝送線路モデル、prompts/101)。null なら無効。
     # pic1d 同様 geometry/mesh とは無関係な専用ソルバー (tl.py)
     tl: TlSettings | None = None
+    # UI の CAD の状態 (prompts/132): スケッチ (領域でない線・円弧・円・ポリライン) など。ソルバーは使わないので
+    # 中身は検査しない (壊れていても計算は止めない)
+    cad: dict | None = Field(None, description="UI の CAD の状態 (スケッチなど)。ソルバーは使わない")
 
     @model_validator(mode="after")
     def _flatten_arcs(self) -> "Project":

@@ -1,6 +1,6 @@
 // 輪郭の頂点の表 (P7): 頂点の座標 (長さは表示単位)、辺ごとの円弧の中心角 [°]、頂点の追加 (辺を中点で分ける。
-// 円弧は同じ円の 2 つの円弧に) と削除 (前後の辺を 1 本に)。領域とドメインで使い、文書の変え方は呼ぶ側が渡す
-// (ドメインは外周の辺の ID と境界条件などの番号の付け替えも一緒に行う)。
+// 円弧は同じ円の 2 つの円弧に) と削除 (前後の辺を 1 本に)。領域・ドメイン・スケッチのポリライン (開いていれば最後の
+// 点から出る辺は無い) で使い、文書の変え方は呼ぶ側が渡す (ドメインは外周の辺の ID と参照の付け替えも一緒に行う)。
 
 import { useTranslation } from "react-i18next";
 import { angleFromBulge, bulgeFromAngle, bulgesOf, removeVertex, type PathData } from "../../cad/path";
@@ -50,7 +50,7 @@ function angleDeg(b: number): number {
   return Math.round(deg * 1e9) / 1e9;
 }
 
-export function PathTable({ path, label, ops }: { path: PathData; label: string; ops: PathTableOps }) {
+export function PathTable({ path, label, ops, closed = true }: { path: PathData; label: string; ops: PathTableOps; closed?: boolean }) {
   const { t } = useTranslation();
   const ctx = useUnitContext();
   const unit = displayUnit("m", true, ctx);
@@ -86,6 +86,7 @@ export function PathTable({ path, label, ops }: { path: PathData; label: string;
               </td>
             ))}
             <td>
+              {(closed || i < pts.length - 1) && (
               <QuantityInput
                 info={ANGLE}
                 ctx={ctx}
@@ -96,15 +97,16 @@ export function PathTable({ path, label, ops }: { path: PathData; label: string;
                   ops.setBulge(i, bulgeFromAngle((v * Math.PI) / 180));
                 }}
               />
+              )}
             </td>
             <td className="nowrap">
-              <button type="button" className="button small" title={t("widgets.vertexInsert")} onClick={() => ops.split(i)}>
+              <button type="button" className="button small" title={t("widgets.vertexInsert")} disabled={!closed && i === pts.length - 1} onClick={() => ops.split(i)}>
                 +
               </button>
               <button
                 type="button"
                 className="button small danger"
-                disabled={removeVertex(path, i) === null}
+                disabled={closed ? removeVertex(path, i) === null : pts.length <= 2}
                 title={t("widgets.vertexDelete")}
                 onClick={() => ops.removeVertex(i)}
               >

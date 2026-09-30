@@ -4,6 +4,8 @@
 // (軸対称への切り替えと同じ)。反時計回りでなくなったら向きを戻す (ID も並べ替える)。
 
 import type { Draft } from "immer";
+import { toleranceOf } from "../cad/arrangement";
+import { closestPoint, pathSegs, pointAt, type Seg } from "../cad/geom";
 import {
   bulgesOf,
   edgeMidpoint,
@@ -183,4 +185,70 @@ export function reshapeDomain(p: Project, polygon: Point[], bulges?: number[] | 
 /** 辺 i の中点 (円弧は弧の中点) */
 export function domainEdgeMidpoint(p: Project, i: number): Point {
   return edgeMidpoint(domainPath(p), i) as Point;
+}
+
+/**
+ * 新しい辺 s が元の辺 o に重なるか: 直線は同じ直線の上、円弧は同じ円の上で、重なる部分が s の長さの 1 割以上
+ * (ドメインを広げた・縮めたときも、同じ直線の上に残った辺は条件を引き継ぐ。端で接するだけの続きは重ならない)
+ */
+function overlaps(s: Seg, o: Seg, tol: number): boolean {
+  if (s.kind !== o.kind) return false;
+  if (s.kind === "line" && o.kind === "line") {
+    const dx = o.b[0] - o.a[0];
+    const dy = o.b[1] - o.a[1];
+    const L = Math.hypot(dx, dy);
+    if (L === 0) return false;
+    const off = (q: Point) => Math.abs((q[0] - o.a[0]) * dy - (q[1] - o.a[1]) * dx) / L;
+    if (off(s.a as Point) > tol || off(s.b as Point) > tol) return false;
+    const u = (q: Point) => ((q[0] - o.a[0]) * dx + (q[1] - o.a[1]) * dy) / L;
+    const [s0, s1] = [u(s.a as Point), u(s.b as Point)].sort((a, b) => a - b);
+    return Math.min(s1, L) - Math.max(s0, 0) >= 0.1 * (s1 - s0);
+  }
+  if (s.kind === "arc" && o.kind === "arc") {
+    if (Math.abs(s.r - o.r) > tol || Math.hypot(s.center[0] - o.center[0], s.center[1] - o.center[1]) > tol) return false;
+    // s の上に等間隔にとった点のうち o の上にあるものの割合
+    const n = 20;
+    let on = 0;
+    for (let k = 0; k <= n; k++) if (closestPoint(o, pointAt(s, k / n)).dist <= tol) on++;
+    return on / (n + 1) >= 0.1;
+  }
+  return false;
+}
+
+/**
+ * 外周を新しい経路に置き換える (領域・スケッチの閉じた形をドメインにする)。元の辺に重なる辺 (同じ直線・同じ円の上で
+ * 重なる、overlaps) は元の辺の ID を引き継ぎ、同じ元の辺に重なる 2 本目からは新しい ID で元の辺を親にする (条件を
+ * 引き継ぐ)。重ならない辺は新しい ID (条件なし)
+ */
+export function domainFromPath(p: Project, path: PathData): DomainEdit {
+  const old = domainPath(p);
+  const oldIds = edgeIdsOf(p);
+  const oldSegs = pathSegs(old.polygon, bulgesOf(old));
+  const newSegs = pathSegs(path.polygon, bulgesOf(path));
+  const tol = 10 * toleranceOf([...oldSegs, ...newSegs]);
+  const used = new Set<string>();
+  const all = [...oldIds];
+  const fresh = () => {
+    const id = nextEdgeId(all);
+    all.push(id);
+    return id;
+  };
+  const ids: string[] = [];
+  const parents: Record<string, string> = {};
+  for (const s of newSegs) {
+    const k = oldSegs.findIndex((o) => overlaps(s, o, tol));
+    if (k < 0) {
+      ids.push(fresh());
+      continue;
+    }
+    if (!used.has(oldIds[k])) {
+      used.add(oldIds[k]);
+      ids.push(oldIds[k]);
+    } else {
+      const id = fresh();
+      parents[id] = oldIds[k];
+      ids.push(id);
+    }
+  }
+  return { path, ids, parents };
 }

@@ -1,16 +1,19 @@
 // Canvas2D で描くもの。下の層: 背景・ドメインの塗り・グリッド。上の層: 電場の矢印・ジオメトリ (境界条件の
-// 色分け・対称軸・領域)・配置物・選択とハンドル・作図中の線・計測・プローブ・カラーバー・ルーラー。
+// 色分け・対称軸・領域・スケッチ)・配置物・選択とハンドル・作図中の線・計測・プローブ・カラーバー・ルーラー。
 // 場とメッシュは間の WebGL の層が描く。色はテーマの CSS 変数から読む。
 
-import { pathBounds, segFromBulge, type ArcSeg } from "../cad/geom";
+import { bulgeOf, bulgeThrough, midpoint, pathBounds, segFromBulge, type ArcSeg } from "../cad/geom";
 import { bulgesOf, pathHandles, type PathData } from "../cad/path";
 import { axisEdges, boundaryOfEdge, domainPath, regionPath, type Point, type Project, type Region } from "../model/project";
+import type { PickRef } from "../model/selection";
+import { edgeCountOf, sketchSegs, type EditPath, type SketchEntity } from "../model/sketch";
+import type { EditObject } from "./editTargets";
 import { lengthUnitLabel, toDisplayLength, type LengthUnit } from "../util/format";
 import { gridStep, toScreen, toWorld, type Camera } from "./camera";
 import { colormapCss, type ColormapKey } from "./colormaps";
 import { colorbarTicks, formatColorbarValue, type DisplayRange } from "./fieldScale";
 import { radiusHandlePoint } from "./hitTest";
-import type { OverlayKey, Tool } from "./viewerStore";
+import type { DrawTarget, OverlayKey, Tool } from "./viewerStore";
 
 // ---- 色 ----
 
@@ -38,6 +41,8 @@ const COLOR_VARS = {
   handle: "--color-handle",
   handleMid: "--color-handle-mid",
   draw: "--color-draw",
+  sketch: "--color-sketch",
+  fillPreview: "--color-fill-preview",
   emitter: "--color-emitter",
   injector: "--color-injector",
   gasbc: "--color-gasbc",
@@ -123,6 +128,34 @@ function traceDomainEdge(ctx: CanvasRenderingContext2D, v: View, p: Project, i: 
   ctx.beginPath();
   ctx.moveTo(x, y);
   edgeTo(ctx, v, a, poly[(i + 1) % poly.length], bulgesOf(domainPath(p))[i]);
+}
+
+/** 点の操作の形 (閉じていなければ最後の点で終わる) */
+function traceEditPath(ctx: CanvasRenderingContext2D, v: View, p: EditPath, offset: Point = [0, 0]): void {
+  const pts = p.points.map(([x, y]) => [x + offset[0], y + offset[1]] as Point);
+  ctx.beginPath();
+  if (pts.length === 0) return;
+  const [x0, y0] = toScreen(v.camera, pts[0]);
+  ctx.moveTo(x0, y0);
+  for (let i = 0; i < edgeCountOf(p); i++) edgeTo(ctx, v, pts[i], pts[(i + 1) % pts.length], p.bulges[i] ?? 0);
+  if (p.closed) ctx.closePath();
+}
+
+/** スケッチの形 (円・線分・円弧・ポリライン) */
+function traceSketch(ctx: CanvasRenderingContext2D, v: View, e: SketchEntity, offset: Point = [0, 0]): void {
+  ctx.beginPath();
+  if (e.kind === "circle") {
+    const [cx, cy] = toScreen(v.camera, [e.center[0] + offset[0], e.center[1] + offset[1]]);
+    ctx.arc(cx, cy, e.r * v.camera.scale, 0, 2 * Math.PI);
+    return;
+  }
+  for (const sg of sketchSegs(e)) {
+    const a: Point = [sg.a[0] + offset[0], sg.a[1] + offset[1]];
+    const b: Point = [sg.b[0] + offset[0], sg.b[1] + offset[1]];
+    const [x, y] = toScreen(v.camera, a);
+    ctx.moveTo(x, y);
+    edgeTo(ctx, v, a, b, bulgeOf(sg));
+  }
 }
 
 function pathRegion(ctx: CanvasRenderingContext2D, v: View, r: Region, offset: Point = [0, 0], radius?: number): void {
@@ -250,17 +283,29 @@ export interface EmitterView {
 
 export interface Drawing {
   tool: Tool;
+  /** 描く先 (折れ線・矩形・円) */
+  target: DrawTarget;
   pts: Point[];
+  /** 折れ線の辺ごとの bulge (pts[i] → pts[i+1]) */
+  bulges: number[];
+  /** 円弧を描く途中の通る点 (折れ線の円弧・3 点の円弧) */
+  through: Point | null;
+  /** 折れ線の円弧の段 */
+  arcMode: boolean;
   cursor: Point | null;
+  /** 折れ線の最初の点に近い (クリックで閉じる) */
+  closing: boolean;
 }
 
 export interface Preview {
-  /** 頂点のドラッグ中の輪郭 (頂点 + 円弧) */
-  path?: PathData | null;
+  /** 頂点・辺のドラッグ中の形 (領域・ドメイン・スケッチ) */
+  edit?: EditPath | null;
   /** 半径のドラッグ中の半径 */
   radius?: number | null;
   /** 移動のドラッグ中のずれ */
   move?: Point | null;
+  /** 範囲選択の 2 隅 (ワールド座標) */
+  box?: [Point, Point] | null;
 }
 
 export interface Colorbar {
@@ -284,10 +329,16 @@ export interface OverlayState {
   overlays: Record<OverlayKey, boolean>;
   /** 場かメッシュを描いているか (領域を薄く塗るかどうか) */
   fieldShown: boolean;
-  selectedRegion: string | null;
   selectedPlacement: { kind: Placement["kind"]; index: number } | null;
   /** 選んだ外周の辺の番号 */
   selectedEdge: number | null;
+  /** キャンバスで選んだ領域とスケッチ */
+  picked: PickRef[];
+  /** ハンドルを出して編集している形 */
+  edit: EditObject | null;
+  sketch: SketchEntity[];
+  /** 囲まれた所から領域を作る道具の、カーソルの下の面 */
+  fillPreview: PathData | null;
   tool: Tool;
   preview: Preview;
   drawing: Drawing;
@@ -393,6 +444,15 @@ function drawGeometry(ctx: CanvasRenderingContext2D, s: OverlayState): void {
       ctx.restore();
     }
     ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  // スケッチ (領域でない線・円弧・円・ポリライン)
+  const pickedSketch = new Set(s.picked.filter((x) => x.kind === "sketch").map((x) => x.id));
+  for (const e of s.sketch) {
+    if (pickedSketch.has(e.id)) continue;
+    traceSketch(ctx, v, e);
+    ctx.strokeStyle = c.sketch;
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -523,54 +583,83 @@ function drawEmitter(ctx: CanvasRenderingContext2D, s: OverlayState, e: EmitterV
   if (tag) label(ctx, tag, ox + 8, oy + 10, color, "left", "top");
 }
 
+/** 選んだもの (領域は破線の縁取り、スケッチは選択の色) と、編集している形のハンドル・ドラッグ中の形 */
 function drawSelection(ctx: CanvasRenderingContext2D, s: OverlayState): void {
-  const { view: v, colors: c } = s;
-  const sel = s.project.geometry.regions.find((r) => r.id === s.selectedRegion);
-  if (!sel) return;
-  const handles = s.tool === "select";
-  ctx.strokeStyle = c.selection;
-  ctx.lineWidth = 3;
-  ctx.setLineDash([6, 4]);
-  if (sel.shape) {
-    const rad = s.preview.radius ?? sel.shape.radius;
-    pathRegion(ctx, v, sel, [0, 0], rad);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    if (handles) {
-      const [hx, hy] = toScreen(v.camera, radiusHandlePoint({ ...sel.shape, radius: rad }));
-      squareHandle(ctx, hx, hy, c.selection);
-    }
-  } else {
-    const path = s.preview.path ?? regionPath(sel);
-    tracePath(ctx, v, path);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    if (handles) {
-      const h = pathHandles(path);
-      for (const q of h.vertices) {
-        const [x, y] = toScreen(v.camera, q);
-        squareHandle(ctx, x, y, c.selection);
-      }
-      for (const q of h.midpoints) {
-        const [x, y] = toScreen(v.camera, q);
-        dot(ctx, x, y, 4, c.handleMid);
-      }
+  const { view: v, colors: c, project: p } = s;
+  const edit = s.edit;
+  const editing = (kind: string, id?: string) => edit !== null && edit.target.kind === kind && (id === undefined || ("id" in edit.target && edit.target.id === id));
+  for (const it of s.picked) {
+    ctx.strokeStyle = c.selection;
+    if (it.kind === "region") {
+      const r = p.geometry.regions.find((x) => x.id === it.id);
+      if (!r) continue;
+      ctx.lineWidth = 3;
+      ctx.setLineDash([6, 4]);
+      if (editing("region", r.id) && s.preview.edit) traceEditPath(ctx, v, s.preview.edit);
+      else pathRegion(ctx, v, r, [0, 0], editing("region", r.id) ? (s.preview.radius ?? undefined) : undefined);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    } else {
+      const e = s.sketch.find((x) => x.id === it.id);
+      if (!e) continue;
+      ctx.lineWidth = 2.5;
+      if (editing("sketch", e.id) && s.preview.edit) traceEditPath(ctx, v, s.preview.edit);
+      else if (editing("sketch", e.id) && e.kind === "circle" && s.preview.radius) traceSketch(ctx, v, { ...e, r: s.preview.radius });
+      else traceSketch(ctx, v, e);
+      ctx.stroke();
     }
   }
-  // 移動のプレビュー
-  const d = s.preview.move;
-  if (d) {
-    pathRegion(ctx, v, sel, d);
-    ctx.save();
-    ctx.globalAlpha = 0.15;
-    ctx.fillStyle = c.selection;
-    ctx.fill();
-    ctx.restore();
+  // ドメインの編集中の形
+  if (edit?.target.kind === "domain") {
     ctx.strokeStyle = c.selection;
     ctx.lineWidth = 2;
     ctx.setLineDash([6, 4]);
+    traceEditPath(ctx, v, s.preview.edit ?? edit.path!);
     ctx.stroke();
     ctx.setLineDash([]);
+  }
+  // 移動のプレビュー (選んだもの全て)
+  const d = s.preview.move;
+  if (d) {
+    for (const it of s.picked) {
+      if (it.kind === "region") {
+        const r = p.geometry.regions.find((x) => x.id === it.id);
+        if (!r) continue;
+        pathRegion(ctx, v, r, d);
+        ctx.save();
+        ctx.globalAlpha = 0.15;
+        ctx.fillStyle = c.selection;
+        ctx.fill();
+        ctx.restore();
+      } else {
+        const e = s.sketch.find((x) => x.id === it.id);
+        if (!e) continue;
+        traceSketch(ctx, v, e, d);
+      }
+      ctx.strokeStyle = c.selection;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  // ハンドル (選択の道具で、1 つを編集しているとき)
+  if (!edit || s.tool !== "select" || d) return;
+  if (edit.circle) {
+    const rad = s.preview.radius ?? edit.circle.r;
+    const [hx, hy] = toScreen(v.camera, radiusHandlePoint({ kind: "circle", center: edit.circle.center, radius: rad }));
+    squareHandle(ctx, hx, hy, c.selection);
+    return;
+  }
+  const path = s.preview.edit ?? edit.path;
+  if (!path) return;
+  for (const q of path.points) {
+    const [x, y] = toScreen(v.camera, q);
+    squareHandle(ctx, x, y, c.selection);
+  }
+  for (let i = 0; i < edgeCountOf(path); i++) {
+    const [x, y] = toScreen(v.camera, midpoint(segFromBulge(path.points[i], path.points[(i + 1) % path.points.length], path.bulges[i] ?? 0)));
+    dot(ctx, x, y, 4, c.handleMid);
   }
 }
 
@@ -583,46 +672,69 @@ function squareHandle(ctx: CanvasRenderingContext2D, x: number, y: number, fill:
   ctx.strokeRect(x - h / 2, y - h / 2, h, h);
 }
 
-/** 作図中の線 (ツールの色の破線) */
+/** 作図中の線 (ツールの色の破線)。折れ線は円弧の辺も、3 点の円弧は通る点から、スケッチに描くときはスケッチの色 */
 function drawRubberBand(ctx: CanvasRenderingContext2D, s: OverlayState): void {
   const { view: v, colors: c } = s;
-  const { tool, pts, cursor } = s.drawing;
+  const { tool, pts, cursor, bulges, through, target } = s.drawing;
   if (pts.length === 0 || tool === "measure") return;
+  const sketchTool = tool === "line" || tool === "arc" || ((tool === "polyline" || tool === "rect" || tool === "circle") && target === "sketch");
   const color =
     tool === "emitter"
       ? c.emitter
       : tool === "injector"
         ? c.injector
-      : tool === "collector"
-        ? c.collectors[0]
-        : tool === "gasbc"
-          ? c.gasbc
-          : tool === "eedfbox"
-            ? c.eedf
-            : tool === "meshref"
-              ? c.edgeSize
-              : tool === "sheathline"
-                ? c.sheath
-                : c.draw;
+        : tool === "collector"
+          ? c.collectors[0]
+          : tool === "gasbc"
+            ? c.gasbc
+            : tool === "eedfbox"
+              ? c.eedf
+              : tool === "meshref"
+                ? c.edgeSize
+                : tool === "sheathline"
+                  ? c.sheath
+                  : sketchTool
+                    ? c.sketch
+                    : c.draw;
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.lineWidth = 1.5;
-  ctx.setLineDash([4, 3]);
-  if (tool === "polyline") {
+  if (tool === "polyline" || tool === "arc" || tool === "line") {
+    // 確定した辺 (実線) と、カーソルまでの辺 (破線。通る点があれば円弧)
     ctx.beginPath();
-    [...pts, ...(cursor ? [cursor] : [])].forEach((q, i) => {
-      const [x, y] = toScreen(v.camera, q);
-      if (i) ctx.lineTo(x, y);
-      else ctx.moveTo(x, y);
-    });
+    const [x0, y0] = toScreen(v.camera, pts[0]);
+    ctx.moveTo(x0, y0);
+    for (let i = 0; i + 1 < pts.length; i++) edgeTo(ctx, v, pts[i], pts[i + 1], bulges[i] ?? 0);
     ctx.stroke();
-    ctx.setLineDash([]);
+    const last = pts[pts.length - 1];
+    if (cursor) {
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      const [lx, ly] = toScreen(v.camera, last);
+      ctx.moveTo(lx, ly);
+      edgeTo(ctx, v, last, cursor, through ? bulgeThrough(last, through, cursor) : 0);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
     for (const q of pts) {
       const [x, y] = toScreen(v.camera, q);
       dot(ctx, x, y, 3, color);
     }
+    if (through) {
+      const [x, y] = toScreen(v.camera, through);
+      dot(ctx, x, y, 3.5, "transparent", color);
+    }
+    // 最初の点に戻ると閉じる
+    if (s.drawing.closing) {
+      const [x, y] = toScreen(v.camera, pts[0]);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 7, 0, 2 * Math.PI);
+      ctx.stroke();
+    }
     return;
   }
+  ctx.setLineDash([4, 3]);
   if (!cursor) {
     ctx.setLineDash([]);
     return;
@@ -643,6 +755,35 @@ function drawRubberBand(ctx: CanvasRenderingContext2D, s: OverlayState): void {
   }
   ctx.setLineDash([]);
   dot(ctx, x0, y0, 3, color);
+}
+
+/** 囲まれた所から領域を作る道具: カーソルの下の面 */
+function drawFillPreview(ctx: CanvasRenderingContext2D, s: OverlayState, face: PathData): void {
+  tracePath(ctx, s.view, face);
+  ctx.save();
+  ctx.globalAlpha = 0.22;
+  ctx.fillStyle = s.colors.fillPreview;
+  ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = s.colors.fillPreview;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+/** 範囲選択の矩形 */
+function drawBox(ctx: CanvasRenderingContext2D, s: OverlayState, [a, b]: [Point, Point]): void {
+  const [xa, ya] = toScreen(s.view.camera, a);
+  const [xb, yb] = toScreen(s.view.camera, b);
+  ctx.save();
+  ctx.globalAlpha = 0.12;
+  ctx.fillStyle = s.colors.selection;
+  ctx.fillRect(Math.min(xa, xb), Math.min(ya, yb), Math.abs(xb - xa), Math.abs(yb - ya));
+  ctx.restore();
+  ctx.strokeStyle = s.colors.selection;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(Math.min(xa, xb), Math.min(ya, yb), Math.abs(xb - xa), Math.abs(yb - ya));
+  ctx.setLineDash([]);
 }
 
 function drawProfile(ctx: CanvasRenderingContext2D, s: OverlayState, line: [Point, Point]): void {
@@ -853,9 +994,11 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, s: OverlayState): voi
   if (s.emitter) drawEmitter(ctx, s, s.emitter);
   if (s.injector) drawEmitter(ctx, s, s.injector, s.colors.injector, "PIC");
   if (s.profile) drawProfile(ctx, s, s.profile);
+  if (s.fillPreview) drawFillPreview(ctx, s, s.fillPreview);
   drawSelection(ctx, s);
   if (s.measure) drawMeasure(ctx, s, s.measure);
   drawRubberBand(ctx, s);
+  if (s.preview.box) drawBox(ctx, s, s.preview.box);
   if (s.colorbar) drawColorbar(ctx, s, s.colorbar);
   if (s.probe) drawProbe(ctx, s, s.probe);
   if (s.overlays.rulers) drawRulers(ctx, s);

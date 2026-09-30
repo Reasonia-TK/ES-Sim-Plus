@@ -42,6 +42,8 @@
   --color-handle: #ffe066;
   --color-handle-mid: #4d9aff;
   --color-draw: #4d9aff;
+  --color-sketch: #b8c7d6;
+  --color-fill-preview: #4d9aff;
   --color-emitter: #4ddd8c;
   --color-injector: #f472d0;
   --color-gasbc: #ffb454;
@@ -102,6 +104,8 @@
   --color-handle: #d49b00;
   --color-handle-mid: #1f6fdc;
   --color-draw: #1f6fdc;
+  --color-sketch: #55667a;
+  --color-fill-preview: #1f6fdc;
   --color-emitter: #17924f;
   --color-injector: #b8327f;
   --color-gasbc: #c8740e;
@@ -721,6 +725,35 @@ details > summary {
 .tool-button.active {
   background: var(--bg-active);
   border-color: var(--accent);
+}
+
+/* 点の入力 (x, y を横に並べる) */
+.point-input {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.point-input .input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.table tr.selected {
+  background: var(--bg-active);
+}
+
+/* 描く先 (領域・スケッチ) の切り替え: 道具のボタンと同じ高さ */
+.segmented.draw-target {
+  margin: 0 4px;
+  flex: 0 0 auto;
+}
+
+.segmented.draw-target button {
+  height: 24px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--text);
 }
 
 .tool-button:disabled {

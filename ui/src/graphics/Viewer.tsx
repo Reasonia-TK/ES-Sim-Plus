@@ -1,95 +1,33 @@
 // 2D ビューア: 3 枚の層 (下: 背景・グリッド、中: WebGL の場・メッシュ・等値線・粒子、上: ジオメトリ・配置物・
-// 作図・プローブ・カラーバー・ルーラー) と、作図・編集・配置・調べる道具のマウスとキーボードの操作。
-// 拡大はホイール (カーソル中心)、移動は中ボタンか Space + ドラッグ (v1 と同じ)。
+// 作図・プローブ・カラーバー・ルーラー)、カメラ (全体表示・ホイールでカーソル中心に拡大)、書き出し。作図・編集・配置・
+// 調べる道具のマウスとキーボードの操作は useCanvasTools (移動は中ボタンか Space + ドラッグ、v1 と同じ)。
 
 import type { TFunction } from "i18next";
-import type { Draft } from "immer";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { errorText, logError, logWarning } from "../app/messages";
 import { saveBinaryFile, saveTextFile } from "../io/fileAccess";
 import { useDocument } from "../model/documentStore";
-import { PLACEMENT_NODES, PLACEMENT_PATHS, useSelection, type PlacementKind } from "../model/selection";
-import {
-  placeCollector,
-  placeEdgeMeshSize,
-  placeEedfRegion,
-  placeEmitter,
-  placeInjectionEmitter,
-  placeGasBoundary,
-  placeSheathLine,
-  MAX_COLLECTORS,
-  MAX_EEDF_REGIONS,
-  MAX_SHEATH_LINES,
-  type PlaceResult,
-} from "../model/placements";
-import { moveVertex, splitEdge, type PathData } from "../cad/path";
-import { coordOf, domainBounds, edgeIdOf, edgeIndexOf, regionPath, type Point, type Project } from "../model/project";
-import {
-  addCircleRegionAt,
-  addPolygonRegion,
-  deleteRegion,
-  moveRegion,
-  removeRegionVertex,
-  setCircleRadius,
-  setRegionPath,
-} from "../model/regionOps";
+import { useSelection } from "../model/selection";
+import { coordOf, domainBounds, edgeIndexOf, type Point, type Project } from "../model/project";
+import { sketchOf } from "../model/sketch";
 import { usePrefs } from "../prefs/prefs";
-import { getIn, setIn } from "../schema/schema";
 import { formatNumber, lengthUnitLabel, toDisplayLength } from "../util/format";
-import { fitCamera, gridStep, panBy, snapPoint, snapValue, toWorld, zoomAt, ZOOM_STEP, type Camera } from "./camera";
+import { fitCamera, toWorld, zoomAt, ZOOM_STEP, type Camera } from "./camera";
 import { parseColor } from "./color";
 import { composePng, fieldCsv, stamp } from "./exporting";
 import { resolveRange } from "./fieldScale";
 import { GlRenderer, type MeshDraw, type PointDraw, type Rgba, type SegmentDraw } from "./gl/renderer";
-import {
-  CLICK_TOLERANCE_PX,
-  dedupeTail,
-  EDGE_TOLERANCE_PX,
-  findDomainEdgeAt,
-  findMidpointHandle,
-  findRegionAt,
-  findVertexHandle,
-  hitCircle,
-  hitRadiusHandle,
-  hitRegion,
-  hitSegment,
-  rectFromCorners,
-} from "./hitTest";
 import { isoLevels, isolineSegments } from "./isolines";
-import { drawBase, drawOverlay, readColors, rulerSize, type Arrow, type OverlayState, type Placement, type Preview } from "./overlay";
+import { drawBase, drawOverlay, readColors, rulerSize, type Arrow, type OverlayState, type Placement } from "./overlay";
 import { amrBoxesOf, emitterOf, injectorOf, placementsOf } from "./projectOverlays";
 import { sampleField, sampleVector, statsOf, type Scene } from "./scene";
 import { PlaybackBar } from "./PlaybackBar";
 import { ViewerRfStrip } from "./ViewerRfStrip";
 import type { ActiveScene } from "./useScene";
-import { RULER_FONTS, useViewer, type Tool } from "./viewerStore";
+import { localPoint, toolHint, useCanvasTools } from "./useCanvasTools";
+import { RULER_FONTS, useViewer } from "./viewerStore";
 import { ViewerToolbar } from "./ViewerToolbar";
-
-type Drag =
-  | { kind: "pan"; lastX: number; lastY: number; x: number; y: number }
-  | { kind: "click"; x: number; y: number }
-  | { kind: "vertex"; x: number; y: number; id: string; index: number; path: PathData }
-  | { kind: "radius"; x: number; y: number; id: string }
-  | { kind: "move"; x: number; y: number; id: string; start: Point };
-
-/** 2 点で決める道具 */
-const TWO_POINT: Tool[] = ["rect", "circle", "profile", "emitter", "injector", "collector", "gasbc", "eedfbox", "meshref", "sheathline", "measure"];
-
-/** ポインタを捕まえる (キャンバスの外へ出てもドラッグを続ける。作ったイベントでは捕まえられないので無視) */
-function capture(el: HTMLElement, id: number): void {
-  try {
-    el.setPointerCapture(id);
-  } catch {
-    // 捕まえられないポインタ
-  }
-}
-
-/** 画面の点 → 要素内の座標 (CSS px) */
-function localPoint(e: { clientX: number; clientY: number }, el: HTMLElement): [number, number] {
-  const r = el.getBoundingClientRect();
-  return [e.clientX - r.left, e.clientY - r.top];
-}
 
 function axisNames(p: Project): [string, string] {
   const c = coordOf(p);
@@ -134,7 +72,6 @@ export function Viewer({ active }: { active: ActiveScene }) {
   const { t } = useTranslation();
   const project = useDocument((s) => s.project);
   const docSerial = useDocument((s) => s.docSerial);
-  const selectedRegion = useSelection((s) => s.selectedRegion);
   const selectedPlacement = useSelection((s) => s.selectedPlacement);
   const activeNode = useSelection((s) => s.activeNode);
   const lengthUnit = usePrefs((s) => s.lengthUnit);
@@ -151,14 +88,6 @@ export function Viewer({ active }: { active: ActiveScene }) {
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [camera, setCamera] = useState<Camera | null>(null);
   const userMovedRef = useRef(false);
-  const [cursor, setCursor] = useState<Point | null>(null);
-  const [hover, setHover] = useState<Point | null>(null);
-  const [pts, setPts] = useState<Point[]>([]);
-  const [preview, setPreview] = useState<Preview>({});
-  const [measure, setMeasure] = useState<[Point, Point] | null>(null);
-  const [panning, setPanning] = useState(false);
-  const dragRef = useRef<Drag | null>(null);
-  const spaceRef = useRef(false);
   const [redraw, setRedraw] = useState(0);
 
   // ---- 大きさ・WebGL ----
@@ -241,23 +170,6 @@ export function Viewer({ active }: { active: ActiveScene }) {
     return () => el.removeEventListener("wheel", onWheel);
   }, [zoomLimits]);
 
-  // Space (移動)
-  useEffect(() => {
-    const editable = (el: EventTarget | null) => el instanceof HTMLElement && (["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName) || el.isContentEditable);
-    const down = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !editable(e.target)) spaceRef.current = true;
-    };
-    const up = (e: KeyboardEvent) => {
-      if (e.code === "Space") spaceRef.current = false;
-    };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
-    };
-  }, []);
-
   // ---- 表示するもの ----
 
   const playback = "playback" in scene ? scene.playback : undefined;
@@ -298,19 +210,19 @@ export function Viewer({ active }: { active: ActiveScene }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.geometry.domain]);
 
-  const snapStep = camera ? gridStep(camera) / 10 : 0;
-  const snap = (p: Point): Point => (vs.snap && snapStep > 0 ? snapPoint(p, snapStep) : p);
-
-  // ツールを変えたら作図中の点を捨てる (v1 と同じ)。計測はそのまま残さない
-  useEffect(() => {
-    setPts([]);
-    setMeasure(null);
-  }, [vs.tool]);
-  // 選択が変わったら (元に戻す・削除など) ドラッグをやめる
-  useEffect(() => {
-    dragRef.current = null;
-    setPreview({});
-  }, [selectedRegion, project.geometry.regions]);
+  const tools = useCanvasTools({
+    camera,
+    setCamera,
+    markUserMoved: () => {
+      userMovedRef.current = true;
+    },
+    project,
+    scene,
+    placements: placements as Placement[],
+    t,
+  });
+  const { cursor, hover, preview } = tools;
+  const sketch = useMemo(() => sketchOf(project), [project]);
 
   // ---- 描く ----
 
@@ -385,18 +297,21 @@ export function Viewer({ active }: { active: ActiveScene }) {
         axisNames: axes,
         overlays: vs.overlays,
         fieldShown: scene.field !== null || scene.mesh !== null,
-        selectedRegion,
         selectedPlacement: selectedPlacement as OverlayState["selectedPlacement"],
         selectedEdge: selectedEdgeIndex(project, activeNode),
+        picked: tools.picked,
+        edit: tools.edit,
+        sketch,
+        fillPreview: tools.fillPreview,
         tool: vs.tool,
         preview,
-        drawing: { tool: vs.tool, pts, cursor },
+        drawing: tools.drawing,
         placements: placements as Placement[],
         emitter,
         injector,
         amrBoxes,
         profile: vs.profile,
-        measure: measure ?? (vs.tool === "measure" && pts.length === 1 && cursor ? [pts[0], cursor] : null),
+        measure: tools.measure,
         arrows: vs.overlays.vectors ? vectorArrows(scene, camera, size.w, size.h, rulerPx) : [],
         colorbar: scene.field && range ? { colormap: vs.colormap, range, label: scene.field.label, unit: scene.field.unit } : null,
         probe,
@@ -437,283 +352,15 @@ export function Viewer({ active }: { active: ActiveScene }) {
     }
   };
 
-  // ---- 文書を変える操作 ----
-
-  const edit = (label: string, recipe: (d: Draft<Project>) => void) => useDocument.getState().update(label, recipe);
-
-  const commitTwoPoint = (tool: Tool, p1: Point, p2: Point) => {
-    const same = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) === 0;
-    if (tool === "rect") {
-      if (same || p1[0] === p2[0] || p1[1] === p2[1]) return;
-      let id: string | null = null;
-      edit(t("cad.addRegion"), (d) => void (id = addPolygonRegion(d, rectFromCorners(p1, p2))));
-      if (id) useSelection.getState().selectRegion(id);
-    } else if (tool === "circle") {
-      const r = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
-      let id: string | null = null;
-      if (r > 0) edit(t("cad.addRegion"), (d) => void (id = addCircleRegionAt(d, p1, r)));
-      if (id) useSelection.getState().selectRegion(id);
-    } else if (tool === "profile") {
-      if (!same) vs.setProfile([p1, p2]);
-    } else if (tool === "measure") {
-      setMeasure([p1, p2]);
-    } else {
-      if (same) return;
-      const place: Record<string, [(d: Parameters<typeof placeEmitter>[0], a: Point, b: Point) => PlaceResult, string, PlacementKind | null, string, number]> = {
-        emitter: [placeEmitter, t("cad.placeEmitter"), null, "study:trace", 0],
-        injector: [placeInjectionEmitter, t("cad.placeInjection"), null, "study:pic", 0],
-        collector: [placeCollector, t("cad.placeCollector"), "collector", "study:pic", MAX_COLLECTORS],
-        gasbc: [placeGasBoundary, t("cad.placeGasBoundary"), "gasbc", "study:dsmc", 0],
-        eedfbox: [placeEedfRegion, t("cad.placeEedf"), "eedf", "study:pic", MAX_EEDF_REGIONS],
-        meshref: [placeEdgeMeshSize, t("cad.placeEdgeSize"), "edgeSize", "mesh", 0],
-        sheathline: [placeSheathLine, t("cad.placeSheathLine"), "sheath", "study:pic", MAX_SHEATH_LINES],
-      };
-      const entry = place[tool];
-      if (!entry) return;
-      const [fn, label, kind, node, max] = entry;
-      let res: PlaceResult | null = null;
-      edit(label, (d) => void (res = fn(d, p1, p2)));
-      const r = res as PlaceResult | null;
-      if (r?.index === null) logWarning(t("msg.source.app"), t("cad.listFull", { what: label, max }));
-      const sel = useSelection.getState();
-      sel.select(node);
-      if (kind && r && r.index !== null) sel.selectPlacement({ kind, index: r.index });
-    }
-  };
-
-  const finishPolyline = (list: Point[]) => {
-    const poly = dedupeTail(list);
-    setPts([]);
-    if (poly.length < 3) return;
-    let id: string | null = null;
-    edit(t("cad.addRegion"), (d) => void (id = addPolygonRegion(d, poly)));
-    if (id) useSelection.getState().selectRegion(id);
-  };
-
-  const deleteSelected = () => {
-    const sel = useSelection.getState();
-    if (sel.selectedRegion) {
-      const id = sel.selectedRegion;
-      edit(t("cad.deleteRegion"), (d) => deleteRegion(d, id));
-      sel.selectRegion(null);
-    } else if (sel.selectedPlacement) {
-      const { kind, index } = sel.selectedPlacement;
-      const path = PLACEMENT_PATHS[kind];
-      edit(t("cad.deletePlacement"), (d) => {
-        const items = getIn(d, path);
-        if (Array.isArray(items)) setIn(d, path, items.filter((_, i) => i !== index));
-      });
-      sel.selectPlacement(null);
-    }
-  };
-
-  const nudge = (dx: number, dy: number) => {
-    const id = useSelection.getState().selectedRegion;
-    if (id) edit(t("cad.moveRegion"), (d) => moveRegion(d, id, dx, dy));
-  };
-
-  // ---- マウス ----
-
-  const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
-    const el = e.currentTarget;
-    el.focus({ preventScroll: true });
-    if (!camera) return;
-    const [sx, sy] = localPoint(e, el);
-    if (e.button === 1 || (e.button === 0 && spaceRef.current)) {
-      e.preventDefault();
-      capture(el, e.pointerId);
-      dragRef.current = { kind: "pan", lastX: e.clientX, lastY: e.clientY, x: sx, y: sy };
-      setPanning(true);
-      return;
-    }
-    if (e.button !== 0) return;
-    capture(el, e.pointerId);
-    dragRef.current = { kind: "click", x: sx, y: sy };
-    if (vs.tool !== "select") return;
-    const sel = project.geometry.regions.find((r) => r.id === selectedRegion);
-    if (!sel) return;
-    const world = toWorld(camera, sx, sy);
-    const tol = EDGE_TOLERANCE_PX / camera.scale;
-    if (sel.shape) {
-      if (hitRadiusHandle(sel.shape, camera, sx, sy)) dragRef.current = { kind: "radius", x: sx, y: sy, id: sel.id };
-      else if (hitCircle(world, sel.shape, tol)) dragRef.current = { kind: "move", x: sx, y: sy, id: sel.id, start: world };
-      return;
-    }
-    const path = regionPath(sel);
-    const v = findVertexHandle(path.polygon, camera, sx, sy);
-    if (v !== null) {
-      dragRef.current = { kind: "vertex", x: sx, y: sy, id: sel.id, index: v, path };
-      return;
-    }
-    const m = findMidpointHandle(path, camera, sx, sy);
-    if (m !== null) {
-      // 辺の中点をつかむと頂点を足す (円弧は同じ円の 2 つの円弧に分ける)
-      dragRef.current = { kind: "vertex", x: sx, y: sy, id: sel.id, index: m + 1, path: splitEdge(path, m) };
-      return;
-    }
-    if (hitRegion(world, sel, tol)) dragRef.current = { kind: "move", x: sx, y: sy, id: sel.id, start: world };
-  };
-
-  const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!camera) return;
-    const [sx, sy] = localPoint(e, e.currentTarget);
-    const raw = toWorld(camera, sx, sy);
-    setHover(raw);
-    setCursor(snap(raw));
-    const d = dragRef.current;
-    if (!d) return;
-    if (d.kind === "pan") {
-      const dx = e.clientX - d.lastX;
-      const dy = e.clientY - d.lastY;
-      d.lastX = e.clientX;
-      d.lastY = e.clientY;
-      userMovedRef.current = true;
-      setCamera((c) => (c ? panBy(c, dx, dy) : c));
-      return;
-    }
-    const moved = Math.hypot(sx - d.x, sy - d.y) >= CLICK_TOLERANCE_PX;
-    if (!moved) return;
-    if (d.kind === "vertex") {
-      setPreview({ path: moveVertex(d.path, d.index, snap(raw)) });
-    } else if (d.kind === "radius") {
-      const sel = project.geometry.regions.find((r) => r.id === d.id);
-      if (sel?.shape) {
-        const q = snap(raw);
-        setPreview({ radius: Math.max(0, Math.hypot(q[0] - sel.shape.center[0], q[1] - sel.shape.center[1])) });
-      }
-    } else if (d.kind === "move") {
-      let dx = raw[0] - d.start[0];
-      let dy = raw[1] - d.start[1];
-      if (vs.snap && snapStep > 0) {
-        dx = snapValue(dx, snapStep);
-        dy = snapValue(dy, snapStep);
-      }
-      setPreview({ move: [dx, dy] });
-    }
-  };
-
-  const onPointerUp = (e: ReactPointerEvent<HTMLCanvasElement>) => {
-    const d = dragRef.current;
-    dragRef.current = null;
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
-    if (!d || !camera) return;
-    if (d.kind === "pan") {
-      setPanning(false);
-      return;
-    }
-    const [sx, sy] = localPoint(e, e.currentTarget);
-    const isClick = Math.hypot(sx - d.x, sy - d.y) < CLICK_TOLERANCE_PX;
-    const raw = toWorld(camera, sx, sy);
-    const pt = snap(raw);
-    if (!isClick) {
-      if (d.kind === "vertex" && preview.path) {
-        const path = preview.path;
-        edit(t("cad.editVertices"), (dr) => setRegionPath(dr, d.id, path));
-      } else if (d.kind === "radius" && preview.radius && preview.radius > 0) {
-        const r = preview.radius;
-        edit(t("cad.editRadius"), (dr) => setCircleRadius(dr, d.id, r));
-      } else if (d.kind === "move" && preview.move && (preview.move[0] !== 0 || preview.move[1] !== 0)) {
-        const [dx, dy] = preview.move;
-        edit(t("cad.moveRegion"), (dr) => moveRegion(dr, d.id, dx, dy));
-      }
-      setPreview({});
-      return;
-    }
-    setPreview({});
-    // クリック
-    const tool = vs.tool;
-    if (tool === "select") {
-      const tol = EDGE_TOLERANCE_PX / camera.scale;
-      // 細い配置物を先に (領域の上に描いてある)
-      const hitP = [...placements].reverse().find((pl) => (pl.kind === "eedf" ? hitRect(raw, pl.p1, pl.p2, tol) : hitSegment(raw, pl.p1, pl.p2, tol)));
-      const sel = useSelection.getState();
-      if (hitP) {
-        sel.selectPlacement({ kind: hitP.kind, index: hitP.index });
-        sel.select(PLACEMENT_NODES[hitP.kind]);
-        return;
-      }
-      sel.selectPlacement(null);
-      // 外周の辺 (輪郭から数 px 以内) を領域より先に: 境界条件のページを開く
-      const edge = findDomainEdgeAt(raw, project, tol);
-      if (edge !== null) {
-        sel.selectRegion(null);
-        sel.select(`edge:${edgeIdOf(project, edge)}`);
-        return;
-      }
-      const hit = findRegionAt(raw, project.geometry.regions, tol);
-      sel.selectRegion(hit ? hit.id : null);
-    } else if (tool === "polyline") {
-      setPts((prev) => [...prev, pt]);
-    } else if (tool === "probe") {
-      if (scene.field) vs.setProbe(pt);
-    } else if (TWO_POINT.includes(tool)) {
-      if (pts.length === 0) {
-        setPts([pt]);
-        if (tool === "measure") setMeasure(null);
-      } else {
-        const p1 = pts[0];
-        setPts([]);
-        commitTwoPoint(tool, p1, pt);
-      }
-    }
-  };
-
-  const onDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!camera) return;
-    const [sx, sy] = localPoint(e, e.currentTarget);
-    if (vs.tool === "select") {
-      const sel = project.geometry.regions.find((r) => r.id === selectedRegion);
-      if (sel?.polygon) {
-        const v = findVertexHandle(sel.polygon, camera, sx, sy);
-        if (v !== null) edit(t("cad.deleteVertex"), (d) => void removeRegionVertex(d, sel.id, v));
-      }
-      return;
-    }
-    if (vs.tool === "polyline") finishPolyline(pts);
-  };
-
-  const onKeyDown = (e: ReactKeyboardEvent<HTMLCanvasElement>) => {
-    const tool = vs.tool;
-    if (e.key === "Escape") {
-      e.preventDefault();
-      const busy = pts.length > 0 || dragRef.current !== null || preview.path || preview.move || preview.radius != null;
-      setPts([]);
-      setPreview({});
-      dragRef.current = null;
-      setMeasure(null);
-      vs.setProbe(null);
-      if (!busy && tool !== "select") vs.setTool("select");
-    } else if (e.key === "Enter" && tool === "polyline") {
-      e.preventDefault();
-      finishPolyline(pts);
-    } else if (e.key === "Backspace" && tool === "polyline" && pts.length > 0) {
-      e.preventDefault();
-      setPts((p) => p.slice(0, -1));
-    } else if ((e.key === "Delete" || e.key === "Backspace") && tool === "select") {
-      e.preventDefault();
-      deleteSelected();
-    } else if (tool === "select" && selectedRegion && camera && e.key.startsWith("Arrow")) {
-      e.preventDefault();
-      const step = (gridStep(camera) / 10) * (e.shiftKey ? 10 : 1);
-      if (e.key === "ArrowUp") nudge(0, step);
-      else if (e.key === "ArrowDown") nudge(0, -step);
-      else if (e.key === "ArrowLeft") nudge(-step, 0);
-      else if (e.key === "ArrowRight") nudge(step, 0);
-    } else if ((e.key === "Home" || e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey) {
-      e.preventDefault();
-      vs.requestFit();
-    }
-  };
-
   // ---- 表示 ----
 
-  const hint = toolHint(vs.tool, pts.length, t);
+  const hint = toolHint(vs.tool, tools.drawing, t);
   const unit = lengthUnitLabel(lengthUnit);
   const hoverValue = hover && scene.field ? sampleField(scene.field, hover[0], hover[1]) : null;
   const cursorText = cursor
     ? `${axes[0]}: ${toDisplayLength(cursor[0], lengthUnit).toFixed(3)} ${unit}  ${axes[1]}: ${toDisplayLength(cursor[1], lengthUnit).toFixed(3)} ${unit}`
     : "";
-  const cls = `viewer-top${panning ? " panning" : vs.tool === "select" ? "" : " crosshair"}`;
+  const cls = `viewer-top${tools.panning ? " panning" : vs.tool === "select" ? "" : " crosshair"}`;
 
   return (
     <div className="viewer" data-scheme={theme}>
@@ -727,24 +374,17 @@ export function Viewer({ active }: { active: ActiveScene }) {
           tabIndex={0}
           role="application"
           aria-label={t("viewer.canvasLabel")}
-          onPointerDown={onPointerDown}
+          onPointerDown={tools.onPointerDown}
           onMouseDown={(e) => {
             // 中ボタンの自動スクロールを出さない
             if (e.button === 1) e.preventDefault();
           }}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={() => {
-            dragRef.current = null;
-            setPanning(false);
-            setPreview({});
-          }}
-          onPointerLeave={() => {
-            setCursor(null);
-            setHover(null);
-          }}
-          onDoubleClick={onDoubleClick}
-          onKeyDown={onKeyDown}
+          onPointerMove={tools.onPointerMove}
+          onPointerUp={tools.onPointerUp}
+          onPointerCancel={tools.onPointerCancel}
+          onPointerLeave={tools.onPointerLeave}
+          onDoubleClick={tools.onDoubleClick}
+          onKeyDown={tools.onKeyDown}
           onContextMenu={(e) => e.preventDefault()}
           data-redraw={redraw}
         />
@@ -796,17 +436,6 @@ function selectedEdgeIndex(p: Project, node: string): number | null {
   return i >= 0 ? i : null;
 }
 
-function hitRect(pt: Point, a: Point, b: Point, tol: number): boolean {
-  const x0 = Math.min(a[0], b[0]) - tol;
-  const x1 = Math.max(a[0], b[0]) + tol;
-  const y0 = Math.min(a[1], b[1]) - tol;
-  const y1 = Math.max(a[1], b[1]) + tol;
-  const inside = pt[0] >= x0 && pt[0] <= x1 && pt[1] >= y0 && pt[1] <= y1;
-  const deep = pt[0] > x0 + 2 * tol && pt[0] < x1 - 2 * tol && pt[1] > y0 + 2 * tol && pt[1] < y1 - 2 * tol;
-  // 枠の近くだけ (中は下の領域を選べるように)
-  return inside && !deep;
-}
-
 function axisEdgeLegend(p: Project, t: TFunction) {
   if (coordOf(p) === "xy") return null;
   return (
@@ -815,25 +444,4 @@ function axisEdgeLegend(p: Project, t: TFunction) {
       {t("viewer.axis")}
     </span>
   );
-}
-
-export function toolHint(tool: Tool, n: number, t: TFunction): string {
-  switch (tool) {
-    case "select":
-      return t("viewer.hint.select");
-    case "polyline":
-      return n === 0 ? t("viewer.hint.polylineStart") : t("viewer.hint.polylineNext");
-    case "rect":
-      return n === 0 ? t("viewer.hint.rectStart") : t("viewer.hint.rectEnd");
-    case "circle":
-      return n === 0 ? t("viewer.hint.circleStart") : t("viewer.hint.circleEnd");
-    case "sheathline":
-      return n === 0 ? t("viewer.hint.sheathStart") : t("viewer.hint.sheathEnd");
-    case "probe":
-      return t("viewer.hint.probe");
-    case "measure":
-      return n === 0 ? t("viewer.hint.measureStart") : t("viewer.hint.measureEnd");
-    default:
-      return n === 0 ? t("viewer.hint.lineStart") : t("viewer.hint.lineEnd");
-  }
 }

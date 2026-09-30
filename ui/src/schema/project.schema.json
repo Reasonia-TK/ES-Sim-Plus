@@ -2949,6 +2949,20 @@
     }
    ],
    "default": null
+  },
+  "cad": {
+   "anyOf": [
+    {
+     "additionalProperties": true,
+     "type": "object"
+    },
+    {
+     "type": "null"
+    }
+   ],
+   "default": null,
+   "description": "UI の CAD の状態 (スケッチなど)。ソルバーは使わない",
+   "title": "Cad"
   }
  },
  "required": [

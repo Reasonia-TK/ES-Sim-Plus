@@ -53,7 +53,7 @@ describe("model tree", () => {
   it("lists only the open branches for keyboard navigation", () => {
     const root = buildTree(newProject(), t, "mm", "demo");
     const rows = visibleNodes(root, new Set(["project", "geometry"]));
-    expect(rows.map((r) => r.node.id)).toEqual(["project", "geometry", "domain", "regions", "boundaries", "mesh", "bfield", "studies", "results"]);
+    expect(rows.map((r) => r.node.id)).toEqual(["project", "geometry", "domain", "regions", "sketch", "boundaries", "mesh", "bfield", "studies", "results"]);
     expect(rows.find((r) => r.node.id === "domain")?.parent).toBe("geometry");
     expect(rows.find((r) => r.node.id === "domain")?.level).toBe(3);
   });

@@ -21,6 +21,7 @@ import {
   splitDomainEdge,
   type DomainEdit,
 } from "../model/domainOps";
+import { regionToDomain } from "../model/cadActions";
 import { unionPolygons } from "../model/mergeRegions";
 import {
   axisEdges,
@@ -413,6 +414,22 @@ export function RegionPage({ id }: { id: string }) {
       )}
       <RegionLocalSize id={r.id} />
       <div className="button-row">
+        <button
+          type="button"
+          className="button"
+          title={t("settings.regionToDomainHint")}
+          onClick={() => {
+            let removed = 0;
+            update(t("cad.toDomain"), (d) => {
+              const rep = regionToDomain(d, r.id);
+              removed = rep ? rep.boundariesRemoved + rep.periodicRemoved : 0;
+            });
+            if (removed > 0) logInfo(t("msg.source.app"), t("settings.bcRemoved", { n: removed }));
+            select("domain");
+          }}
+        >
+          {t("cad.toDomain")}
+        </button>
         <button
           type="button"
           className="button danger"

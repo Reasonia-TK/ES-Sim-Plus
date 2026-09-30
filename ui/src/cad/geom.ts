@@ -101,6 +101,63 @@ export function midpoint(s: Seg): Vec {
   return pointAt(s, 0.5);
 }
 
+/**
+ * a から b へ、点 m を通る円弧の bulge (3 点の円弧)。m が弦 a→b の右にあれば反時計回り (正)。
+ * 中心角は 2π - 2α (α は m での角 ∠amb)。m が弦の上 (一直線) なら 0 (直線)、m が端点と重なれば 0
+ */
+export function bulgeThrough(a: Vec, m: Vec, b: Vec): number {
+  const u = sub(a, m);
+  const v = sub(b, m);
+  const lu = Math.hypot(u[0], u[1]);
+  const lv = Math.hypot(v[0], v[1]);
+  if (lu === 0 || lv === 0 || dist(a, b) === 0) return 0;
+  const c = cross(sub(b, a), sub(m, a));
+  if (Math.abs(c) <= 1e-12 * dist(a, b) * Math.max(lu, lv)) return 0;
+  const alpha = Math.acos(Math.min(1, Math.max(-1, dot(u, v) / (lu * lv))));
+  const mag = Math.tan((Math.PI - alpha) / 2);
+  return c < 0 ? mag : -mag;
+}
+
+/** 線分・円弧上の点 q のパラメータ (0〜1、範囲外は近い端に寄せない) */
+export function paramOf(s: Seg, q: Vec): number {
+  if (s.kind === "line") {
+    const d = sub(s.b, s.a);
+    const L2 = dot(d, d);
+    return L2 > 0 ? dot(sub(q, s.a), d) / L2 : 0;
+  }
+  const t = Math.atan2(q[1] - s.center[1], q[0] - s.center[0]);
+  const d = s.ccw ? normAngle(t - s.a0) : normAngle(s.a0 - t);
+  const sw = arcSweep(s);
+  // 円弧の外で始点の側 (一周の残りの半分より始点に近い) は負のパラメータ
+  return d > sw + (TAU - sw) / 2 ? (d - TAU) / sw : d / sw;
+}
+
+/**
+ * 端での向き: from = "a" は a から出ていく向き (a→b に進むとき)、"b" は b から出ていく向き (b→a に戻るとき)。
+ * angle は接線の向き [rad]、curvature は左に曲がるとき正 (1/r)、右は負、直線は 0
+ */
+export function tangentAt(s: Seg, from: "a" | "b"): { angle: number; curvature: number } {
+  if (s.kind === "line") {
+    const d = from === "a" ? sub(s.b, s.a) : sub(s.a, s.b);
+    return { angle: Math.atan2(d[1], d[0]), curvature: 0 };
+  }
+  // 反時計回りの円弧を正の向きに進むと、接線は半径の向きから +90°、左に曲がる
+  const forward = from === "a";
+  const ccwMotion = forward ? s.ccw : !s.ccw;
+  const t = forward ? s.a0 : s.a1;
+  const angle = t + (ccwMotion ? Math.PI / 2 : -Math.PI / 2);
+  return { angle: Math.atan2(Math.sin(angle), Math.cos(angle)), curvature: (ccwMotion ? 1 : -1) / s.r };
+}
+
+/** u0 から u1 (0〜1) までの部分 (円弧は同じ円の円弧、bulge は中心角の割合から) */
+export function subSeg(s: Seg, u0: number, u1: number): Seg {
+  const a = u0 === 0 ? s.a : pointAt(s, u0);
+  const b = u1 === 1 ? s.b : pointAt(s, u1);
+  if (s.kind === "line") return { kind: "line", a, b };
+  const theta = (s.ccw ? 1 : -1) * arcSweep(s) * (u1 - u0);
+  return segFromBulge(a, b, Math.tan(theta / 4));
+}
+
 /** 円弧を弦の最大のずれ maxErr 以内の点列に (端点を含む、最低 minSeg 分割) */
 export function discretize(s: Seg, maxErr: number, minSeg = 1): Vec[] {
   if (s.kind === "line") return [s.a, s.b];
