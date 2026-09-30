@@ -19,7 +19,8 @@ numpy ベクトル演算で提供する:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -30,25 +31,41 @@ def _empty_hits() -> tuple[np.ndarray, np.ndarray]:
 
 @dataclass(frozen=True)
 class PolygonShape:
-    """単純多角形 (自己交差なし、向きは問わない)。vertices は (n, 2)、閉じは暗黙。"""
+    """単純多角形 (自己交差なし、向きは問わない)。vertices は (n, 2)、閉じは暗黙。
+
+    ``holes`` は穴の輪 (prompts/132)。問い合わせ (内包・交点・境界の標本点) は外周と穴の全ての輪 (``rings``) で
+    偶奇規則。穴があるとき ``vertices`` は外周と穴を水平な橋でつないだ 1 本の輪 (鍵穴形、外周は反時計回り・穴は
+    時計回り) に置き換わる — 1 本の輪を前提にする GPU の形状表・粒子の衝突判定・流体の固体表面がそのまま使える
+    (水平な橋は半開区間規則の偶奇判定に数えられず、固体の内側にあるので気体側からは当たらない)。
+    """
 
     vertices: np.ndarray
+    holes: tuple[np.ndarray, ...] = ()
+    rings: tuple[np.ndarray, ...] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         v = np.asarray(self.vertices, dtype=np.float64)
         if v.ndim != 2 or v.shape[1] != 2 or len(v) < 3:
             raise ValueError("PolygonShape には 3 頂点以上の (n, 2) 配列が必要です")
-        object.__setattr__(self, "vertices", v)
+        hs = tuple(np.asarray(h, dtype=np.float64) for h in self.holes)
+        for h in hs:
+            if h.ndim != 2 or h.shape[1] != 2 or len(h) < 3:
+                raise ValueError("PolygonShape の穴には 3 頂点以上の (n, 2) 配列が必要です")
+        object.__setattr__(self, "holes", hs)
+        object.__setattr__(self, "rings", (v, *hs))
+        object.__setattr__(self, "vertices", _keyhole(v, hs) if hs else v)
 
     @property
     def bbox(self) -> tuple[float, float, float, float]:
-        v = self.vertices
+        v = self.rings[0]
         return float(v[:, 0].min()), float(v[:, 1].min()), float(v[:, 0].max()), float(v[:, 1].max())
 
     def _edges(self) -> tuple[np.ndarray, np.ndarray]:
-        p = self.vertices
-        q = np.roll(p, -1, axis=0)
-        return p, q
+        """全ての輪の辺 (始点の配列, 終点の配列)。"""
+        if len(self.rings) == 1:
+            p = self.rings[0]
+            return p, np.roll(p, -1, axis=0)
+        return np.concatenate(self.rings), np.concatenate([np.roll(r, -1, axis=0) for r in self.rings])
 
     def contains(self, x: np.ndarray, y: np.ndarray, tol: float = 0.0) -> np.ndarray:
         x = np.asarray(x, dtype=np.float64)
@@ -101,11 +118,11 @@ class PolygonShape:
 
     def crossings_h(self, y0: np.ndarray, xa: np.ndarray, xb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """水平線分 {y=y0[k], xa[k] < x < xb[k]} と境界の交点 (k, x)。xa < xb を仮定。"""
-        return _polygon_axis_crossings(self.vertices, y0, xa, xb, axis=0)
+        return _rings_axis_crossings([r for r in self.rings], y0, xa, xb)
 
     def crossings_v(self, x0: np.ndarray, ya: np.ndarray, yb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """鉛直線分 {x=x0[k], ya[k] < y < yb[k]} と境界の交点 (k, y)。"""
-        return _polygon_axis_crossings(self.vertices[:, ::-1], x0, ya, yb, axis=0)
+        return _rings_axis_crossings([r[:, ::-1] for r in self.rings], x0, ya, yb)
 
     def boundary_points(self, spacing: float) -> tuple[np.ndarray, np.ndarray]:
         p, q = self._edges()
@@ -117,6 +134,69 @@ class PolygonShape:
             xs.append(px + t * (qx - px))
             ys.append(py + t * (qy - py))
         return np.concatenate(xs), np.concatenate(ys)
+
+
+def _rings_axis_crossings(
+    rings: list[np.ndarray], c0: np.ndarray, a_lo: np.ndarray, a_hi: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(rings) == 1:
+        return _polygon_axis_crossings(rings[0], c0, a_lo, a_hi, axis=0)
+    hits = [_polygon_axis_crossings(r, c0, a_lo, a_hi, axis=0) for r in rings]
+    return np.concatenate([k for k, _ in hits]).astype(np.int64), np.concatenate([u for _, u in hits])
+
+
+def _signed_area(v: np.ndarray) -> float:
+    w = np.roll(v, -1, axis=0)
+    return 0.5 * float(np.sum(v[:, 0] * w[:, 1] - w[:, 0] * v[:, 1]))
+
+
+def _keyhole(outer: np.ndarray, holes: tuple[np.ndarray, ...]) -> np.ndarray:
+    """外周と穴を水平な橋でつないだ 1 本の輪 (外周は反時計回り、穴は時計回りにそろえる)。
+
+    穴を右端 (x 最大、同じなら y 最大の頂点) の大きい順に、右端から +x へ引いた水平線が最初に触れる、それまでに
+    できた輪の点へつなぐ (触れた点が辺の途中なら頂点を足す。同じ点が複数あれば、その点の固体側の角の中に
+    -x 方向が入るものを選ぶ)。
+    """
+    ring = [(float(x), float(y)) for x, y in (outer if _signed_area(outer) > 0.0 else outer[::-1])]
+    cw = [h if _signed_area(h) < 0.0 else h[::-1] for h in holes]
+    cw.sort(key=lambda h: -float(h[:, 0].max()))
+    for h in cw:
+        pts = [(float(x), float(y)) for x, y in h]
+        m = max(range(len(pts)), key=lambda i: (pts[i][0], pts[i][1]))
+        mx, my = pts[m]
+        best_x = math.inf
+        best: tuple[str, int] | None = None
+        n = len(ring)
+        for i in range(n):
+            (px, py), (qx, qy) = ring[i], ring[(i + 1) % n]
+            for j, (vx, vy) in ((i, (px, py)), ((i + 1) % n, (qx, qy))):
+                if vy == my and mx < vx < best_x:
+                    best_x, best = vx, ("v", j)
+            if (py - my) * (qy - my) < 0.0:
+                xc = px + (my - py) * (qx - px) / (qy - py)
+                if mx < xc < best_x:
+                    best_x, best = xc, ("e", i)
+        if best is None:
+            raise ValueError("PolygonShape: 穴が外周の内側にありません")
+        loop = [*pts[m:], *pts[:m], pts[m]]
+        if best[0] == "e":
+            i = best[1]
+            hit = (best_x, my)
+            ring = [*ring[: i + 1], hit, *loop, hit, *ring[i + 1 :]]
+            continue
+        v = ring[best[1]]
+        occ = [j for j in range(n) if ring[j] == v]
+        j = occ[0]
+        if len(occ) > 1:
+            for k in occ:
+                a_out = math.atan2(ring[(k + 1) % n][1] - v[1], ring[(k + 1) % n][0] - v[0])
+                a_in = math.atan2(ring[k - 1][1] - v[1], ring[k - 1][0] - v[0])
+                sweep = (a_in - a_out) % (2.0 * math.pi)
+                if (math.pi - a_out) % (2.0 * math.pi) < sweep:
+                    j = k
+                    break
+        ring = [*ring[: j + 1], *loop, v, *ring[j + 1 :]]
+    return np.asarray(ring, dtype=np.float64)
 
 
 def _polygon_axis_crossings(

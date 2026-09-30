@@ -88,7 +88,7 @@ def test_schema_checks_bulges_and_edge_ids():
         _project({"domain": {"polygon": _rect(), "edge_ids": ["e1", "e2"]}})
     with pytest.raises(ValidationError, match="重複のない"):
         _project({"domain": {"polygon": _rect(), "edge_ids": ["e1", "e2", "e2", "e4"]}})
-    with pytest.raises(ValidationError, match="bulges は polygon の領域だけ"):
+    with pytest.raises(ValidationError, match="bulges・holes は polygon の領域だけ"):
         _project(
             {
                 "domain": {"polygon": _rect()},

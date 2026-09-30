@@ -1,8 +1,9 @@
 // プロジェクト文書 (backend の es_sim.schema.Project と同じ JSON) の型と読み書きの補助。
 // P6a では木構造・ジオメトリ表示・ファイル操作に要る部分だけを型にし、各ソルバーの設定の中身は
 // P6b でスキーマ (/v2/schema) から扱う。長さは常に m で持つ (表示単位への変換は UI の端で)。
-// P7 (prompts/132): ドメイン・領域の輪郭は頂点 + 辺ごとの bulge (円弧)、外周の辺には永続 ID (edge_ids)。
+// P7 (prompts/132): ドメイン・領域の輪郭は頂点 + 辺ごとの bulge (円弧)、外周の辺には永続 ID (edge_ids)、領域の穴 (holes)。
 
+import type { Shape } from "../cad/boolean";
 import { pathArea, pathBounds } from "../cad/geom";
 import { bulgesOf, circlePath, hasArcs, type PathData } from "../cad/path";
 
@@ -27,11 +28,19 @@ export interface Domain {
   [key: string]: unknown;
 }
 
+/** 閉じた経路 (領域の穴) */
+export interface Loop {
+  polygon: Point[];
+  bulges?: number[] | null;
+}
+
 export interface Region {
   id: string;
   type: RegionType;
   polygon?: Point[] | null;
   bulges?: number[] | null;
+  /** 穴 (多角形の領域だけ。穴の中はこの領域ではない) */
+  holes?: Loop[] | null;
   shape?: CircleShape | null;
   voltage?: number | null;
   eps_r?: number;
@@ -121,6 +130,21 @@ export function domainPath(p: Project): PathData {
 export function regionPath(r: Region): PathData {
   if (r.shape) return circlePath(r.shape.center, r.shape.radius);
   return { polygon: r.polygon ?? [], bulges: r.bulges ?? null };
+}
+
+/** 領域の穴の経路 */
+export function regionHoles(r: Region): PathData[] {
+  return r.shape ? [] : (r.holes ?? []).map((h) => ({ polygon: h.polygon, bulges: h.bulges ?? null }));
+}
+
+/** 領域の輪郭の輪 (外周と穴) */
+export function regionRings(r: Region): PathData[] {
+  return [regionPath(r), ...regionHoles(r)];
+}
+
+/** 領域の形 (外周と穴) */
+export function regionShape(r: Region): Shape {
+  return { outer: regionPath(r), holes: regionHoles(r) };
 }
 
 /** ドメインの外接矩形 (円弧のふくらみも含める) */
@@ -248,7 +272,8 @@ export function polygonArea(poly: Point[]): number {
 }
 
 export function regionArea(r: Region): number {
-  return r.shape ? Math.PI * r.shape.radius ** 2 : Math.abs(pathArea(r.polygon ?? [], r.bulges));
+  if (r.shape) return Math.PI * r.shape.radius ** 2;
+  return Math.abs(pathArea(r.polygon ?? [], r.bulges)) - regionHoles(r).reduce((s, h) => s + Math.abs(pathArea(h.polygon, h.bulges)), 0);
 }
 
 /** 既存と重ならない領域 ID (region1, region2, …) */

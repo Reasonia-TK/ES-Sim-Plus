@@ -154,7 +154,7 @@ export function buildTree(p: Project, t: TFunction, unit: LengthUnit, docName: s
   const regions: TreeNode[] = p.geometry.regions.map((r) => ({
     id: `region:${r.id}`,
     label: r.id,
-    detail: `${t(`region.${r.type}`)} · ${r.shape ? t("region.circle") : t("region.polygon")}`,
+    detail: `${t(`region.${r.type}`)} · ${r.shape ? t("region.circle") : t("region.polygon")}${r.holes?.length ? ` · ${t("region.holes", { n: r.holes.length })}` : ""}`,
   }));
   const edges: TreeNode[] = edgeIdsOf(p).map((id, i) => ({
     id: `edge:${id}`,

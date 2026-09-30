@@ -94,6 +94,27 @@ describe("faces", () => {
     const sq = [line([0, 0], [4, 0]), line([4, 0], [4, 4]), line([4, 4], [0, 4]), line([0, 4], [0, 0])];
     const f = new Arrangement([...sq, ...circle([2, 2], 1)]).faceAt([0.5, 0.5])!;
     expect(area(f)).toBeCloseTo(16, 12);
+    // 点から右へ出す半直線が先に島に当たっても外周を見つける
+    const g = new Arrangement([...sq, ...circle([2, 2], 1)]).faceAt([0.5, 2])!;
+    expect(area(g)).toBeCloseTo(16, 12);
+  });
+
+  it("returns the islands directly inside the face as holes", () => {
+    const sq = (x0: number, y0: number, x1: number, y1: number) => [line([x0, y0], [x1, y0]), line([x1, y0], [x1, y1]), line([x1, y1], [x0, y1]), line([x0, y1], [x0, y0])];
+    // 外の正方形 [0,6]²、島: 円 (中に小さな正方形の島) と三角
+    const arr = new Arrangement([...sq(0, 0, 6, 6), ...circle([2, 3], 1.5), ...sq(1.5, 2.5, 2.5, 3.5), line([4, 1], [5, 1]), line([5, 1], [4.5, 2]), line([4.5, 2], [4, 1])]);
+    const s = arr.shapeAt([0.25, 3])!;
+    expect(area(s.outer)).toBeCloseTo(36, 12);
+    expect(s.holes).toHaveLength(2);
+    expect(s.holes.every((h) => area(h) < 0)).toBe(true);
+    expect(s.holes.map((h) => -area(h)).sort((a, b) => a - b)).toEqual([expect.closeTo(0.5, 12), expect.closeTo(Math.PI * 2.25, 12)]);
+    // 円と小さな正方形の間: 穴は小さな正方形だけ
+    const ring = arr.shapeAt([2, 4.2])!;
+    expect(area(ring.outer)).toBeCloseTo(Math.PI * 2.25, 12);
+    expect(ring.holes.map((h) => -area(h))).toEqual([expect.closeTo(1, 12)]);
+    // 島の中の面には穴が無い
+    expect(arr.shapeAt([2, 3])!.holes).toHaveLength(0);
+    expect(arr.shapeAt([7, 7])).toBeNull();
   });
 });
 

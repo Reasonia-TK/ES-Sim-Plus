@@ -6,8 +6,11 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { askConfirm } from "../app/dialogs";
 import { segFromBulge, segLength, type ArcSeg } from "../cad/geom";
-import { bulgesOf, hasArcs, moveVertex, setBulge } from "../cad/path";
-import { SchemaField } from "../forms/SchemaField";
+import type { BoolOp } from "../cad/boolean";
+import { bulgesOf, moveVertex, removeVertex, setBulge, splitEdge, type PathData } from "../cad/path";
+import { SchemaField, Toggle } from "../forms/SchemaField";
+import { useViewer } from "../graphics/viewerStore";
+import { applyRegionBoolean, type BooleanOutcome } from "../model/booleanOps";
 import { setValue } from "../forms/useField";
 import { edgeBcType, periodicPartnerOf, setEdgeType, boundaryIndexOfEdge, type EdgeBcType } from "../model/boundaryOps";
 import { documentName, useDocument, useIsDirty } from "../model/documentStore";
@@ -22,7 +25,6 @@ import {
   type DomainEdit,
 } from "../model/domainOps";
 import { regionToDomain } from "../model/cadActions";
-import { unionPolygons } from "../model/mergeRegions";
 import {
   axisEdges,
   coordOf,
@@ -31,6 +33,7 @@ import {
   edgeIdsOf,
   edgeIndexOf,
   isRectDomain,
+  regionHoles,
   regionPath,
   type Coord,
   type Project,
@@ -41,14 +44,16 @@ import {
   addCircleRegion,
   addRectRegion,
   deleteRegion,
+  removeRegionHole,
   removeRegionVertex,
   renameRegion,
+  setRegionHole,
   setRegionPath,
   setRegionType,
   splitRegionEdge,
   validateRegionId,
 } from "../model/regionOps";
-import { useSelection } from "../model/selection";
+import { pickedRegionIds, useSelection } from "../model/selection";
 import { usePrefs } from "../prefs/prefs";
 import { edgeLabel, edgeSummary } from "../tree/treeModel";
 import { formatNumber, lengthUnitLabel, toDisplayLength, type LengthUnit } from "../util/format";
@@ -61,7 +66,7 @@ import { TransformPanel } from "./widgets/TransformPanel";
 import { RfEditor } from "./widgets/RfEditor";
 import { VoltagePreview } from "./widgets/VoltagePreview";
 import { WaveformEditor } from "./widgets/WaveformEditor";
-import { logInfo } from "../app/messages";
+import { logInfo, logWarning } from "../app/messages";
 
 const useUpdate = () => useDocument((s) => s.update);
 
@@ -230,6 +235,7 @@ export function RegionsPage() {
             </button>{" "}
             <span className="muted">
               {t(`region.${r.type}`)} · {r.shape ? t("region.circle") : t("region.polygon")}
+              {r.holes?.length ? ` · ${t("region.holes", { n: r.holes.length })}` : ""}
             </span>
           </li>
         ))}
@@ -247,59 +253,114 @@ export function RegionsPage() {
   );
 }
 
-function RegionMerge({ region }: { region: Region }) {
+/**
+ * ブーリアン (和・差・積): この領域と相手 (キャンバスで一緒に選んだ領域、無ければ選ぶ 1 つ)。結果はこの領域
+ * (値はそのまま)、分かれたらほかは同じ値の新しい領域
+ */
+function RegionBoolean({ region }: { region: Region }) {
   const { t } = useTranslation();
   const regions = useDocument((s) => s.project.geometry.regions);
-  const others = regions.filter((r) => r.id !== region.id && r.polygon && !hasArcs(regionPath(r)));
+  const picked = useSelection((s) => s.picked);
+  const keep = useViewer((s) => s.booleanKeepTools);
+  const setKeep = useViewer((s) => s.setBooleanKeepTools);
   const [other, setOther] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
-  if (!region.polygon) return <Hint>{t("merge.onlyPolygons")}</Hint>;
-  // 円弧を含む領域は多角形の結合では形が崩れる (P7e のブーリアンで扱う)
-  if (hasArcs(regionPath(region))) return <Hint>{t("merge.arcs")}</Hint>;
+  const others = regions.filter((r) => r.id !== region.id);
   if (others.length === 0) return null;
-  const target = others.find((r) => r.id === other) ?? others[0];
+  const pickedOthers = pickedRegionIds(picked).filter((id) => id !== region.id && others.some((r) => r.id === id));
+  const tools = pickedOthers.length > 0 ? pickedOthers : [(others.find((r) => r.id === other) ?? others[0]).id];
+  const run = (op: BoolOp) => {
+    let out: BooleanOutcome = { ok: false, error: "failed" };
+    useDocument.getState().update(t("boolean.action", { op: t(`boolean.${op}`) }), (d) => void (out = applyRegionBoolean(d, op, region.id, tools, keep)));
+    const o = out as BooleanOutcome;
+    if (!o.ok) {
+      setError(t(`boolean.error.${o.error}`));
+      return;
+    }
+    setError(null);
+    if (o.ids.length > 1) logInfo(t("msg.source.app"), t("boolean.pieces", { n: o.ids.length, ids: o.ids.slice(1).join(", ") }));
+    useSelection.getState().selectRegion(region.id);
+  };
   return (
     <div className="subsection">
-      <div className="subsection-title">{t("merge.title")}</div>
-      <div className="field-control">
-        <select
-          className="input"
-          value={target.id}
-          onChange={(e) => {
-            setOther(e.target.value);
-            setError(null);
-          }}
-          aria-label={t("merge.title")}
-        >
-          {others.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.id}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="button small"
-          onClick={() => {
-            const res = unionPolygons(region.polygon!, target.polygon!);
-            if ("error" in res) {
-              setError(t(`merge.error.${res.error}`));
-              return;
-            }
-            setError(null);
-            useDocument.getState().update(t("merge.title"), (d) => {
-              const r = d.geometry.regions.find((x) => x.id === region.id);
-              if (r) r.polygon = res.polygon;
-              deleteRegion(d, target.id);
-            });
-          }}
-        >
-          {t("merge.apply")}
-        </button>
+      <div className="subsection-title">{t("boolean.title")}</div>
+      {pickedOthers.length > 0 ? (
+        <p className="muted">{t("boolean.withPicked", { ids: pickedOthers.join(", ") })}</p>
+      ) : (
+        <Field label={t("boolean.with")}>
+          {(fid) => (
+            <select
+              id={fid}
+              className="input"
+              value={tools[0]}
+              onChange={(e) => {
+                setOther(e.target.value);
+                setError(null);
+              }}
+            >
+              {others.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.id}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+      )}
+      <div className="button-row">
+        {(["union", "difference", "intersection"] as const).map((op) => (
+          <button key={op} type="button" className="button" title={t(`boolean.${op}Title`)} onClick={() => run(op)}>
+            {t(`boolean.${op}`)}
+          </button>
+        ))}
+        <Toggle checked={keep} onChange={setKeep} label={t("boolean.keepTools")} />
       </div>
       {error && <Hint tone="error">{error}</Hint>}
-      <Hint>{t("merge.hint")}</Hint>
+      <Hint>{t("boolean.hint")}</Hint>
     </div>
+  );
+}
+
+/** 穴の頂点の表の操作 (外周の外に出る・ほかの穴と交わる変更はしないで知らせる) */
+function holePathOps(id: string, k: number, t: TFunction): PathTableOps {
+  const edit = (next: (p: PathData) => PathData | null) => {
+    let ok = false;
+    useDocument.getState().update(t("action.regionShape"), (d) => {
+      const r = d.geometry.regions.find((x) => x.id === id) as Region | undefined;
+      const cur = r ? regionHoles(r)[k] : undefined;
+      const path = cur ? next(cur) : null;
+      ok = path !== null && setRegionHole(d, id, k, path);
+    });
+    if (!ok) logWarning(t("msg.source.app"), t("holes.invalid"));
+  };
+  return {
+    setVertex: (i, q) => edit((p) => moveVertex(p, i, q)),
+    setBulge: (i, bulge) => edit((p) => setBulge(p, i, bulge)),
+    split: (i) => edit((p) => splitEdge(p, i)),
+    removeVertex: (i) => edit((p) => removeVertex(p, i)),
+  };
+}
+
+function RegionHoles({ region }: { region: Region }) {
+  const { t } = useTranslation();
+  const update = useUpdate();
+  return (
+    <>
+      {regionHoles(region).map((h, k) => {
+        const label = t("holes.title", { n: k + 1 });
+        return (
+          <div key={k} className="subsection">
+            <div className="subsection-title">{label}</div>
+            <PathTable path={h} label={label} ops={holePathOps(region.id, k, t)} />
+            <div className="button-row">
+              <button type="button" className="button small" onClick={() => update(t("holes.fill"), (d) => removeRegionHole(d, region.id, k))}>
+                {t("holes.fill")}
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </>
   );
 }
 
@@ -325,13 +386,19 @@ function RegionLocalSize({ id }: { id: string }) {
   );
 }
 
-/** 領域の頂点の表の操作 (円弧を保つ) */
+/** 領域の頂点の表の操作 (円弧を保つ。穴が外周からはみ出す変更はしないで知らせる) */
 function regionPathOps(id: string, t: TFunction): PathTableOps {
-  const edit = (recipe: (d: Draft<Project>, r: Region) => void) =>
+  const edit = (recipe: (d: Draft<Project>, r: Region) => boolean | void) => {
+    let ok = true;
+    let holes = false;
     useDocument.getState().update(t("action.regionShape"), (d) => {
       const r = d.geometry.regions.find((x) => x.id === id);
-      if (r) recipe(d, r as Region);
+      if (!r) return;
+      holes = (r.holes?.length ?? 0) > 0;
+      ok = recipe(d, r as Region) !== false;
     });
+    if (!ok && holes) logWarning(t("msg.source.app"), t("holes.invalid"));
+  };
   return {
     setVertex: (i, q) => edit((d, r) => setRegionPath(d, id, moveVertex(regionPath(r), i, q))),
     setBulge: (i, bulge) => edit((d, r) => setRegionPath(d, id, setBulge(regionPath(r), i, bulge))),
@@ -410,16 +477,18 @@ export function RegionPage({ id }: { id: string }) {
       ) : (
         <>
           <PathTable path={regionPath(r)} label={t("action.regionShape")} ops={regionPathOps(r.id, t)} />
-          <RegionMerge region={r} />
+          <RegionHoles region={r} />
         </>
       )}
+      <RegionBoolean region={r} />
       <RegionLocalSize id={r.id} />
       <TransformPanel />
       <div className="button-row">
         <button
           type="button"
           className="button"
-          title={t("settings.regionToDomainHint")}
+          disabled={(r.holes?.length ?? 0) > 0}
+          title={(r.holes?.length ?? 0) > 0 ? t("holes.noDomain") : t("settings.regionToDomainHint")}
           onClick={() => {
             let removed = 0;
             update(t("cad.toDomain"), (d) => {

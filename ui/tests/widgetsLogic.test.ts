@@ -2,8 +2,7 @@ import { produce } from "immer";
 import { describe, expect, it } from "vitest";
 import { t } from "../src/i18n";
 import { edgeBcType, setEdgeType } from "../src/model/boundaryOps";
-import { removeCollinear, unionPolygons } from "../src/model/mergeRegions";
-import { newProject, type Point, type Project } from "../src/model/project";
+import { newProject, type Project } from "../src/model/project";
 import { buildSweepCandidates, parseListValues, rangeValues, sweepModuleForPath, valueAtPath } from "../src/model/sweep";
 import { computeProcessesHash, processesHashJson, pyFloatRepr } from "../src/util/boltzHash";
 import { formatSi } from "../src/util/format";
@@ -30,18 +29,6 @@ describe("boundary conditions per edge", () => {
     produce(axi, (d) => void (ok = setEdgeType(d, 0, "dirichlet")));
     expect(ok).toBe(false);
     expect(edgeBcType(axi, 0)).toBe("axis");
-  });
-});
-
-describe("region merge", () => {
-  it("unions adjacent rectangles and removes collinear vertices", () => {
-    const a: Point[] = [[0, 0], [1, 0], [1, 1], [0, 1]];
-    const b: Point[] = [[1, 0], [2, 0], [2, 1], [1, 1]];
-    const r = unionPolygons(a, b);
-    expect("polygon" in r && r.polygon).toHaveLength(4);
-    expect(unionPolygons(a, [[3, 0], [4, 0], [4, 1], [3, 1]])).toEqual({ error: "notAdjacent" });
-    const ring: Point[] = [[0, 0], [5, 0], [10, 0], [10, 1], [0, 1], [0, 0]];
-    expect(removeCollinear(ring)).toEqual([[0, 0], [10, 0], [10, 1], [0, 1]]);
   });
 });
 

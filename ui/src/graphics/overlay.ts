@@ -3,10 +3,11 @@
 // 場とメッシュは間の WebGL の層が描く。色はテーマの CSS 変数から読む。
 
 import { bulgeOf, bulgeThrough, midpoint, pathBounds, segFromBulge, type ArcSeg, type Seg } from "../cad/geom";
+import type { Shape } from "../cad/boolean";
 import { bulgesOf, pathHandles, type Affine, type PathData } from "../cad/path";
 import type { SnapResult } from "../cad/snap";
 import { transformRegionShape, transformSketch } from "../model/editOps";
-import { axisEdges, boundaryOfEdge, domainPath, regionPath, type Point, type Project, type Region } from "../model/project";
+import { axisEdges, boundaryOfEdge, domainPath, regionHoles, regionPath, type Point, type Project, type Region } from "../model/project";
 import type { PickRef } from "../model/selection";
 import { edgeCountOf, sketchSegs, type EditPath, type SketchEntity } from "../model/sketch";
 import type { EditObject } from "./editTargets";
@@ -14,7 +15,7 @@ import { lengthUnitLabel, toDisplayLength, type LengthUnit } from "../util/forma
 import { gridStep, toScreen, toWorld, type Camera } from "./camera";
 import { colormapCss, type ColormapKey } from "./colormaps";
 import { colorbarTicks, formatColorbarValue, type DisplayRange } from "./fieldScale";
-import { radiusHandlePoint } from "./hitTest";
+import { hitRegion, radiusHandlePoint } from "./hitTest";
 import type { DrawTarget, OverlayKey, Tool } from "./viewerStore";
 
 // ---- 色 ----
@@ -111,11 +112,11 @@ function edgeTo(ctx: CanvasRenderingContext2D, v: View, a: Point, b: Point, bulg
   ctx.arc(cx, cy, s.r * v.camera.scale, -s.a0, -s.a1, s.ccw);
 }
 
-/** 閉じた経路 (頂点 + 円弧) */
-function tracePath(ctx: CanvasRenderingContext2D, v: View, path: PathData, offset: Point = [0, 0]): void {
+/** 閉じた経路 (頂点 + 円弧)。begin = false なら今の道に足す (穴。塗りは evenodd で) */
+function tracePath(ctx: CanvasRenderingContext2D, v: View, path: PathData, offset: Point = [0, 0], begin = true): void {
   const poly = path.polygon.map(([x, y]) => [x + offset[0], y + offset[1]] as Point);
   const b = bulgesOf(path);
-  ctx.beginPath();
+  if (begin) ctx.beginPath();
   if (poly.length === 0) return;
   const [x0, y0] = toScreen(v.camera, poly[0]);
   ctx.moveTo(x0, y0);
@@ -168,6 +169,7 @@ function pathRegion(ctx: CanvasRenderingContext2D, v: View, r: Region, offset: P
     ctx.arc(cx, cy, (radius ?? r.shape.radius) * v.camera.scale, 0, 2 * Math.PI);
   } else {
     tracePath(ctx, v, regionPath(r), offset);
+    for (const h of regionHoles(r)) tracePath(ctx, v, h, offset, false);
   }
 }
 
@@ -354,8 +356,8 @@ export interface OverlayState {
   /** ハンドルを出して編集している形 */
   edit: EditObject | null;
   sketch: SketchEntity[];
-  /** 囲まれた所から領域を作る道具の、カーソルの下の面 */
-  fillPreview: PathData | null;
+  /** 囲まれた所から領域を作る道具の、カーソルの下の面 (穴も) */
+  fillPreview: Shape | null;
   /** 編集の道具の見せる形 */
   toolPreview: ToolPreview | null;
   /** いま合っているオブジェクトスナップと、その名前 */
@@ -462,7 +464,7 @@ function drawGeometry(ctx: CanvasRenderingContext2D, s: OverlayState): void {
       ctx.save();
       ctx.globalAlpha = 0.28;
       ctx.fillStyle = color;
-      ctx.fill();
+      ctx.fill("evenodd");
       ctx.restore();
     }
     ctx.strokeStyle = color;
@@ -478,7 +480,8 @@ function drawGeometry(ctx: CanvasRenderingContext2D, s: OverlayState): void {
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
-  // 領域の名前 (小さすぎる領域には出さない)。位置は頂点と辺の中点 (円弧は弧の中点) の平均
+  // 領域の名前 (小さすぎる領域には出さない)。位置は頂点と辺の中点 (円弧は弧の中点) の平均 (穴の中など領域の外に
+  // なれば、その点と外周の点の中点のうち領域の中にあるもの)
   for (const r of p.geometry.regions) {
     let pts: Point[];
     let size: number;
@@ -493,8 +496,12 @@ function drawGeometry(ctx: CanvasRenderingContext2D, s: OverlayState): void {
       const b = pathBounds(path.polygon, path.bulges);
       size = Math.min(b.x1 - b.x0, b.y1 - b.y0) * v.camera.scale;
     }
-    const cx = pts.reduce((a, q) => a + q[0], 0) / pts.length;
-    const cy = pts.reduce((a, q) => a + q[1], 0) / pts.length;
+    let cx = pts.reduce((a, q) => a + q[0], 0) / pts.length;
+    let cy = pts.reduce((a, q) => a + q[1], 0) / pts.length;
+    if (r.holes?.length && !hitRegion([cx, cy], r, 0)) {
+      const q = pts.map((p): Point => [(cx + p[0]) / 2, (cy + p[1]) / 2]).find((c) => hitRegion(c, r, 0));
+      if (q) [cx, cy] = q;
+    }
     const [x, y] = toScreen(v.camera, [cx, cy]);
     if (size < 28) continue;
     label(ctx, r.id, x, y, c.text, "center", "middle");
@@ -651,7 +658,7 @@ function drawSelection(ctx: CanvasRenderingContext2D, s: OverlayState): void {
         ctx.save();
         ctx.globalAlpha = 0.15;
         ctx.fillStyle = c.selection;
-        ctx.fill();
+        ctx.fill("evenodd");
         ctx.restore();
       } else {
         const e = s.sketch.find((x) => x.id === it.id);
@@ -676,7 +683,7 @@ function drawSelection(ctx: CanvasRenderingContext2D, s: OverlayState): void {
         ctx.save();
         ctx.globalAlpha = 0.15;
         ctx.fillStyle = c.selection;
-        ctx.fill();
+        ctx.fill("evenodd");
         ctx.restore();
       } else {
         const e = s.sketch.find((x) => x.id === it.id);
@@ -804,13 +811,14 @@ function drawRubberBand(ctx: CanvasRenderingContext2D, s: OverlayState): void {
   dot(ctx, x0, y0, 3, color);
 }
 
-/** 囲まれた所から領域を作る道具: カーソルの下の面 */
-function drawFillPreview(ctx: CanvasRenderingContext2D, s: OverlayState, face: PathData): void {
-  tracePath(ctx, s.view, face);
+/** 囲まれた所から領域を作る道具: カーソルの下の面 (穴は抜く) */
+function drawFillPreview(ctx: CanvasRenderingContext2D, s: OverlayState, face: Shape): void {
+  tracePath(ctx, s.view, face.outer);
+  for (const h of face.holes) tracePath(ctx, s.view, h, [0, 0], false);
   ctx.save();
   ctx.globalAlpha = 0.22;
   ctx.fillStyle = s.colors.fillPreview;
-  ctx.fill();
+  ctx.fill("evenodd");
   ctx.restore();
   ctx.strokeStyle = s.colors.fillPreview;
   ctx.lineWidth = 2;

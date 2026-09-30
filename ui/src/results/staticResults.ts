@@ -15,7 +15,7 @@ export function meshKey(p: Project): string {
     p.coord ?? "xy",
     p.geometry.domain.polygon,
     p.geometry.domain.bulges ?? null,
-    p.geometry.regions.map((r) => [r.id, r.type, r.polygon ?? null, r.bulges ?? null, r.shape ?? null]),
+    p.geometry.regions.map((r) => [r.id, r.type, r.polygon ?? null, r.bulges ?? null, r.holes?.length ? r.holes : null, r.shape ?? null]),
     p.mesh,
   ]);
 }

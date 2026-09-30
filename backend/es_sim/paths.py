@@ -13,6 +13,8 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 
+import numpy as np
+
 # 円の多角形化の分割数の下限・上限 (meshing.CIRCLE_SEGMENTS_MIN / MAX と同じ値。meshing は gmsh を読み込むので
 # スキーマから参照できるよう、ここに置いて meshing が使う)
 CIRCLE_SEGMENTS_MIN = 24
@@ -121,3 +123,90 @@ def check_path(polygon: Sequence[Pt], bulges: Sequence[float] | None, what: str)
                 raise ValueError(f"{what}: 円弧の辺 {i} の両端が同じ点です")
     if arcs and path_area(polygon, bulges) == 0.0:
         raise ValueError(f"{what}: 経路の面積が 0 です")
+
+
+def _extent(polygon: Sequence[Pt]) -> float:
+    xs = [float(p[0]) for p in polygon]
+    ys = [float(p[1]) for p in polygon]
+    return max(max(xs) - min(xs), max(ys) - min(ys)) or 1.0
+
+
+def _fine_points(polygon: Sequence[Pt], bulges: Sequence[float] | None, h: float) -> list[Pt]:
+    if has_arcs(bulges):
+        return flatten_path(polygon, bulges, h)[0]
+    return [(float(p[0]), float(p[1])) for p in polygon]
+
+
+def point_in_path(q: Pt, polygon: Sequence[Pt], bulges: Sequence[float] | None) -> bool:
+    """点が閉じた経路の内側か (円弧は経路の大きさの 1/512 の幅で弦に分けて偶奇規則で判定。境界上は不定)。"""
+    pts = _fine_points(polygon, bulges, _extent(polygon) / 512.0)
+    x, y = float(q[0]), float(q[1])
+    inside = False
+    n = len(pts)
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def _cross(o: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return (a[..., 0] - o[..., 0]) * (b[..., 1] - o[..., 1]) - (a[..., 1] - o[..., 1]) * (b[..., 0] - o[..., 0])
+
+
+def _point_segment_d2(p: np.ndarray, s0: np.ndarray, s1: np.ndarray) -> np.ndarray:
+    e = s1 - s0
+    l2 = np.sum(e * e, axis=-1)
+    t = np.clip(np.sum((p - s0) * e, axis=-1) / np.where(l2 > 0.0, l2, 1.0), 0.0, 1.0)
+    d = p - (s0 + t[..., None] * e)
+    return np.sum(d * d, axis=-1)
+
+
+def rings_touch(a: Sequence[Pt], b: Sequence[Pt], tol: float) -> bool:
+    """2 つの閉じた折れ線 (頂点列) の辺どうしが交わるか、tol 以内に近づくか。"""
+    a0 = np.asarray(a, dtype=np.float64)
+    b0 = np.asarray(b, dtype=np.float64)
+    a1 = np.roll(a0, -1, axis=0)
+    b1 = np.roll(b0, -1, axis=0)
+    B0, B1 = b0[None, :, :], b1[None, :, :]
+    step = max(1, 1_000_000 // max(1, len(b0)))  # 1 度に作る表を 100 万組ほどに抑える
+    for i in range(0, len(a0), step):
+        A0, A1 = a0[i : i + step, None, :], a1[i : i + step, None, :]
+        d1, d2 = _cross(B0, B1, A0), _cross(B0, B1, A1)
+        d3, d4 = _cross(A0, A1, B0), _cross(A0, A1, B1)
+        if np.any((d1 * d2 < 0.0) & (d3 * d4 < 0.0)):
+            return True
+        near = np.minimum(
+            np.minimum(_point_segment_d2(A0, B0, B1), _point_segment_d2(A1, B0, B1)),
+            np.minimum(_point_segment_d2(B0, A0, A1), _point_segment_d2(B1, A0, A1)),
+        )
+        if np.any(near <= tol * tol):
+            return True
+    return False
+
+
+def check_holes(
+    polygon: Sequence[Pt], bulges: Sequence[float] | None, holes: Sequence[tuple[Sequence[Pt], Sequence[float] | None]], what: str
+) -> None:
+    """穴の検査 (ValueError): 外周の内側にあり、外周・ほかの穴と交わらず接せず、ほかの穴の中にない。
+
+    円弧は外周の大きさの 1/512 の幅で弦に分けて調べる。
+    """
+    if not holes:
+        return
+    extent = _extent(polygon)
+    h = extent / 512.0
+    tol = 1e-9 * extent
+    rings = [_fine_points(polygon, bulges, h), *[_fine_points(hp, hb, h) for hp, hb in holes]]
+    for k, (hp, _) in enumerate(holes):
+        if not all(point_in_path(q, polygon, bulges) for q in hp):
+            raise ValueError(f"{what}: 穴 {k + 1} が外周の外にはみ出しています")
+        if rings_touch(rings[0], rings[k + 1], tol):
+            raise ValueError(f"{what}: 穴 {k + 1} が外周と交わるか接しています")
+    for j in range(len(holes)):
+        for k in range(j + 1, len(holes)):
+            if rings_touch(rings[j + 1], rings[k + 1], tol):
+                raise ValueError(f"{what}: 穴 {j + 1} と穴 {k + 1} が交わるか接しています")
+            if point_in_path(holes[j][0][0], holes[k][0], holes[k][1]) or point_in_path(holes[k][0][0], holes[j][0], holes[j][1]):
+                raise ValueError(f"{what}: 穴 {j + 1} と穴 {k + 1} の一方がもう一方の中にあります")

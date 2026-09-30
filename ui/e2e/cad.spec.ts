@@ -1,6 +1,7 @@
 // E2E: CAD v2 (prompts/132)。外周の辺を円弧にし、キャンバスで辺を選んで境界条件を付け、辺を分けて静電場を解く (P7a)。
 // スケッチの線から囲まれた所で領域を作る・円弧のある折れ線の領域・スケッチの矩形をドメインに・範囲選択と削除・
-// キャンバスでドメインの頂点を動かし辺を曲げる (P7b)。
+// キャンバスでドメインの頂点を動かし辺を曲げる (P7b)。スナップと数値入力 (P7c)、フィレット・トリム・変換・配列 (P7d)、
+// ブーリアンの差で穴を開けて解く・囲まれた所から穴のある領域 (P7e)。
 
 import type { Page } from "@playwright/test";
 import { expect, openApp, selectNode, test } from "./fixtures";
@@ -284,4 +285,52 @@ test("makes a polar array of a circle from the panel (P7d)", async ({ page }) =>
   await selectNode(page, "スケッチ");
   await expect(page.getByText("スケッチ 6 個")).toBeVisible();
   await expect(page.locator(".settings-panel")).toContainText("(40, 25), r = 2 mm");
+});
+
+test("cuts a hole with a boolean difference, keeps the tool and solves (P7e)", async ({ page }) => {
+  await openApp(page);
+  const at = await fitView(page);
+  // diel1 ([40, 60] × [10, 40]) の中に導体の矩形 region1
+  await tool(page, "矩形");
+  await clickAt(page, at(45, 20));
+  await clickAt(page, at(55, 30));
+  await expect(page.locator(".settings-panel .panel-title")).toContainText("region1");
+  // キャンバスで region1 → Shift で diel1 を選ぶ (後に選んだ diel1 がこの領域、region1 が相手)
+  await tool(page, "選択");
+  await clickAt(page, at(50, 25));
+  await page.keyboard.down("Shift");
+  await clickAt(page, at(42, 12));
+  await page.keyboard.up("Shift");
+  await expect(page.locator(".settings-panel .panel-title")).toContainText("diel1");
+  await expect(page.getByText("相手: 選んだ領域 (region1)")).toBeVisible();
+  await page.getByText("相手を残す", { exact: true }).click();
+  await page.getByRole("button", { name: "差", exact: true }).click();
+  await expect(page.getByText("穴 1", { exact: true })).toBeVisible();
+  await expect(page.getByRole("table", { name: "穴 1" }).locator("tbody tr")).toHaveCount(4);
+  await expect(page.locator(".tree")).toContainText("region1");
+  // 穴の中の導体ごとメッシュにして解ける
+  await selectNode(page, "静電場");
+  await page.getByRole("button", { name: "計算", exact: true }).click();
+  await expect(page.getByText("電極の電荷")).toBeVisible();
+  await expect(page.getByText("region1 (0 V)", { exact: true })).toBeVisible();
+});
+
+test("fills the area between a sketch rectangle and a circle as a region with a hole (P7e)", async ({ page }) => {
+  await openApp(page);
+  const at = await fitView(page);
+  await page.getByRole("radio", { name: "スケッチ" }).click();
+  await tool(page, "矩形");
+  await clickAt(page, at(5, 5));
+  await clickAt(page, at(35, 45));
+  await tool(page, "円");
+  await clickAt(page, at(20, 25));
+  await clickAt(page, at(26, 25));
+  await tool(page, "囲まれた所から領域");
+  await clickAt(page, at(8, 8));
+  await expect(page.locator(".settings-panel .panel-title")).toContainText("region1");
+  await expect(page.getByRole("table", { name: "穴 1" }).locator("tbody tr")).toHaveCount(2);
+  // 円の中をクリックすると円の領域 (穴なし)
+  await clickAt(page, at(20, 25));
+  await expect(page.locator(".settings-panel .panel-title")).toContainText("region2");
+  await expect(page.getByText("穴 1", { exact: true })).toHaveCount(0);
 });

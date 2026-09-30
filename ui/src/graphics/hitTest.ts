@@ -3,7 +3,7 @@
 
 import { closestPoint, pathSegs, pointInPath } from "../cad/geom";
 import { bulgesOf, edgeMidpoint, type PathData } from "../cad/path";
-import { domainPath, regionArea, regionPath, type CircleShape, type Point, type Project, type Region } from "../model/project";
+import { domainPath, regionArea, regionHoles, regionPath, type CircleShape, type Point, type Project, type Region } from "../model/project";
 import { toScreen, type Camera } from "./camera";
 
 /** クリックとみなす移動量 [px] */
@@ -42,11 +42,14 @@ export function hitCircle(pt: Point, s: CircleShape, tol: number): boolean {
   return Math.hypot(pt[0] - s.center[0], pt[1] - s.center[1]) <= s.radius + tol;
 }
 
+/** 領域の内側 (穴の中は外) か、輪郭 (穴の輪郭も) から tol 以内 */
 export function hitRegion(pt: Point, r: Region, tol: number): boolean {
   if (r.shape) return hitCircle(pt, r.shape, tol);
   const path = regionPath(r);
   if (path.polygon.length === 0) return false;
-  return pointInPath(pt, path.polygon, path.bulges) || distToPath(pt, path) <= tol;
+  const holes = regionHoles(r);
+  if (pointInPath(pt, path.polygon, path.bulges) && !holes.some((h) => pointInPath(pt, h.polygon, h.bulges))) return true;
+  return [path, ...holes].some((rp) => distToPath(pt, rp) <= tol);
 }
 
 /** 点に当たる領域 (重なっていれば面積の小さい方)。tol はワールド座標 [m] */

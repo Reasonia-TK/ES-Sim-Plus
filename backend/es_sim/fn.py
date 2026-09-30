@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .meshing import Mesh, _region_polygon
+from .meshing import Mesh, _region_rings
 from .schema import FnEmission, Project
 
 # FN 定数 (Forbes & Deane 2007 の標準値)
@@ -95,7 +95,7 @@ def build_fn_surface(
     対象: 境界メッシュエッジ (隣接 = -1) のうち、両端節点がともに Dirichlet
     (電極) 節点で、かつ指定ソース上にあるもの:
       - fn.edges:   domain 外周のエッジ番号 (頂点 i → i+1 の線分上)
-      - fn.regions: conductor 領域 id (領域輪郭ポリゴンの線分上)
+      - fn.regions: conductor 領域 id (領域輪郭ポリゴンの線分上。穴の輪郭も含む)
     """
     tris = mesh.triangles
     nodes = mesh.nodes
@@ -129,13 +129,11 @@ def build_fn_surface(
                 raise ValueError(f"fn.regions の領域 id '{rid}' が見つかりません")
             if region.type != "conductor":
                 raise ValueError(f"fn.regions の領域 '{rid}' は conductor ではありません")
-            # 円は多角形化してから照合する (メッシュはこの多角形に沿っている)
-            rpoly = np.asarray(
-                _region_polygon(region, local.get(rid, project.mesh.size)),
-                dtype=np.float64,
-            )
-            for i in range(len(rpoly)):
-                sel |= _both_on_segment(p1, p2, rpoly[i], rpoly[(i + 1) % len(rpoly)], tol)
+            # 円は多角形化してから照合する (メッシュはこの多角形に沿っている)。穴の輪郭も放出面
+            for ring in _region_rings(region, local.get(rid, project.mesh.size)):
+                rpoly = np.asarray(ring, dtype=np.float64)
+                for i in range(len(rpoly)):
+                    sel |= _both_on_segment(p1, p2, rpoly[i], rpoly[(i + 1) % len(rpoly)], tol)
 
     sel &= cand
     if not np.any(sel):

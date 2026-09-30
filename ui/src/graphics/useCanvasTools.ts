@@ -28,11 +28,12 @@ import {
 } from "react";
 import { logInfo, logWarning } from "../app/messages";
 import { Arrangement } from "../cad/arrangement";
+import type { Shape } from "../cad/boolean";
 import { parseCoordInput } from "../cad/coordInput";
 import { trimRemovedAt } from "../cad/edit";
 import { buildSnapScene, findSnap, type SnapResult, type SnapSource } from "../cad/snap";
 import { bulgeThrough, closestPoint, midpoint, pathSegs, segFromBulge, type Seg } from "../cad/geom";
-import { bulgesOf, mirror, rotation, scaling, translation, type Affine, type PathData } from "../cad/path";
+import { bulgesOf, mirror, rotation, scaling, translation, type Affine } from "../cad/path";
 import { useDocument } from "../model/documentStore";
 import { cornerEdit, cutterSegs, extendSketch, filletSketchLines, itemSegs, offsetItem, transformItems, trimSketch, type CornerTarget } from "../model/editOps";
 import { usePrefs } from "../prefs/prefs";
@@ -50,8 +51,8 @@ import {
   MAX_SHEATH_LINES,
   type PlaceResult,
 } from "../model/placements";
-import { domainPath, edgeIdOf, regionPath, type Point, type Project } from "../model/project";
-import { addCircleRegionAt, addPolygonRegion } from "../model/regionOps";
+import { domainPath, edgeIdOf, regionRings, type Point, type Project } from "../model/project";
+import { addCircleRegionAt, addPolygonRegion, addShapeRegion } from "../model/regionOps";
 import { PLACEMENT_NODES, PLACEMENT_PATHS, useSelection, type PickRef, type PlacementKind } from "../model/selection";
 import { addSketch, editBend, editMove, editRemove, editSplit, edgeCountOf, sketchOf, sketchSegs, type EditPath } from "../model/sketch";
 import { getIn, setIn } from "../schema/schema";
@@ -135,10 +136,7 @@ function allCurves(p: Project): Seg[] {
   const segs: Seg[] = [];
   const d = domainPath(p);
   segs.push(...pathSegs(d.polygon, bulgesOf(d)));
-  for (const r of p.geometry.regions) {
-    const rp = regionPath(r);
-    segs.push(...pathSegs(rp.polygon, bulgesOf(rp)));
-  }
+  for (const r of p.geometry.regions) for (const rp of regionRings(r)) segs.push(...pathSegs(rp.polygon, bulgesOf(rp)));
   for (const e of sketchOf(p)) segs.push(...sketchSegs(e));
   return segs;
 }
@@ -183,7 +181,7 @@ export interface CanvasTools {
   drawing: Drawing;
   preview: Preview;
   measure: [Point, Point] | null;
-  fillPreview: PathData | null;
+  fillPreview: Shape | null;
   edit: EditObject | null;
   picked: PickRef[];
   /** いま合っているオブジェクトスナップ (印を出す) */
@@ -271,10 +269,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     sources.push({ owner: "domain", segs: pathSegs(d.polygon, bulgesOf(d)) });
     for (const r of project.geometry.regions) {
       if (r.shape) sources.push({ owner: `region:${r.id}`, segs: [], circles: [{ center: r.shape.center, r: r.shape.radius }] });
-      else {
-        const rp = regionPath(r);
-        sources.push({ owner: `region:${r.id}`, segs: pathSegs(rp.polygon, bulgesOf(rp)) });
-      }
+      else sources.push({ owner: `region:${r.id}`, segs: regionRings(r).flatMap((rp) => pathSegs(rp.polygon, bulgesOf(rp))) });
     }
     for (const e of sketchOf(project)) {
       if (e.kind === "circle") sources.push({ owner: `sketch:${e.id}`, segs: [], circles: [{ center: e.center, r: e.r }] });
@@ -346,7 +341,11 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
       });
     };
     for (const e of sketch) if (e.kind === "polyline") consider({ kind: "sketch", id: e.id }, e.points, e.closed);
-    for (const r of project.geometry.regions) if (r.polygon) consider({ kind: "region", id: r.id }, r.polygon, true);
+    for (const r of project.geometry.regions) {
+      if (!r.polygon) continue;
+      consider({ kind: "region", id: r.id }, r.polygon, true);
+      (r.holes ?? []).forEach((h, k) => consider({ kind: "region", id: r.id, hole: k }, h.polygon, true));
+    }
     consider({ kind: "domain" }, project.geometry.domain.polygon, true);
     return best;
   };
@@ -399,7 +398,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
 
   // 囲まれた所から領域を作る道具: 平面の配置は文書が変わったときだけ作り直す
   const arrangement = useMemo(() => (tool === "fill" ? new Arrangement(allCurves(project)) : null), [tool, project]);
-  const fillPreview = useMemo(() => (arrangement && hover ? arrangement.faceAt(hover) : null), [arrangement, hover]);
+  const fillPreview = useMemo(() => (arrangement && hover ? arrangement.shapeAt(hover) : null), [arrangement, hover]);
 
   // ---- 文書を変える ----
 
@@ -861,13 +860,13 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
       selectSketch(id);
       resetDrawing();
     } else if (tool === "fill") {
-      const face = arrangement?.faceAt(raw) ?? null;
+      const face = arrangement?.shapeAt(raw) ?? null;
       if (!face) {
         logWarning(t("msg.source.app"), t("cad.noEnclosedArea"));
         return;
       }
       let id: string | null = null;
-      update(t("cad.addRegion"), (dr) => void (id = addPolygonRegion(dr, face.polygon as Point[], face.bulges)));
+      update(t("cad.addRegion"), (dr) => void (id = addShapeRegion(dr, face)));
       if (id) useSelection.getState().selectRegion(id);
     } else if (tool === "probe") {
       if (scene.field) vs.setProbe(pt);

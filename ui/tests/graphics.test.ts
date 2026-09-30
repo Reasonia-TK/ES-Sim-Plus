@@ -214,7 +214,7 @@ describe("canvas edits", () => {
     expect(produce(p, (d) => void addPolygonRegion(d, [[0, 0], [1, 1]])).geometry.regions).toHaveLength(1);
     p = produce(p, (d) => moveRegion(d, "region1", 0.1 + 0.2 - 0.3 + 0.005, 0.005));
     expect(p.geometry.regions[0].polygon![0]).toEqual([0.015, 0.015]);
-    p = produce(p, (d) => setRegionPath(d, "region1", { polygon: [[0, 0], [0.1, 0], [0.1, 0.1], [0, 0.1]] }));
+    p = produce(p, (d) => void setRegionPath(d, "region1", { polygon: [[0, 0], [0.1, 0], [0.1, 0.1], [0, 0.1]] }));
     p = produce(p, (d) => void removeRegionVertex(d, "region1", 3));
     expect(p.geometry.regions[0].polygon).toHaveLength(3);
     // 3 点のときは消さない

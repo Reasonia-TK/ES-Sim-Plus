@@ -81,13 +81,26 @@ def _region_polygon(region: Region, h: float) -> list[tuple[float, float]]:
     return _circle_polygon(region.shape.center, region.shape.radius, h)
 
 
-def _occ_polygon_surface(points) -> int:
-    """点列から OCC の閉じた平面サーフェスを作る (サーフェスタグを返す)。"""
+def _region_rings(region: Region, h: float) -> list[list[tuple[float, float]]]:
+    """領域の輪郭の輪: 外周 (_region_polygon) と穴 (prompts/132。円弧は Project の検証で弦に分けてある)。"""
+    return [list(_region_polygon(region, h)), *[list(hole.polygon) for hole in region.holes]]
+
+
+def _occ_loop(points) -> int:
     occ = gmsh.model.occ
     pts = [occ.addPoint(x, y, 0.0) for x, y in points]
     curves = [occ.addLine(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
-    loop = occ.addCurveLoop(curves)
-    return occ.addPlaneSurface([loop])
+    return occ.addCurveLoop(curves)
+
+
+def _occ_polygon_surface(points) -> int:
+    """点列から OCC の閉じた平面サーフェスを作る (サーフェスタグを返す)。"""
+    return gmsh.model.occ.addPlaneSurface([_occ_loop(points)])
+
+
+def _occ_rings_surface(rings) -> int:
+    """外周と穴の輪から OCC の平面サーフェスを作る (最初の輪が外周、残りが穴)。"""
+    return gmsh.model.occ.addPlaneSurface([_occ_loop(r) for r in rings])
 
 
 def _points_on_segment(pts: np.ndarray, q1: np.ndarray, q2: np.ndarray, tol: float) -> np.ndarray:
@@ -204,7 +217,7 @@ def _generate_unstructured(project: Project) -> Mesh:
         for region in geo.regions:
             r_lc = local.get(region.id, lc)
             region_lcs.append(r_lc)
-            tool_surfs.append(_occ_polygon_surface(_region_polygon(region, r_lc)))
+            tool_surfs.append(_occ_rings_surface(_region_rings(region, r_lc)))
 
         if tool_surfs:
             _, out_map = occ.fragment([(2, s_domain)], [(2, s) for s in tool_surfs])
@@ -559,10 +572,14 @@ def _points_in_region(region: Region, pts: np.ndarray, tol: float) -> np.ndarray
         cx, cy = region.shape.center
         dist = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
         return dist <= region.shape.radius + tol
-    poly = np.asarray(region.polygon, dtype=np.float64)
-    inc = _points_in_polygon(pts, poly)
-    for k in range(len(poly)):
-        inc |= _points_on_segment(pts, poly[k], poly[(k + 1) % len(poly)], tol)
+    # 外周と穴の全ての輪で偶奇 (穴の中は外)、どの輪の辺の上も内側
+    rings = [np.asarray(region.polygon, dtype=np.float64), *[np.asarray(h.polygon, dtype=np.float64) for h in region.holes]]
+    inc = np.zeros(len(pts), dtype=bool)
+    for poly in rings:
+        inc ^= _points_in_polygon(pts, poly)
+    for poly in rings:
+        for k in range(len(poly)):
+            inc |= _points_on_segment(pts, poly[k], poly[(k + 1) % len(poly)], tol)
     return inc
 
 
@@ -571,7 +588,10 @@ def _region_centroid_mask(region: Region, pts: np.ndarray) -> np.ndarray:
     if region.shape is not None:
         cx, cy = region.shape.center
         return np.hypot(pts[:, 0] - cx, pts[:, 1] - cy) <= region.shape.radius
-    return _points_in_polygon(pts, np.asarray(region.polygon, dtype=np.float64))
+    inside = _points_in_polygon(pts, np.asarray(region.polygon, dtype=np.float64))
+    for hole in region.holes:
+        inside &= ~_points_in_polygon(pts, np.asarray(hole.polygon, dtype=np.float64))
+    return inside
 
 
 def _generate_structured(project: Project) -> Mesh:

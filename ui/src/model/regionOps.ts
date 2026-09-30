@@ -2,8 +2,9 @@
 // 種類を変えても形と対応する値は保ち、RF・CSV 波形・γ は外す)。
 
 import type { Draft } from "immer";
+import { shapeProblem, type Shape } from "../cad/boolean";
 import { bulgesOf, packBulges, removeVertex, splitEdge, type PathData } from "../cad/path";
-import { domainBounds, regionPath, tidy, tidyPoint, uniqueRegionId, type Point, type Project, type Region, type RegionType } from "./project";
+import { domainBounds, regionHoles, regionPath, tidy, tidyPoint, uniqueRegionId, type Loop, type Point, type Project, type Region, type RegionType } from "./project";
 
 type P = Draft<Project>;
 
@@ -78,6 +79,7 @@ export function duplicateRegion(p: P, id: string): string | null {
   copy.id = uniqueRegionId(p as Project, `${id}_`);
   if (copy.shape) copy.shape.center = [copy.shape.center[0] + d, copy.shape.center[1] + d];
   if (copy.polygon) copy.polygon = copy.polygon.map(([x, y]) => [x + d, y + d]);
+  for (const h of copy.holes ?? []) h.polygon = h.polygon.map(([x, y]) => [x + d, y + d]);
   p.geometry.regions.push(copy);
   return copy.id;
 }
@@ -117,6 +119,31 @@ function writePath(r: Region, path: PathData): void {
   else delete r.bulges;
 }
 
+function toLoop(path: PathData): Loop {
+  const packed = packBulges(bulgesOf(path));
+  const loop: Loop = { polygon: path.polygon.map((q) => tidyPoint(q as Point)) };
+  if (packed) loop.bulges = packed;
+  return loop;
+}
+
+/** 穴を領域に書く (無ければ持たない) */
+function writeHoles(r: Region, holes: PathData[]): void {
+  if (holes.length) r.holes = holes.map(toLoop);
+  else delete r.holes;
+}
+
+/** 形 (外周と穴) を領域に書く (円の領域は多角形になる) */
+export function writeShape(r: Region, sh: Shape): void {
+  delete r.shape;
+  writePath(r, sh.outer);
+  writeHoles(r, sh.holes);
+}
+
+/** 穴があるとき、外周と穴が形として使えるか (穴が外周の中にあり、交わらず接しない) */
+function holesFit(r: Region, outer: PathData, holes: PathData[] = regionHoles(r)): boolean {
+  return holes.length === 0 || shapeProblem({ outer, holes }) === null;
+}
+
 /** 多角形の領域を足す (導体・0 V、v1 と同じ)。3 点未満 (円弧を含めば 2 点未満) は足さない */
 export function addPolygonRegion(p: P, polygon: Point[], bulges?: number[] | null): string | null {
   const arcs = bulges?.some((b) => b) ?? false;
@@ -124,6 +151,17 @@ export function addPolygonRegion(p: P, polygon: Point[], bulges?: number[] | nul
   const id = uniqueRegionId(p as Project);
   const r: Region = { id, type: "conductor", voltage: 0, polygon: [] };
   writePath(r, { polygon, bulges });
+  p.geometry.regions.push(r);
+  return id;
+}
+
+/** 形 (外周と穴) の領域を足す (導体・0 V)。使えない形は足さない */
+export function addShapeRegion(p: P, sh: Shape): string | null {
+  if (sh.holes.length ? shapeProblem(sh) !== null : sh.outer.polygon.length < 2) return null;
+  const id = uniqueRegionId(p as Project);
+  const r: Region = { id, type: "conductor", voltage: 0, polygon: [] };
+  writeShape(r, sh);
+  if (!r.polygon || r.polygon.length < (r.bulges ? 2 : 3)) return null;
   p.geometry.regions.push(r);
   return id;
 }
@@ -141,15 +179,36 @@ export function moveRegion(p: P, id: string, dx: number, dy: number): void {
   const r = p.geometry.regions.find((x) => x.id === id);
   if (!r || (dx === 0 && dy === 0)) return;
   if (r.shape) r.shape.center = tidyPoint([r.shape.center[0] + dx, r.shape.center[1] + dy]);
-  else if (r.polygon) r.polygon = r.polygon.map(([x, y]) => tidyPoint([x + dx, y + dy]));
+  else if (r.polygon) {
+    r.polygon = r.polygon.map(([x, y]) => tidyPoint([x + dx, y + dy]));
+    for (const h of r.holes ?? []) h.polygon = h.polygon.map(([x, y]) => tidyPoint([x + dx, y + dy]));
+  }
 }
 
-/** 輪郭を置き換える (頂点のドラッグ・辺の中点からの追加・円弧。使えない経路は無視) */
-export function setRegionPath(p: P, id: string, path: PathData): void {
-  const r = p.geometry.regions.find((x) => x.id === id);
+/** 輪郭を置き換える (頂点のドラッグ・辺の中点からの追加・円弧)。使えない経路・穴がはみ出す経路は無視 (false) */
+export function setRegionPath(p: P, id: string, path: PathData): boolean {
+  const r = p.geometry.regions.find((x) => x.id === id) as Region | undefined;
   const arcs = path.bulges?.some((b) => b) ?? false;
-  if (!r || !r.polygon || path.polygon.length < (arcs ? 2 : 3)) return;
+  if (!r || !r.polygon || path.polygon.length < (arcs ? 2 : 3) || !holesFit(r, path)) return false;
   writePath(r, path);
+  return true;
+}
+
+/** 穴 k の経路を置き換える (外周の中から出る・交わる経路は無視して false) */
+export function setRegionHole(p: P, id: string, k: number, path: PathData): boolean {
+  const r = p.geometry.regions.find((x) => x.id === id) as Region | undefined;
+  if (!r?.polygon || !r.holes || k < 0 || k >= r.holes.length) return false;
+  const holes = regionHoles(r).map((h, j) => (j === k ? path : h));
+  if (!holesFit(r, regionPath(r), holes)) return false;
+  writeHoles(r, holes);
+  return true;
+}
+
+/** 穴 k を消す (穴を埋める) */
+export function removeRegionHole(p: P, id: string, k: number): void {
+  const r = p.geometry.regions.find((x) => x.id === id) as Region | undefined;
+  if (!r?.holes || k < 0 || k >= r.holes.length) return;
+  writeHoles(r, regionHoles(r).filter((_, j) => j !== k));
 }
 
 /** 辺 i を u の位置で分ける (円弧は同じ円の 2 つの円弧に)。新しい頂点の番号は i + 1 */
@@ -172,7 +231,7 @@ export function removeRegionVertex(p: P, id: string, index: number): boolean {
   const r = p.geometry.regions.find((x) => x.id === id);
   if (!r?.polygon || index < 0 || index >= r.polygon.length) return false;
   const next = removeVertex(regionPath(r), index);
-  if (!next) return false;
+  if (!next || !holesFit(r, next)) return false;
   writePath(r, next);
   return true;
 }

@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
-from .paths import check_path, flatten_path, has_arcs
+from .paths import check_holes, check_path, flatten_path, has_arcs
 
 Point = tuple[float, float]
 
@@ -123,12 +123,21 @@ class VoltageWaveform(BaseModel):
         return self
 
 
+class Loop(BaseModel):
+    """閉じた経路 (領域の穴、prompts/132)。polygon の辺 i (頂点 i → i+1) が bulges[i] の円弧。"""
+
+    polygon: list[Point] = Field(..., min_length=2, json_schema_extra=GEOM)
+    bulges: list[float] | None = Field(None, description=BULGES_DESCRIPTION, json_schema_extra=ui("1"))
+
+
 class Region(BaseModel):
     id: str
     type: Literal["conductor", "dielectric", "charge"]
     # 輪郭 (閉じた経路)。直線だけなら 3 頂点以上、円弧 (bulges) を含めば 2 頂点以上
     polygon: list[Point] | None = Field(None, min_length=2, json_schema_extra=GEOM)
     bulges: list[float] | None = Field(None, description=BULGES_DESCRIPTION, json_schema_extra=ui("1"))
+    # 穴 (P7e のブーリアンの差など)。穴の中はこの領域ではない (下の領域・真空になる)。polygon の領域だけ
+    holes: list[Loop] = []
     shape: CircleShape | None = None
     voltage: float | None = Field(None, json_schema_extra=ui("V"))  # conductor: 電位 [V] (直流分)
     # conductor: RF 成分 (PIC のみ使用)。単一またはリスト (デュアル周波数、prompts/49)
@@ -150,8 +159,11 @@ class Region(BaseModel):
             raise ValueError("Region には polygon か shape のどちらか一方のみを指定してください")
         if self.polygon is not None:
             check_path(self.polygon, self.bulges, f"領域 {self.id}")
-        elif self.bulges is not None:
-            raise ValueError(f"領域 {self.id}: bulges は polygon の領域だけに指定できます")
+            for k, hole in enumerate(self.holes):
+                check_path(hole.polygon, hole.bulges, f"領域 {self.id} の穴 {k + 1}")
+            check_holes(self.polygon, self.bulges, [(h.polygon, h.bulges) for h in self.holes], f"領域 {self.id}")
+        elif self.bulges is not None or self.holes:
+            raise ValueError(f"領域 {self.id}: bulges・holes は polygon の領域だけに指定できます")
         return self
 
 
@@ -1071,7 +1083,7 @@ class Project(BaseModel):
         """
         geo = self.geometry
         dom = geo.domain
-        region_arcs = any(r.polygon is not None and has_arcs(r.bulges) for r in geo.regions)
+        region_arcs = any(r.polygon is not None and (has_arcs(r.bulges) or any(has_arcs(h.bulges) for h in r.holes)) for r in geo.regions)
         if not has_arcs(dom.bulges) and not region_arcs:
             return self
         scale = 1.0
@@ -1080,9 +1092,16 @@ class Project(BaseModel):
             scale = 0.5 ** max([amr.max_level, *(r.level for r in amr.regions)])
         local = {ls.region: ls.size for ls in self.mesh.local_sizes}
         for r in geo.regions:
-            if r.polygon is not None and has_arcs(r.bulges):
-                r.polygon, _ = flatten_path(r.polygon, r.bulges, local.get(r.id, self.mesh.size) * scale)
+            if r.polygon is None:
+                continue
+            h = local.get(r.id, self.mesh.size) * scale
+            if has_arcs(r.bulges):
+                r.polygon, _ = flatten_path(r.polygon, r.bulges, h)
                 r.bulges = None
+            for hole in r.holes:
+                if has_arcs(hole.bulges):
+                    hole.polygon, _ = flatten_path(hole.polygon, hole.bulges, h)
+                    hole.bulges = None
         if not has_arcs(dom.bulges):
             return self
         n = len(dom.polygon)

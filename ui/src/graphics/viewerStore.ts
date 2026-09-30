@@ -100,6 +100,8 @@ interface ViewerState {
   snapKinds: Record<SnapKind, boolean>;
   /** 変換で元を残してコピーを作る */
   transformCopy: boolean;
+  /** ブーリアンで相手の領域を残す */
+  booleanKeepTools: boolean;
   /** フィレットの半径・面取りの長さ・オフセットの距離 [m] */
   filletRadius: number;
   chamferDistance: number;
@@ -121,6 +123,7 @@ interface ViewerState {
   setSnap: (v: boolean) => void;
   setSnapKind: (k: SnapKind, v: boolean) => void;
   setTransformCopy: (v: boolean) => void;
+  setBooleanKeepTools: (v: boolean) => void;
   setEditSize: (k: "filletRadius" | "chamferDistance" | "offsetDistance", v: number) => void;
   setRulerFont: (f: RulerFont) => void;
   setQuantity: (q: StaticQuantity) => void;
@@ -141,6 +144,7 @@ export const useViewer = create<ViewerState>()(
       snap: true,
       snapKinds: { ...DEFAULT_SNAP_KINDS },
       transformCopy: false,
+      booleanKeepTools: false,
       filletRadius: 0.001,
       chamferDistance: 0.001,
       offsetDistance: 0.001,
@@ -159,6 +163,7 @@ export const useViewer = create<ViewerState>()(
       setSnap: (snap) => set({ snap }),
       setSnapKind: (k, v) => set((st) => ({ snapKinds: { ...st.snapKinds, [k]: v } })),
       setTransformCopy: (transformCopy) => set({ transformCopy }),
+      setBooleanKeepTools: (booleanKeepTools) => set({ booleanKeepTools }),
       setEditSize: (k, v) => set(v > 0 ? { [k]: v } : {}),
       setRulerFont: (rulerFont) => set({ rulerFont }),
       // 量を変えたら手動の範囲は外す (単位が違う)
@@ -179,6 +184,7 @@ export const useViewer = create<ViewerState>()(
         snapKinds: s.snapKinds,
         drawTarget: s.drawTarget,
         transformCopy: s.transformCopy,
+        booleanKeepTools: s.booleanKeepTools,
         filletRadius: s.filletRadius,
         chamferDistance: s.chamferDistance,
         offsetDistance: s.offsetDistance,

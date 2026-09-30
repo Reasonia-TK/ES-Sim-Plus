@@ -115,7 +115,8 @@ def _region_shape(region: Region) -> Shape:
     if region.shape is not None:
         cx, cy = region.shape.center
         return CircleShape(float(cx), float(cy), float(region.shape.radius))
-    return PolygonShape(np.asarray(region.polygon, dtype=np.float64))
+    holes = tuple(np.asarray(h.polygon, dtype=np.float64) for h in region.holes)
+    return PolygonShape(np.asarray(region.polygon, dtype=np.float64), holes)
 
 
 def _domain_rect(polygon: list[tuple[float, float]]) -> DomainRect:

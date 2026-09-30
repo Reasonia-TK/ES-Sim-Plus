@@ -5,12 +5,13 @@
 // ドメインの角の編集は外周の辺の ID を保ち、新しい辺は前後の辺が同じ境界条件のときだけそれを引き継ぐ。
 
 import type { Draft } from "immer";
+import { shapeProblem, type Shape } from "../cad/boolean";
 import { chamferCorner, chainToPath, extendEnd, filletCorner, filletLines, nearerEnd, offsetPath, simplifyChain, trimAt, type EditError, type EditResult, type PathPts } from "../cad/edit";
 import { bulgeOf, closestPoint, intersections, pathSegs, segFromBulge, type LineSeg, type Seg, type Vec } from "../cad/geom";
-import { applyAffine, bulgesOf, determinant, rotation, scaling, signedArea, transformPath, translation, type Affine } from "../cad/path";
+import { applyAffine, bulgesOf, determinant, packBulges, rotation, scaling, signedArea, transformPath, translation, type Affine, type PathData } from "../cad/path";
 import { applyDomainEdit, type EdgeRemapReport } from "./domainOps";
-import { boundaryOfEdge, domainPath, edgeIdsOf, nextEdgeId, regionPath, tidy, tidyPoint, uniqueRegionId, type Point, type Project, type Region } from "./project";
-import { setRegionPath } from "./regionOps";
+import { boundaryOfEdge, domainPath, edgeIdsOf, nextEdgeId, regionHoles, regionPath, regionRings, tidy, tidyPoint, uniqueRegionId, type Loop, type Point, type Project, type Region } from "./project";
+import { setRegionHole, setRegionPath } from "./regionOps";
 import type { PickRef } from "./selection";
 import { addSketch, replaceSketch, sketchOf, sketchSegs, type NewSketch, type SketchEntity } from "./sketch";
 
@@ -40,19 +41,32 @@ export function transformSketch<E extends NewSketch>(e: E, m: Affine): E {
   return e;
 }
 
-/** 領域の形を変換した輪郭 (円は円のまま: 中心と半径) */
-export function transformRegionShape(r: Region, m: Affine): Pick<Region, "polygon" | "bulges" | "shape"> {
-  if (r.shape) return { shape: { kind: "circle", center: tidyPoint(applyAffine(m, r.shape.center) as Point), radius: tidy(r.shape.radius * scaleOf(m)) } };
-  const path = transformPath(regionPath(r), m);
-  return { polygon: path.polygon.map((q) => tidyPoint(q as Point)), bulges: path.bulges ?? null };
+type RegionGeom = Pick<Region, "polygon" | "bulges" | "holes" | "shape">;
+
+function toLoop(p: PathData): Loop {
+  const b = packBulges(bulgesOf(p));
+  return b ? { polygon: p.polygon.map((q) => tidyPoint(q as Point)), bulges: b } : { polygon: p.polygon.map((q) => tidyPoint(q as Point)) };
 }
 
-function writeRegionShape(r: Region, s: Pick<Region, "polygon" | "bulges" | "shape">): void {
+/** 形 (外周と穴) → 領域の輪郭の値 */
+function geomOf(sh: Shape): RegionGeom {
+  return { polygon: sh.outer.polygon.map((q) => tidyPoint(q as Point)), bulges: packBulges(bulgesOf(sh.outer)), holes: sh.holes.length ? sh.holes.map(toLoop) : null };
+}
+
+/** 領域の形を変換した輪郭 (円は円のまま: 中心と半径。穴も変換する) */
+export function transformRegionShape(r: Region, m: Affine): RegionGeom {
+  if (r.shape) return { shape: { kind: "circle", center: tidyPoint(applyAffine(m, r.shape.center) as Point), radius: tidy(r.shape.radius * scaleOf(m)) } };
+  return geomOf({ outer: transformPath(regionPath(r), m), holes: regionHoles(r).map((h) => transformPath(h, m)) });
+}
+
+function writeRegionShape(r: Region, s: RegionGeom): void {
   if (s.shape) r.shape = s.shape;
   else {
     r.polygon = s.polygon ?? [];
     if (s.bulges?.some((b) => b)) r.bulges = s.bulges;
     else delete r.bulges;
+    if (s.holes?.length) r.holes = s.holes;
+    else delete r.holes;
   }
 }
 
@@ -62,11 +76,12 @@ interface LocalSize {
 }
 
 /** 領域のコピー (値と局所メッシュ幅も写す)。新しい ID */
-function copyRegion(d: P, src: Region, shape: Pick<Region, "polygon" | "bulges" | "shape">): string {
+function copyRegion(d: P, src: Region, shape: RegionGeom): string {
   const copy = JSON.parse(JSON.stringify(src)) as Region; // Immer の draft は structuredClone できない
   copy.id = uniqueRegionId(d as Project, `${src.id}_`);
   delete copy.polygon;
   delete copy.bulges;
+  delete copy.holes;
   delete copy.shape;
   writeRegionShape(copy, shape);
   d.geometry.regions.push(copy);
@@ -164,8 +179,7 @@ export function itemSegs(p: Project, it: PickRef): Seg[] {
   if (it.kind === "region") {
     const r = p.geometry.regions.find((x) => x.id === it.id);
     if (!r) return [];
-    const rp = regionPath(r);
-    return pathSegs(rp.polygon, bulgesOf(rp));
+    return regionRings(r).flatMap((rp) => pathSegs(rp.polygon, bulgesOf(rp)));
   }
   const e = sketchOf(p).find((x) => x.id === it.id);
   return e ? sketchSegs(e) : [];
@@ -175,7 +189,8 @@ export { rotation, scaling, translation };
 
 // ---- 角のフィレット・面取り ----
 
-export type CornerTarget = { kind: "region"; id: string } | { kind: "domain" } | { kind: "sketch"; id: string };
+/** 角を持つ形 (領域の hole があれば穴 hole の角) */
+export type CornerTarget = { kind: "region"; id: string; hole?: number } | { kind: "domain" } | { kind: "sketch"; id: string };
 
 /** 角を丸める・面取りする (頂点 i)。ドメインは外周の辺の ID と境界条件を保つ */
 export function cornerEdit(d: P, target: CornerTarget, i: number, size: number, mode: "fillet" | "chamfer"): EditResult<EdgeRemapReport | null> {
@@ -183,10 +198,18 @@ export function cornerEdit(d: P, target: CornerTarget, i: number, size: number, 
   if (target.kind === "region") {
     const r = d.geometry.regions.find((x) => x.id === target.id) as Region | undefined;
     if (!r || r.shape) return { ok: false, error: "notStraight" };
+    if (target.hole !== undefined) {
+      const hp = regionHoles(r)[target.hole];
+      if (!hp) return { ok: false, error: "notStraight" };
+      const res = op({ points: hp.polygon as Vec[], bulges: bulgesOf(hp), closed: true });
+      if (!res.ok) return res;
+      if (!setRegionHole(d, target.id, target.hole, { polygon: res.value.points, bulges: res.value.bulges })) return { ok: false, error: "tooLarge" };
+      return { ok: true, value: null };
+    }
     const rp = regionPath(r);
     const res = op({ points: rp.polygon as Vec[], bulges: bulgesOf(rp), closed: true });
     if (!res.ok) return res;
-    setRegionPath(d, target.id, { polygon: res.value.points, bulges: res.value.bulges });
+    if (!setRegionPath(d, target.id, { polygon: res.value.points, bulges: res.value.bulges })) return { ok: false, error: "tooLarge" };
     return { ok: true, value: null };
   }
   if (target.kind === "sketch") {
@@ -293,14 +316,30 @@ export function offsetItem(d: P, item: PickRef, dist: number, side: Point): Edit
       if (!(rad > 0)) return { ok: false, error: "tooLarge" };
       return { ok: true, value: { kind: "region", id: copyRegion(d, r, { shape: { kind: "circle", center: r.shape.center, radius: tidy(rad) } }) } };
     }
-    const rp = regionPath(r);
-    const segs = pathSegs(rp.polygon, bulgesOf(rp));
-    const ccw = signedArea(rp) > 0 ? 1 : -1;
-    // 反時計回りの左は内側
-    const inward = !outsideOf(segs, side);
-    const res = offsetPath({ points: rp.polygon as Vec[], bulges: bulgesOf(rp), closed: true }, (inward ? dist : -dist) * ccw);
-    if (!res.ok) return res;
-    return { ok: true, value: { kind: "region", id: copyRegion(d, r, { polygon: res.value.points.map((q) => tidyPoint(q as Point)), bulges: res.value.bulges }) } };
+    const rings = regionRings(r);
+    // クリックした所が形の外 (穴の中も外) なら太らせる。offsetPath は正で進む向きの左へずらす
+    const grow = outsideOf(
+      rings.flatMap((rp) => pathSegs(rp.polygon, bulgesOf(rp))),
+      side,
+    );
+    const shift = (rp: PathData, hole: boolean) => {
+      const ccw = signedArea(rp) > 0 ? 1 : -1;
+      // 外周: 太らせるなら外 (反時計回りの右)。穴: 太らせるなら穴の内側 (反時計回りの左)
+      const s = (grow !== hole ? -dist : dist) * ccw;
+      return offsetPath({ points: rp.polygon as Vec[], bulges: bulgesOf(rp), closed: true }, s);
+    };
+    const outer = shift(rings[0], false);
+    if (!outer.ok) return outer;
+    const holes: PathData[] = [];
+    for (const h of rings.slice(1)) {
+      const res = shift(h, true);
+      // 太らせて消える穴は無くなる
+      if (res.ok) holes.push({ polygon: res.value.points, bulges: res.value.bulges });
+      else if (!grow || res.error !== "tooLarge") return res;
+    }
+    const sh: Shape = { outer: { polygon: outer.value.points, bulges: outer.value.bulges }, holes };
+    if (holes.length && shapeProblem(sh)) return { ok: false, error: "selfIntersect" };
+    return { ok: true, value: { kind: "region", id: copyRegion(d, r, geomOf(sh)) } };
   }
   const e = sketchOf(p).find((x) => x.id === item.id);
   if (!e) return { ok: false, error: "noTarget" };
@@ -403,10 +442,7 @@ export function cutterSegs(p: Project, exclude: string | null): Seg[] {
   const out: Seg[] = [];
   const dp = domainPath(p);
   out.push(...pathSegs(dp.polygon, bulgesOf(dp)));
-  for (const r of p.geometry.regions) {
-    const rp = regionPath(r);
-    out.push(...pathSegs(rp.polygon, bulgesOf(rp)));
-  }
+  for (const r of p.geometry.regions) for (const rp of regionRings(r)) out.push(...pathSegs(rp.polygon, bulgesOf(rp)));
   for (const e of sketchOf(p)) if (e.id !== exclude) out.push(...sketchSegs(e));
   return out;
 }

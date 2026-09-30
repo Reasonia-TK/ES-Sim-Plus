@@ -3,8 +3,10 @@
 //
 // 面のたどり方: 半辺 (向きのある辺) の左に面があるとして、頂点に着いたら「戻る向きのすぐ時計回り」の半辺へ進む
 // (最も左に曲がる)。向きは接線の角度で並べ、同じ角度なら曲率 (左に曲がるほど反時計回り側) で並べる。
-// 点から斜めの半直線を出して最初に当たる辺から始め、一周して反時計回り (面積が正) なら囲まれた面。
-// 端が他とつながっていない辺 (ひげ) は先に取り除く。面の中の島 (穴) は輪郭に含めない (穴は P7e)。
+// 半辺をたどった輪のうち反時計回り (面積が正) は囲まれた面の外周、時計回りは島 (つながった図形のかたまり) の外側。
+// 点を囲む面の外周は、点を含む反時計回りの輪のうち最も小さいもの。面の穴 (P7e) は、その面の中にじかにある
+// 島の外側の輪 (島の点を含む最も小さい反時計回りの輪がその面の外周であるもの)。
+// 端が他とつながっていない辺 (ひげ) は先に取り除く。
 
 import {
   arcSweep,
@@ -13,16 +15,17 @@ import {
   intersections,
   paramOf,
   pathArea,
+  pathSegs,
   pointAt,
   pointInPath,
   segFromBulge,
   segLength,
   subSeg,
   tangentAt,
-  type ArcSeg,
   type Seg,
   type Vec,
 } from "./geom";
+import type { Shape } from "./boolean";
 import type { PathData } from "./path";
 
 /** 図形の大きさに対する許容差 (最小 1e-12 m) */
@@ -139,6 +142,12 @@ interface HalfEdge {
   curvature: number;
 }
 
+interface Cycle {
+  path: PathData;
+  /** 符号付き面積 (反時計回りが正) */
+  area: number;
+}
+
 /** 分けた曲線の平面グラフ (同じ辺の重複を除き、ひげを取り除いたもの) */
 export class Arrangement {
   readonly vertices: Vec[];
@@ -146,6 +155,7 @@ export class Arrangement {
   private half: HalfEdge[] = [];
   /** 頂点ごとの出ていく半辺 (反時計回りに並べる) */
   private out: number[][] = [];
+  private cycleList: Cycle[] | null = null;
   readonly tol: number;
 
   constructor(segs: Seg[], tol = toleranceOf(segs)) {
@@ -230,55 +240,59 @@ export class Arrangement {
     return list[(k - 1 + list.length) % list.length];
   }
 
-  /** 点 p から半直線を出して最初に当たる半辺 (p がその左にある向き)。当たらなければ null */
-  private firstHit(p: Vec): number | null {
-    // 軸に平行な図形の頂点をかすめないよう、わずかに斜めの向き
-    const dir: Vec = [Math.cos(0.0137), Math.sin(0.0137)];
-    let far = 0;
-    for (const [x, y] of this.vertices) far = Math.max(far, Math.hypot(x - p[0], y - p[1]));
-    const ray: Seg = { kind: "line", a: p, b: [p[0] + dir[0] * (2 * far + 1), p[1] + dir[1] * (2 * far + 1)] };
-    let best: { h: number; t: number } | null = null;
-    this.edges.forEach((e, k) => {
-      if (!e.alive) return;
-      for (const q of intersections(ray, e.seg)) {
-        const t = (q[0] - p[0]) * dir[0] + (q[1] - p[1]) * dir[1];
-        if (t <= this.tol || (best && t >= best.t)) continue;
-        // q での u → v の向き
-        let tx: number;
-        let ty: number;
-        if (e.seg.kind === "line") {
-          tx = e.seg.b[0] - e.seg.a[0];
-          ty = e.seg.b[1] - e.seg.a[1];
-        } else {
-          const s = e.seg as ArcSeg;
-          const ang = Math.atan2(q[1] - s.center[1], q[0] - s.center[0]);
-          tx = s.ccw ? -Math.sin(ang) : Math.sin(ang);
-          ty = s.ccw ? Math.cos(ang) : -Math.cos(ang);
-        }
-        const left = tx * (p[1] - q[1]) - ty * (p[0] - q[0]) > 0;
-        const h = this.half.findIndex((x) => x.edge === k && (left ? x.from === e.u : x.from === e.v));
-        best = { h, t };
+  /** 半辺をたどった輪 (全ての半辺がちょうど 1 つの輪に入る) */
+  private cycles(): Cycle[] {
+    if (this.cycleList) return this.cycleList;
+    const seen = new Uint8Array(this.half.length);
+    const out: Cycle[] = [];
+    for (let s = 0; s < this.half.length; s++) {
+      if (seen[s]) continue;
+      const loop: number[] = [];
+      let h = s;
+      for (let guard = 0; guard <= this.half.length && !seen[h]; guard++) {
+        seen[h] = 1;
+        loop.push(h);
+        h = this.next(h);
       }
-    });
-    return best ? (best as { h: number; t: number }).h : null;
+      if (h !== s) continue;
+      const polygon = loop.map((k) => this.vertices[this.half[k].from]);
+      const bulges = loop.map((k) => this.half[k].bulge);
+      out.push({ path: { polygon, bulges }, area: pathArea(polygon, bulges) });
+    }
+    this.cycleList = out;
+    return out;
   }
 
-  /** 点を囲む最小の面の輪郭 (反時計回り、同じ直線・同じ円の続きはまとめる)。囲まれていなければ null */
-  faceAt(p: Vec): PathData | null {
-    const start = this.firstHit(p);
-    if (start === null) return null;
-    const loop: number[] = [];
-    let h = start;
-    for (let guard = 0; guard <= this.half.length; guard++) {
-      loop.push(h);
-      h = this.next(h);
-      if (h === start) break;
+  /** 点が輪の中にあり、境界から許容差より離れているか */
+  private strictlyInside(q: Vec, c: Cycle): boolean {
+    if (!pointInPath(q, c.path.polygon, c.path.bulges)) return false;
+    return pathSegs(c.path.polygon, c.path.bulges).every((s) => closestPoint(s, q).dist > this.tol);
+  }
+
+  /** 点を含む最も小さい反時計回りの輪 (点を囲む面の外周)。strict なら境界の上の点は含まない */
+  private outerAt(q: Vec, strict: boolean): Cycle | null {
+    let best: Cycle | null = null;
+    for (const c of this.cycles()) {
+      if (c.area <= 0 || (best && c.area >= best.area)) continue;
+      if (strict ? this.strictlyInside(q, c) : pointInPath(q, c.path.polygon, c.path.bulges)) best = c;
     }
-    if (h !== start) return null;
-    const polygon = loop.map((k) => this.vertices[this.half[k].from]);
-    const bulges = loop.map((k) => this.half[k].bulge);
-    if (pathArea(polygon, bulges) <= 0 || !pointInPath(p, polygon, bulges)) return null;
-    return simplifyPath({ polygon, bulges }, this.tol);
+    return best;
+  }
+
+  /** 点を囲む最小の面の外周 (反時計回り、同じ直線・同じ円の続きはまとめる)。囲まれていなければ null */
+  faceAt(p: Vec): PathData | null {
+    const c = this.outerAt(p, false);
+    return c ? simplifyPath(c.path, this.tol) : null;
+  }
+
+  /** 点を囲む面 (外周と、面の中の島の外側 = 穴。穴は時計回り)。囲まれていなければ null */
+  shapeAt(p: Vec): Shape | null {
+    const c = this.outerAt(p, false);
+    if (!c) return null;
+    const holes = this.cycles()
+      .filter((d) => d.area < 0 && this.outerAt(d.path.polygon[0], true) === c)
+      .map((d) => simplifyPath(d.path, this.tol));
+    return { outer: simplifyPath(c.path, this.tol), holes };
   }
 }
 
