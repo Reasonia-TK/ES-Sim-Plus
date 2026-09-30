@@ -2,6 +2,7 @@
 
 import { Menubar } from "radix-ui";
 import { useTranslation } from "react-i18next";
+import { exportDxfFile, importDxfFile } from "../io/dxf";
 import { EXAMPLES } from "../io/examples";
 import { newDocument, openDocument, openExample, openRecentFile, saveDocument, saveDocumentAs, saveDocumentWithResults } from "../io/documents";
 import { useDocument, useRedoLabel, useUndoLabel } from "../model/documentStore";
@@ -113,6 +114,9 @@ export function MenuBar() {
         <Item label={t("menu.save")} shortcut={`${MOD}+S`} onSelect={() => void saveDocument()} />
         <Item label={t("menu.saveAs")} shortcut={`${MOD}+Shift+S`} onSelect={() => void saveDocumentAs()} />
         <Item label={t("menu.saveWithResults")} onSelect={() => void saveDocumentWithResults()} disabled={!hasResults} />
+        <Sep />
+        <Item label={t("menu.importDxf")} onSelect={() => void importDxfFile()} disabled={!connected} />
+        <Item label={t("menu.exportDxf")} onSelect={() => void exportDxfFile()} disabled={!connected} />
       </Menu>
       <Menu label={t("menu.edit")}>
         <Item

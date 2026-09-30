@@ -1410,6 +1410,14 @@ details > summary {
   color: var(--warn);
 }
 
+/* ダイアログのチェックボックスの行 */
+.check-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0;
+}
+
 .hint-error {
   color: var(--error);
 }

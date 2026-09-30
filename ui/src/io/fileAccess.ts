@@ -41,11 +41,11 @@ async function writeHandle(h: FileSystemFileHandle, text: string): Promise<void>
   await w.close();
 }
 
-function pickWithInput(): Promise<File | null> {
+function pickWithInput(accept = ".json,application/json"): Promise<File | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = ".json,application/json";
+    input.accept = accept;
     input.onchange = () => resolve(input.files?.[0] ?? null);
     input.addEventListener("cancel", () => resolve(null));
     input.click();
@@ -82,6 +82,28 @@ export async function pickAndRead(): Promise<OpenedFile | null> {
   }
   const f = await pickWithInput();
   return f ? { text: await f.text(), file: { name: f.name } } : null;
+}
+
+/** 任意のファイル (DXF など) を選んでバイト列で読む (キャンセルは null)。exts は拡張子 ("dxf") */
+export async function pickAndReadBinary(exts: string[], description: string): Promise<{ name: string; data: Uint8Array } | null> {
+  if (isTauri()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const path = await open({ multiple: false, directory: false, filters: [{ name: description, extensions: exts }] });
+    if (typeof path !== "string") return null;
+    const { readFile } = await import("@tauri-apps/plugin-fs");
+    return { name: baseName(path), data: await readFile(path) };
+  }
+  if (hasFsAccess()) {
+    try {
+      const [h] = await window.showOpenFilePicker!({ multiple: false, types: [{ description, accept: { "application/octet-stream": exts.map((e) => `.${e}`) as `.${string}`[] } }] });
+      return { name: h.name, data: new Uint8Array(await (await h.getFile()).arrayBuffer()) };
+    } catch (e) {
+      if (isAbort(e)) return null;
+      throw e;
+    }
+  }
+  const f = await pickWithInput(exts.map((e) => `.${e}`).join(","));
+  return f ? { name: f.name, data: new Uint8Array(await f.arrayBuffer()) } : null;
 }
 
 /** 最近使ったファイルを読む (消えた・権限が無いときは例外) */

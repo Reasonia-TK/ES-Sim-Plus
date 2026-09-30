@@ -13,8 +13,8 @@ import {
   splitDomainEdge,
   type EdgeRemapReport,
 } from "../model/domainOps";
-import { pickableRegions, pickableSketch } from "../model/layers";
-import { domainPath, regionPath, type Point, type Project, type Region } from "../model/project";
+import { pickableRegions, pickableSketch, visibleRegions, visibleSketch } from "../model/layers";
+import { domainBounds, domainPath, regionPath, type Point, type Project, type Region } from "../model/project";
 import { deleteRegion, moveRegion, setCircleRadius, setRegionPath } from "../model/regionOps";
 import type { PickRef } from "../model/selection";
 import {
@@ -172,6 +172,21 @@ export function itemsInBox(p: Project, a: Point, b: Point): PickRef[] {
   }
   for (const e of pickableSketch(p)) if (inside(sketchBounds(e))) out.push({ kind: "sketch", id: e.id });
   return out;
+}
+
+/** 全体表示の範囲: ドメインと見えている領域・スケッチ (読み込んだ図がドメインの外にあっても入る) */
+export function drawingBounds(p: Project): { x0: number; y0: number; x1: number; y1: number } {
+  const b = { ...domainBounds(p) };
+  const add = (bb: { x0: number; y0: number; x1: number; y1: number }) => {
+    if (![bb.x0, bb.y0, bb.x1, bb.y1].every(Number.isFinite)) return;
+    b.x0 = Math.min(b.x0, bb.x0);
+    b.y0 = Math.min(b.y0, bb.y0);
+    b.x1 = Math.max(b.x1, bb.x1);
+    b.y1 = Math.max(b.y1, bb.y1);
+  };
+  for (const r of visibleRegions(p)) add(regionBounds(r));
+  for (const e of visibleSketch(p)) add(sketchBounds(e));
+  return b;
 }
 
 function regionBounds(r: Region): { x0: number; y0: number; x1: number; y1: number } {

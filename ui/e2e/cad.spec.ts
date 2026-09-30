@@ -1,10 +1,12 @@
 // E2E: CAD v2 (prompts/132)。外周の辺を円弧にし、キャンバスで辺を選んで境界条件を付け、辺を分けて静電場を解く (P7a)。
 // スケッチの線から囲まれた所で領域を作る・円弧のある折れ線の領域・スケッチの矩形をドメインに・範囲選択と削除・
 // キャンバスでドメインの頂点を動かし辺を曲げる (P7b)。スナップと数値入力 (P7c)、フィレット・トリム・変換・配列 (P7d)、
-// ブーリアンの差で穴を開けて解く・囲まれた所から穴のある領域 (P7e)。パラメータの式の束縛・レイヤ (P7f)。
+// ブーリアンの差で穴を開けて解く・囲まれた所から穴のある領域 (P7e)。パラメータの式の束縛・レイヤ (P7f)。DXF の読み書き (P7g)。
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
-import { expect, openApp, selectNode, setNumber, test } from "./fixtures";
+import { expect, menu, openApp, selectNode, setNumber, test } from "./fixtures";
 
 /** ルーラーの帯の幅 [px] (既定の文字の大きさ 11 px、graphics/overlay.ts の rulerSize と同じ) */
 const RULER_PX = Math.max(24, 11 * 2.2);
@@ -393,4 +395,33 @@ test("draws on the current layer and locks it (P7f)", async ({ page }) => {
   await expect(page.locator(".settings-panel .panel-title")).not.toContainText("region1");
   await clickAt(page, at(50, 25));
   await expect(page.locator(".settings-panel .panel-title")).toContainText("diel1");
+});
+
+test("imports a DXF with layers into regions and exports it (P7g)", async ({ page }) => {
+  await openApp(page);
+  const chooser = page.waitForEvent("filechooser");
+  await menu(page, "ファイル", "DXF を読み込む…");
+  await (await chooser).setFiles(fileURLToPath(new URL("./data/electrodes.dxf", import.meta.url)));
+  const dlg = page.getByRole("dialog", { name: "DXF を読み込む" });
+  await expect(dlg).toContainText("electrodes.dxf: 線 1・円 1・ポリライン 1 (レイヤ 3)");
+  await expect(dlg).toContainText("TEXT 1");
+  await expect(dlg).toContainText("ファイルの単位 (mm)");
+  await dlg.getByLabel(/閉じた形 \(2 個\) を領域にする/).check();
+  await dlg.getByRole("button", { name: "読み込む" }).click();
+  await expect(dlg).toHaveCount(0);
+  // 矩形と円が領域 (導体)、線はスケッチ、DXF のレイヤ
+  await expect(page.locator(".tree")).toContainText("region1");
+  await expect(page.locator(".tree")).toContainText("region2");
+  await selectNode(page, "region1");
+  await expect(page.getByLabel("x 2", { exact: true })).toHaveValue("35");
+  await expect(page.getByLabel("レイヤ", { exact: true }).locator("option:checked")).toHaveText("ANODE");
+  await selectNode(page, "スケッチ");
+  await expect(page.getByText("スケッチ 1 個")).toBeVisible();
+  // 書き出すと DXF (LWPOLYLINE・CIRCLE とレイヤ) がダウンロードされる
+  const download = page.waitForEvent("download");
+  await menu(page, "ファイル", "DXF に書き出す…");
+  const file = await download;
+  expect(file.suggestedFilename()).toMatch(/\.dxf$/);
+  const text = readFileSync((await file.path())!, "utf-8");
+  for (const s of ["LWPOLYLINE", "CIRCLE", "ANODE", "CATHODE", "ES_DOMAIN"]) expect(text).toContain(s);
 });

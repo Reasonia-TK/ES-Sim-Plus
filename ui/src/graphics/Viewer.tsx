@@ -10,6 +10,7 @@ import { saveBinaryFile, saveTextFile } from "../io/fileAccess";
 import { useDocument } from "../model/documentStore";
 import { useSelection } from "../model/selection";
 import { coordOf, domainBounds, edgeIndexOf, type Point, type Project } from "../model/project";
+import { drawingBounds } from "./editTargets";
 import { visibleSketch } from "../model/layers";
 import { usePrefs } from "../prefs/prefs";
 import { formatNumber, lengthUnitLabel, toDisplayLength } from "../util/format";
@@ -130,7 +131,7 @@ export function Viewer({ active }: { active: ActiveScene }) {
   const rulerPx = rulers ? rulerSize(RULER_FONTS[vs.rulerFont]) : 0;
   const fit = (w = size.w, h = size.h): Camera | null => {
     if (w <= 0 || h <= 0) return null;
-    const b = domainBounds(project);
+    const b = drawingBounds(project);
     const c = fitCamera(b, Math.max(1, w - rulerPx), Math.max(1, h - rulerPx));
     return { ...c, ox: c.ox + rulerPx, oy: c.oy + rulerPx };
   };

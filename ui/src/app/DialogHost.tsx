@@ -5,6 +5,8 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useConnection } from "../backend/connection";
 import { parsePort } from "../backend/port";
+import { countsText } from "../io/dxf";
+import { DXF_UNITS, type DxfImportOptions } from "../model/dxfImport";
 import { useDialogs, type DialogRequest } from "./dialogs";
 import { errorText, logError } from "./messages";
 
@@ -141,11 +143,82 @@ function Alert({ req, onClose }: { req: Extract<DialogRequest, { kind: "unsaved"
   );
 }
 
+/** DXF の読み込みの確認: 形の数・飛ばしたもの・単位 (読み替え)・レイヤを取り込むか・閉じた形を領域にするか */
+function DxfImportBody({ req, onDone }: { req: Extract<DialogRequest, { kind: "dxfImport" }>; onDone: (opts: DxfImportOptions | null) => void }) {
+  const { t } = useTranslation();
+  const r = req.result;
+  const [unit, setUnit] = useState(Object.hasOwn(DXF_UNITS, r.unit) ? r.unit : "mm");
+  const [layers, setLayers] = useState(true);
+  const [toRegions, setToRegions] = useState(false);
+  const skipped = Object.entries(r.skipped)
+    .map(([k, n]) => `${k} ${n}`)
+    .join("・");
+  const closed = r.entities.filter((e) => e.kind === "circle" || (e.kind === "polyline" && e.closed)).length;
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        onDone({ unit, layers, toRegions });
+      }}
+    >
+      <p>{t("dxf.summary", { name: req.name, counts: countsText(r.counts), layers: r.layers.length })}</p>
+      {skipped && <p className="hint">{t("dxf.skipped", { list: skipped })}</p>}
+      <div className="field">
+        <label className="field-label" htmlFor="dxf-unit">
+          {t("dxf.unit")}
+        </label>
+        <div className="field-control">
+          <select id="dxf-unit" className="input" value={unit} onChange={(e) => setUnit(e.target.value)}>
+            {Object.keys(DXF_UNITS).map((u) => (
+              <option key={u} value={u}>
+                {u === "um" ? "µm" : u === "in" ? "inch" : u}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <p className={r.assumed ? "hint hint-warn" : "hint"}>{r.assumed ? t("dxf.unitAssumed") : t("dxf.unitFromFile", { unit: r.unit })}</p>
+      <label className="check-row">
+        <input type="checkbox" checked={layers} onChange={(e) => setLayers(e.target.checked)} /> {t("dxf.useLayers")}
+      </label>
+      <label className="check-row">
+        <input type="checkbox" checked={toRegions} disabled={closed === 0} onChange={(e) => setToRegions(e.target.checked)} /> {t("dxf.toRegions", { n: closed })}
+      </label>
+      <div className="dialog-buttons">
+        <button type="button" className="button" onClick={() => onDone(null)}>
+          {t("dialog.cancel")}
+        </button>
+        <button type="submit" className="button primary">
+          {t("dxf.import")}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 export function DialogHost() {
   const { t } = useTranslation();
   const req = useDialogs((s) => s.queue[0]);
   const close = useDialogs((s) => s.close);
   if (!req) return null;
+  if (req.kind === "dxfImport") {
+    const finish = (opts: DxfImportOptions | null) => {
+      req.resolve(opts);
+      close();
+    };
+    return (
+      <Dialog.Root open onOpenChange={(open) => !open && finish(null)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
+            <Dialog.Title className="dialog-title">{t("dxf.title")}</Dialog.Title>
+            <Dialog.Description className="sr-only">{t("dxf.title")}</Dialog.Description>
+            <DxfImportBody req={req} onDone={finish} />
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    );
+  }
   if (req.kind === "about" || req.kind === "port") {
     const finish = () => {
       req.resolve();

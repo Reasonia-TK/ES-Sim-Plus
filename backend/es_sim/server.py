@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import math
 import secrets
@@ -18,7 +20,8 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel as _BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
@@ -43,6 +46,7 @@ from .tl import TlSimulation
 from .mcc import GasField
 from .sweep import build_sweep_cases, resolve_sweep_module, run_sweep
 from .xs.api import XsParseRequest, XsParseResponse, parse_xs_text
+from .dxf import read_dxf, write_dxf
 from .device import describe as describe_device
 from .field.compat import cartesian_mesh_result, cartesian_profile, cartesian_solve
 from .gpic import make_pic_simulation
@@ -541,6 +545,43 @@ def xs_parse_v2_endpoint(req: XsParseRequest) -> XsParseResponse:
         return parse_xs_text(req.text)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class DxfImportRequest(_BaseModel):
+    """POST /v2/cad/dxf/import: DXF ファイルの中身 (base64、テキストでもバイナリでも) と単位 (無ければ $INSUNITS)。"""
+
+    data: str
+    unit: str | None = None
+
+
+class DxfExportRequest(_BaseModel):
+    """POST /v2/cad/dxf/export: 文書 (JSON) と書き出す単位。"""
+
+    project: dict
+    unit: str = "mm"
+
+
+@app.post("/v2/cad/dxf/import")
+def dxf_import_endpoint(req: DxfImportRequest) -> dict:
+    """DXF → スケッチの形 (m) とレイヤ (CAD v2 P7g、es_sim.dxf.read_dxf)。読めなければ 422。"""
+    try:
+        raw = base64.b64decode(req.data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="DXF のデータ (base64) を読めません") from exc
+    try:
+        return read_dxf(raw, req.unit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/v2/cad/dxf/export")
+def dxf_export_endpoint(req: DxfExportRequest) -> Response:
+    """文書 → DXF のテキスト (R2010、es_sim.dxf.write_dxf)。書けなければ 422。"""
+    try:
+        text = write_dxf(req.project, req.unit)
+    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        raise HTTPException(status_code=422, detail=f"DXF に書き出せません: {exc}") from exc
+    return Response(content=text, media_type="application/dxf")
 
 
 @lru_cache(maxsize=1)

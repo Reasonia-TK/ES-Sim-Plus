@@ -37,6 +37,13 @@ export async function apiGet<T>(path: string, opts?: { signal?: AbortSignal; tim
   }
 }
 
+/** POST して応答をテキストで受ける (DXF の書き出しなど) */
+export async function apiPostText(path: string, body: unknown): Promise<string> {
+  const res = await fetch(baseUrl() + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) throw new ApiError(path, res.status, await detailOf(res));
+  return await res.text();
+}
+
 export async function apiPost<T>(path: string, body: unknown, opts?: { signal?: AbortSignal }): Promise<T> {
   const res = await fetch(baseUrl() + path, {
     method: "POST",
