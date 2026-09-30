@@ -4,6 +4,7 @@
 
 import { bulgeOf, bulgeThrough, midpoint, pathBounds, segFromBulge, type ArcSeg } from "../cad/geom";
 import { bulgesOf, pathHandles, type PathData } from "../cad/path";
+import type { SnapResult } from "../cad/snap";
 import { axisEdges, boundaryOfEdge, domainPath, regionPath, type Point, type Project, type Region } from "../model/project";
 import type { PickRef } from "../model/selection";
 import { edgeCountOf, sketchSegs, type EditPath, type SketchEntity } from "../model/sketch";
@@ -42,6 +43,7 @@ const COLOR_VARS = {
   handleMid: "--color-handle-mid",
   draw: "--color-draw",
   sketch: "--color-sketch",
+  snap: "--color-snap",
   fillPreview: "--color-fill-preview",
   emitter: "--color-emitter",
   injector: "--color-injector",
@@ -339,6 +341,9 @@ export interface OverlayState {
   sketch: SketchEntity[];
   /** 囲まれた所から領域を作る道具の、カーソルの下の面 */
   fillPreview: PathData | null;
+  /** いま合っているオブジェクトスナップと、その名前 */
+  snapMark: SnapResult | null;
+  snapLabel: string | null;
   tool: Tool;
   preview: Preview;
   drawing: Drawing;
@@ -609,8 +614,8 @@ function drawSelection(ctx: CanvasRenderingContext2D, s: OverlayState): void {
       ctx.stroke();
     }
   }
-  // ドメインの編集中の形
-  if (edit?.target.kind === "domain") {
+  // ドメインの編集中の形 (ドメインのページを開いているだけで目立たないよう、選択の道具のときだけ)
+  if (edit?.target.kind === "domain" && (s.tool === "select" || s.preview.edit)) {
     ctx.strokeStyle = c.selection;
     ctx.lineWidth = 2;
     ctx.setLineDash([6, 4]);
@@ -768,6 +773,54 @@ function drawFillPreview(ctx: CanvasRenderingContext2D, s: OverlayState, face: P
   ctx.strokeStyle = s.colors.fillPreview;
   ctx.lineWidth = 2;
   ctx.stroke();
+}
+
+/** オブジェクトスナップの印 (端点は四角・中点は三角・中心は円・交点は ×・垂線は直角・接線は円と線) と名前 */
+function drawSnapMark(ctx: CanvasRenderingContext2D, s: OverlayState, m: SnapResult, text: string | null): void {
+  const [x, y] = toScreen(s.view.camera, m.point as Point);
+  const r = 6;
+  ctx.save();
+  ctx.strokeStyle = s.colors.snap;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  switch (m.kind) {
+    case "endpoint":
+      ctx.rect(x - r, y - r, 2 * r, 2 * r);
+      break;
+    case "midpoint":
+      ctx.moveTo(x, y - r);
+      ctx.lineTo(x + r, y + r * 0.8);
+      ctx.lineTo(x - r, y + r * 0.8);
+      ctx.closePath();
+      break;
+    case "center":
+      ctx.arc(x, y, r, 0, 2 * Math.PI);
+      break;
+    case "intersection":
+      ctx.moveTo(x - r, y - r);
+      ctx.lineTo(x + r, y + r);
+      ctx.moveTo(x + r, y - r);
+      ctx.lineTo(x - r, y + r);
+      break;
+    case "perpendicular":
+      ctx.moveTo(x - r, y - r);
+      ctx.lineTo(x - r, y + r);
+      ctx.lineTo(x + r, y + r);
+      ctx.moveTo(x - r, y);
+      ctx.lineTo(x, y);
+      ctx.lineTo(x, y + r);
+      break;
+    case "tangent":
+      ctx.arc(x, y + 2, r - 1, 0, 2 * Math.PI);
+      ctx.moveTo(x - r - 2, y - r + 1);
+      ctx.lineTo(x + r + 2, y - r + 1);
+      break;
+    default:
+      break;
+  }
+  ctx.stroke();
+  ctx.restore();
+  if (text) label(ctx, text, x + 10, y - 9, s.colors.snap, "left", "bottom");
 }
 
 /** 範囲選択の矩形 */
@@ -999,6 +1052,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, s: OverlayState): voi
   if (s.measure) drawMeasure(ctx, s, s.measure);
   drawRubberBand(ctx, s);
   if (s.preview.box) drawBox(ctx, s, s.preview.box);
+  if (s.snapMark) drawSnapMark(ctx, s, s.snapMark, s.snapLabel);
   if (s.colorbar) drawColorbar(ctx, s, s.colorbar);
   if (s.probe) drawProbe(ctx, s, s.probe);
   if (s.overlays.rulers) drawRulers(ctx, s);

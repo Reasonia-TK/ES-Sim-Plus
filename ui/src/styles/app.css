@@ -43,6 +43,7 @@
   --color-handle-mid: #4d9aff;
   --color-draw: #4d9aff;
   --color-sketch: #b8c7d6;
+  --color-snap: #3ddc84;
   --color-fill-preview: #4d9aff;
   --color-emitter: #4ddd8c;
   --color-injector: #f472d0;
@@ -105,6 +106,7 @@
   --color-handle-mid: #1f6fdc;
   --color-draw: #1f6fdc;
   --color-sketch: #55667a;
+  --color-snap: #0e9f4f;
   --color-fill-preview: #1f6fdc;
   --color-emitter: #17924f;
   --color-injector: #b8327f;
@@ -725,6 +727,38 @@ details > summary {
 .tool-button.active {
   background: var(--bg-active);
   border-color: var(--accent);
+}
+
+/* キャンバスの数値入力の欄 */
+.coord-input {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+
+.coord-input .input {
+  height: 24px;
+}
+
+.coord-hint,
+.coord-error {
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.coord-hint {
+  color: var(--text-muted);
+}
+
+.coord-error {
+  color: var(--error);
 }
 
 /* 点の入力 (x, y を横に並べる) */

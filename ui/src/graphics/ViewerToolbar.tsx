@@ -11,6 +11,7 @@ import type { Project } from "../model/project";
 import { CommitText } from "../pages/inputs";
 import { jobName } from "../jobs/jobsStore";
 import type { JobSummary } from "../jobs/types";
+import { SNAP_KINDS } from "../cad/snap";
 import { useChartPref, useResultsView } from "../results/resultsView";
 import type { SceneControls } from "./useScene";
 import { formatNumber, parseNumber } from "../util/format";
@@ -50,6 +51,48 @@ function ToolButton({ tool, icon, label, disabled, title }: { tool: Tool; icon: 
     >
       {icon}
     </button>
+  );
+}
+
+/** スナップ: 全体のオン・オフと種類ごとの切り替え */
+function SnapMenu() {
+  const { t } = useTranslation();
+  const snap = useViewer((s) => s.snap);
+  const setSnap = useViewer((s) => s.setSnap);
+  const kinds = useViewer((s) => s.snapKinds);
+  const setKind = useViewer((s) => s.setSnapKind);
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button type="button" className={`tool-button${snap ? " active" : ""}`} aria-pressed={snap} aria-label={t("viewer.snap")} title={t("viewer.snapHint")}>
+          <IconSnap />
+          <IconChevron />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="menu-content" align="start" sideOffset={4}>
+          <DropdownMenu.CheckboxItem className="menu-item menu-radio" checked={snap} onCheckedChange={(v) => setSnap(v === true)} onSelect={(e) => e.preventDefault()}>
+            <DropdownMenu.ItemIndicator className="menu-indicator">✓</DropdownMenu.ItemIndicator>
+            {t("viewer.snapAll")}
+            <span className="menu-shortcut">F3</span>
+          </DropdownMenu.CheckboxItem>
+          <DropdownMenu.Separator className="menu-separator" />
+          {SNAP_KINDS.map((k) => (
+            <DropdownMenu.CheckboxItem
+              key={k}
+              className="menu-item menu-radio"
+              checked={kinds[k]}
+              disabled={!snap}
+              onCheckedChange={(v) => setKind(k, v === true)}
+              onSelect={(e) => e.preventDefault()}
+            >
+              <DropdownMenu.ItemIndicator className="menu-indicator">✓</DropdownMenu.ItemIndicator>
+              {t(`snapKind.${k}`)}
+            </DropdownMenu.CheckboxItem>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
@@ -333,8 +376,6 @@ export function ViewerToolbar({
   onExportCsv: () => void;
 }) {
   const { t } = useTranslation();
-  const snap = useViewer((s) => s.snap);
-  const setSnap = useViewer((s) => s.setSnap);
   const requestFit = useViewer((s) => s.requestFit);
   return (
     <div className="viewer-toolbar" role="toolbar" aria-label={t("viewer.toolbar")}>
@@ -352,9 +393,7 @@ export function ViewerToolbar({
       <ToolButton tool="probe" icon={<IconProbe />} label={t("viewer.tool.probe")} disabled={!scene.field} title={scene.field ? t("viewer.tool.probe") : t("viewer.probeNeedsField")} />
       <ToolButton tool="measure" icon={<IconMeasure />} label={t("viewer.tool.measure")} />
       <span className="toolbar-sep" />
-      <button type="button" className={`tool-button${snap ? " active" : ""}`} aria-pressed={snap} aria-label={t("viewer.snap")} title={t("viewer.snap")} onClick={() => setSnap(!snap)}>
-        <IconSnap />
-      </button>
+      <SnapMenu />
       <button type="button" className="tool-button" aria-label={t("viewer.fit")} title={`${t("viewer.fit")} (F)`} onClick={requestFit}>
         <IconFit />
       </button>

@@ -13,7 +13,7 @@ import { coordOf, domainBounds, edgeIndexOf, type Point, type Project } from "..
 import { sketchOf } from "../model/sketch";
 import { usePrefs } from "../prefs/prefs";
 import { formatNumber, lengthUnitLabel, toDisplayLength } from "../util/format";
-import { fitCamera, toWorld, zoomAt, ZOOM_STEP, type Camera } from "./camera";
+import { fitCamera, toScreen, toWorld, zoomAt, ZOOM_STEP, type Camera } from "./camera";
 import { parseColor } from "./color";
 import { composePng, fieldCsv, stamp } from "./exporting";
 import { resolveRange } from "./fieldScale";
@@ -303,6 +303,8 @@ export function Viewer({ active }: { active: ActiveScene }) {
         edit: tools.edit,
         sketch,
         fillPreview: tools.fillPreview,
+        snapMark: tools.snapMark,
+        snapLabel: tools.snapMark ? t(`snapKind.${tools.snapMark.kind}`) : null,
         tool: vs.tool,
         preview,
         drawing: tools.drawing,
@@ -395,6 +397,22 @@ export function Viewer({ active }: { active: ActiveScene }) {
           </div>
         )}
         {!glOk && <div className="viewer-nogl">{t("viewer.noWebgl")}</div>}
+        {tools.coordText !== null && (
+          <CoordBox
+            text={tools.coordText}
+            error={tools.coordError}
+            at={camera && hover ? toScreen(camera, hover) : null}
+            size={size}
+            onChange={tools.setCoordText}
+            onSubmit={() => {
+              if (tools.submitCoord()) topRef.current?.focus({ preventScroll: true });
+            }}
+            onCancel={() => {
+              tools.closeCoord();
+              topRef.current?.focus({ preventScroll: true });
+            }}
+          />
+        )}
         {vs.overlays.legend && (
           <div className="viewer-legend" aria-label={t("viewer.legend")}>
             <span>
@@ -425,6 +443,53 @@ export function Viewer({ active }: { active: ActiveScene }) {
         <span className="spacer" />
         <span className="viewer-hint">{hint}</span>
       </div>
+    </div>
+  );
+}
+
+/** 数値入力の欄 (カーソルの右下、キャンバスの中に収める) */
+function CoordBox({
+  text,
+  error,
+  at,
+  size,
+  onChange,
+  onSubmit,
+  onCancel,
+}: {
+  text: string;
+  error: string | null;
+  at: Point | null;
+  size: { w: number; h: number };
+  onChange: (s: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useTranslation();
+  const W = 280;
+  const H = 56;
+  const x = at ? Math.max(4, Math.min(at[0] + 16, size.w - W - 4)) : 8;
+  const y = at ? Math.max(4, Math.min(at[1] + 16, size.h - H - 4)) : Math.max(4, size.h - H - 8);
+  return (
+    <div className="coord-input" style={{ left: x, top: y, width: W }}>
+      <input
+        className="input mono"
+        autoFocus
+        aria-label={t("coordInput.label")}
+        value={text}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            e.preventDefault();
+            onSubmit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+      />
+      <div className={error ? "coord-error" : "coord-hint"}>{error ?? t("coordInput.hint")}</div>
     </div>
   );
 }

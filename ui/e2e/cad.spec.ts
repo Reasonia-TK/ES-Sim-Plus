@@ -151,3 +151,58 @@ test("edits the domain on the canvas: moves a vertex and bends an edge", async (
   await selectNode(page, "境界条件");
   await expect(page.locator(".settings-panel")).toContainText("Dirichlet 100 V");
 });
+
+test("snaps to an endpoint and a midpoint while drawing (P7c)", async ({ page }) => {
+  await openApp(page);
+  const at = await fitView(page);
+  await tool(page, "線 (スケッチ)");
+  // 誘電体 diel1 の左下の角 (40, 10) の近く: グリッドなら (41, 10) だが端点に合う
+  await clickAt(page, at(40.5, 9.6));
+  // 下の辺の中点 (50, 10) の近く: グリッドなら (51, 10) だが中点に合う
+  await clickAt(page, at(50.6, 10.2));
+  await page.keyboard.press("Escape");
+  await selectNode(page, "スケッチ");
+  await expect(page.locator(".settings-panel")).toContainText("(40, 10) → (50, 10) mm");
+});
+
+test("enters coordinates by typing: relative, polar and a bare length (P7c)", async ({ page }) => {
+  await openApp(page);
+  const at = await fitView(page);
+  const canvas = page.getByRole("application");
+  const box = page.getByLabel("座標の入力", { exact: true });
+  // 矩形: 1 つ目の角をクリックしてから、反対の角を @幅, 高さ で
+  await tool(page, "矩形");
+  await clickAt(page, at(5, 5));
+  await canvas.press("@");
+  await box.fill("@20, 10");
+  await box.press("Enter");
+  await expect(page.locator(".settings-panel .panel-title")).toContainText("region1");
+  await expect(page.getByLabel("x 3", { exact: true })).toHaveValue("25");
+  await expect(page.getByLabel("y 3", { exact: true })).toHaveValue("15");
+  // 線: 始点を x, y、終点を @長さ<角度
+  await tool(page, "線 (スケッチ)");
+  await canvas.press("1");
+  await box.fill("10, 30");
+  await box.press("Enter");
+  await canvas.press("@");
+  await box.fill("@15<0");
+  await box.press("Enter");
+  await page.keyboard.press("Escape");
+  // 円 (スケッチ): 中心をクリックし、カーソルの向きに半径だけ打つ
+  await page.getByRole("radio", { name: "スケッチ" }).click();
+  await tool(page, "円");
+  await clickAt(page, at(75, 25));
+  await page.mouse.move(...at(85, 25));
+  await canvas.press("5");
+  await box.press("Enter");
+  // 読めない入力は欄に理由が出る
+  await tool(page, "線 (スケッチ)");
+  await canvas.press("@");
+  await box.fill("@3, 4");
+  await box.press("Enter");
+  await expect(page.locator(".coord-error")).toBeVisible();
+  await box.press("Escape");
+  await selectNode(page, "スケッチ");
+  await expect(page.locator(".settings-panel")).toContainText("(10, 30) → (25, 30) mm");
+  await expect(page.locator(".settings-panel")).toContainText("(75, 25), r = 5 mm");
+});

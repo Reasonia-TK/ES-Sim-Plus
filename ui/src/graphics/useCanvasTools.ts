@@ -5,6 +5,9 @@
 // - 作図: 折れ線 (A で円弧の段、L で直線に戻る、最初の点で閉じる)・矩形・円 (描く先は領域かスケッチ)、線 (続けて描く)、
 //   3 点の円弧、囲まれた所から領域
 // - 配置 (2 点)、プローブ・計測、移動 (中ボタンか Space + ドラッグ)
+// - スナップ (P7c): 端点・中点・中心・交点・垂線・接線 (オブジェクト) のあとグリッド。Alt を押している間は合わせない。
+//   F3 でスナップ全体のオン・オフ
+// - 数値入力 (P7c): 点を置く道具で数字・@ などを打つと座標の欄が開く (cad/coordInput.ts の書き方)
 
 import type { TFunction } from "i18next";
 import type { Draft } from "immer";
@@ -21,9 +24,12 @@ import {
 } from "react";
 import { logInfo, logWarning } from "../app/messages";
 import { Arrangement } from "../cad/arrangement";
+import { parseCoordInput } from "../cad/coordInput";
+import { buildSnapScene, findSnap, type SnapResult, type SnapSource } from "../cad/snap";
 import { bulgeThrough, closestPoint, midpoint, pathSegs, segFromBulge, type Seg } from "../cad/geom";
 import { bulgesOf, type PathData } from "../cad/path";
 import { useDocument } from "../model/documentStore";
+import { usePrefs } from "../prefs/prefs";
 import type { EdgeRemapReport } from "../model/domainOps";
 import {
   placeCollector,
@@ -77,6 +83,20 @@ const TWO_POINT: Tool[] = ["rect", "circle", "profile", "emitter", "injector", "
 
 /** 曲げたときに直線に戻す弦からの距離 [px] */
 const STRAIGHTEN_PX = 4;
+
+/** オブジェクトスナップの届く距離 [px] */
+const SNAP_APERTURE_PX = 10;
+
+/** 点を置く道具 (数値入力を受ける) */
+const POINT_TOOLS: Tool[] = ["polyline", "line", "arc", "fill", "probe", ...TWO_POINT];
+
+/** 数値入力を始める文字 */
+const COORD_START = /^[0-9.@+\-(]$/;
+
+/** 編集している形の持ち主 (スナップで自分自身に合わせないため) */
+function ownerOf(target: EditTarget): string {
+  return target.kind === "domain" ? "domain" : `${target.kind}:${target.id}`;
+}
 
 /** ポインタを捕まえる (キャンバスの外へ出てもドラッグを続ける。作ったイベントでは捕まえられないので無視) */
 function capture(el: HTMLElement, id: number): void {
@@ -149,6 +169,15 @@ export interface CanvasTools {
   fillPreview: PathData | null;
   edit: EditObject | null;
   picked: PickRef[];
+  /** いま合っているオブジェクトスナップ (印を出す) */
+  snapMark: SnapResult | null;
+  /** 数値入力の欄 (null は閉じている) */
+  coordText: string | null;
+  coordError: string | null;
+  setCoordText: (s: string) => void;
+  /** 数値入力を確定する (点を置けたら true) */
+  submitCoord: () => boolean;
+  closeCoord: () => void;
 }
 
 export function useCanvasTools({ camera, setCamera, markUserMoved, project, scene, placements, t }: CanvasToolsArgs): CanvasTools {
@@ -164,6 +193,10 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
   const [preview, setPreview] = useState<Preview>({});
   const [measure, setMeasure] = useState<[Point, Point] | null>(null);
   const [panning, setPanning] = useState(false);
+  const [snapMark, setSnapMark] = useState<SnapResult | null>(null);
+  const [coordText, setCoordText] = useState<string | null>(null);
+  const [coordError, setCoordError] = useState<string | null>(null);
+  const lengthUnit = usePrefs((st) => st.lengthUnit);
   const dragRef = useRef<Drag | null>(null);
   const spaceRef = useRef(false);
   const tool = vs.tool;
@@ -198,6 +231,8 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     resetDrawing();
     setArcMode(false);
     setMeasure(null);
+    setCoordText(null);
+    setSnapMark(null);
   }, [tool]);
   // 選択・形が変わったら (元に戻す・削除など) ドラッグをやめる
   useEffect(() => {
@@ -206,7 +241,49 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
   }, [picked, activeNode, project.geometry, project.cad]);
 
   const snapStep = camera ? gridStep(camera) / 10 : 0;
-  const snap = (p: Point): Point => (vs.snap && snapStep > 0 ? snapPoint(p, snapStep) : p);
+  // スナップの相手: ドメインの辺・領域・スケッチ・配置物の線分・今描いている点 (文書か描いている点が変わったら作り直す)
+  const snapScene = useMemo(() => {
+    const sources: SnapSource[] = [];
+    const d = domainPath(project);
+    sources.push({ owner: "domain", segs: pathSegs(d.polygon, bulgesOf(d)) });
+    for (const r of project.geometry.regions) {
+      if (r.shape) sources.push({ owner: `region:${r.id}`, segs: [], circles: [{ center: r.shape.center, r: r.shape.radius }] });
+      else {
+        const rp = regionPath(r);
+        sources.push({ owner: `region:${r.id}`, segs: pathSegs(rp.polygon, bulgesOf(rp)) });
+      }
+    }
+    for (const e of sketchOf(project)) {
+      if (e.kind === "circle") sources.push({ owner: `sketch:${e.id}`, segs: [], circles: [{ center: e.center, r: e.r }] });
+      else sources.push({ owner: `sketch:${e.id}`, segs: sketchSegs(e) });
+    }
+    for (const pl of placements) {
+      const [a, b] = [pl.p1, pl.p2];
+      const segs: Seg[] =
+        pl.kind === "eedf"
+          ? [
+              { kind: "line", a, b: [b[0], a[1]] },
+              { kind: "line", a: [b[0], a[1]], b },
+              { kind: "line", a: b, b: [a[0], b[1]] },
+              { kind: "line", a: [a[0], b[1]], b: a },
+            ]
+          : [{ kind: "line", a, b }];
+      sources.push({ owner: "placement", segs });
+    }
+    sources.push({ owner: "draw", segs: [], points: pts });
+    return buildSnapScene(sources);
+  }, [project, placements, pts]);
+
+  /** 点を合わせる: オブジェクトスナップ、なければグリッド。Alt・スナップを切っているときはそのまま */
+  const snapAt = (raw: Point, opts: { alt?: boolean; exclude?: string | null } = {}): { point: Point; mark: SnapResult | null } => {
+    if (!vs.snap || opts.alt || !camera) return { point: raw, mark: null };
+    const ref = pts.length ? pts[pts.length - 1] : null;
+    const obj = findSnap(snapScene, raw, SNAP_APERTURE_PX / camera.scale, camera.scale, vs.snapKinds, ref, opts.exclude ?? null);
+    if (obj) return { point: obj.point as Point, mark: obj };
+    if (vs.snapKinds.grid && snapStep > 0) return { point: snapPoint(raw, snapStep), mark: null };
+    return { point: raw, mark: null };
+  };
+  const snap = (p: Point, alt = false): Point => snapAt(p, { alt }).point;
 
   // 囲まれた所から領域を作る道具: 平面の配置は文書が変わったときだけ作り直す
   const arrangement = useMemo(() => (tool === "fill" ? new Arrangement(allCurves(project)) : null), [tool, project]);
@@ -383,6 +460,9 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
   const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const el = e.currentTarget;
     el.focus({ preventScroll: true });
+    // キャンバスをクリックしたら数値入力は閉じる (クリックした点を置く)
+    setCoordText(null);
+    setCoordError(null);
     if (!camera) return;
     const [sx, sy] = localPoint(e, el);
     if (e.button === 1 || (e.button === 0 && spaceRef.current)) {
@@ -430,8 +510,12 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     const [sx, sy] = localPoint(e, e.currentTarget);
     const raw = toWorld(camera, sx, sy);
     setHover(raw);
-    setCursor(snap(raw));
     const d = dragRef.current;
+    // ドラッグしている形の自分自身には合わせない
+    const exclude = d && (d.kind === "path" || d.kind === "radius") ? ownerOf(d.target) : null;
+    const sn = snapAt(raw, { alt: e.altKey, exclude });
+    setCursor(sn.point);
+    setSnapMark(sn.mark);
     if (!d) return;
     if (d.kind === "pan") {
       const dx = e.clientX - d.lastX;
@@ -454,10 +538,10 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
         setPreview({ edit: editBend(d.path, i, chord <= STRAIGHTEN_PX ? 0 : bulgeThrough(a, raw, b)) });
       } else {
         const idx = d.how.op === "move" ? d.how.index : d.how.op === "splitMove" ? d.how.edge + 1 : 0;
-        setPreview({ edit: editMove(d.path, idx, snap(raw)) });
+        setPreview({ edit: editMove(d.path, idx, sn.point) });
       }
     } else if (d.kind === "radius") {
-      const q = snap(raw);
+      const q = sn.point;
       setPreview({ radius: Math.max(0, Math.hypot(q[0] - d.center[0], q[1] - d.center[1])) });
     } else if (d.kind === "move") {
       let dx = raw[0] - d.start[0];
@@ -484,7 +568,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     const [sx, sy] = localPoint(e, e.currentTarget);
     const isClick = Math.hypot(sx - d.x, sy - d.y) < CLICK_TOLERANCE_PX;
     const raw = toWorld(camera, sx, sy);
-    const pt = snap(raw);
+    const pt = snap(raw, e.altKey);
     if (!isClick) {
       if (d.kind === "path" && preview.edit) {
         const result = preview.edit;
@@ -508,15 +592,19 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     setPreview({});
     // クリック
     const shift = d.kind === "click" || d.kind === "box" ? d.shift : false;
-    if (tool === "select") {
-      selectAt(raw, shift);
-    } else if (tool === "polyline") {
+    if (tool === "select") selectAt(raw, shift);
+    else placePoint(pt, raw, nearFirst(sx, sy));
+  };
+
+  /** 点を置く (クリック・数値入力)。closing は折れ線の最初の点に戻った */
+  const placePoint = (pt: Point, raw: Point, closing: boolean) => {
+    if (tool === "polyline") {
       if (pts.length === 0) {
         setPts([pt]);
         return;
       }
       const last = pts[pts.length - 1];
-      if (nearFirst(sx, sy)) {
+      if (closing) {
         finishPolyline(true, arcMode && through ? bulgeThrough(last, through, pts[0]) : 0);
         return;
       }
@@ -582,6 +670,25 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     }
   };
 
+  const submitCoord = (): boolean => {
+    if (coordText === null) return false;
+    const last = pts.length ? pts[pts.length - 1] : null;
+    const direction: Point | null = last && hover ? [hover[0] - last[0], hover[1] - last[1]] : null;
+    const r = parseCoordInput(coordText, { last, direction, units: { lengthUnit, axisymmetric: false } });
+    if (!r.ok) {
+      setCoordError(t(`coordInput.error.${r.error}`));
+      return false;
+    }
+    const pt = r.point as Point;
+    // 折れ線の最初の点と同じ座標なら閉じる
+    const tol = camera ? 1e-6 / camera.scale : 0;
+    const closing = tool === "polyline" && pts.length >= 2 && Math.hypot(pt[0] - pts[0][0], pt[1] - pts[0][1]) <= tol && (pts.length >= 3 || bulges.some((b) => b) || through !== null);
+    setCoordText(null);
+    setCoordError(null);
+    placePoint(pt, pt, closing);
+    return true;
+  };
+
   const onDoubleClick = (e: ReactMouseEvent<HTMLCanvasElement>) => {
     if (!camera) return;
     const [sx, sy] = localPoint(e, e.currentTarget);
@@ -603,6 +710,18 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLCanvasElement>) => {
+    // 点を置く道具で数字などを打つと数値入力の欄を開く
+    if (POINT_TOOLS.includes(tool) && COORD_START.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      setCoordText(e.key);
+      setCoordError(null);
+      return;
+    }
+    if (e.key === "F3") {
+      e.preventDefault();
+      vs.setSnap(!vs.snap);
+      return;
+    }
     const busy = pts.length > 0 || through !== null || dragRef.current !== null || !!preview.edit || !!preview.move || preview.radius != null || !!preview.box;
     if (e.key === "Escape") {
       e.preventDefault();
@@ -663,6 +782,7 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     onPointerLeave: () => {
       setCursor(null);
       setHover(null);
+      setSnapMark(null);
     },
     onDoubleClick,
     onKeyDown,
@@ -675,6 +795,18 @@ export function useCanvasTools({ camera, setCamera, markUserMoved, project, scen
     fillPreview,
     edit,
     picked,
+    snapMark,
+    coordText,
+    coordError,
+    setCoordText: (text: string) => {
+      setCoordText(text);
+      setCoordError(null);
+    },
+    submitCoord,
+    closeCoord: () => {
+      setCoordText(null);
+      setCoordError(null);
+    },
   };
 }
 

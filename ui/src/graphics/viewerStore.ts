@@ -3,6 +3,7 @@
 
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { SNAP_KINDS, type SnapKind } from "../cad/snap";
 import type { Point } from "../model/project";
 import { DEFAULT_COLORMAP, type ColormapKey } from "./colormaps";
 import type { ManualRange } from "./fieldScale";
@@ -81,10 +82,16 @@ const DEFAULT_OVERLAYS: Record<OverlayKey, boolean> = {
   trajectories: true,
 };
 
+/** スナップの種類の既定 (全てオン) */
+const DEFAULT_SNAP_KINDS: Record<SnapKind, boolean> = Object.fromEntries(SNAP_KINDS.map((k) => [k, true])) as Record<SnapKind, boolean>;
+
 interface ViewerState {
   tool: Tool;
   drawTarget: DrawTarget;
+  /** スナップ全体のオン・オフ */
   snap: boolean;
+  /** スナップの種類ごと (オブジェクトスナップとグリッド) */
+  snapKinds: Record<SnapKind, boolean>;
   rulerFont: RulerFont;
   quantity: StaticQuantity;
   colormap: ColormapKey;
@@ -100,6 +107,7 @@ interface ViewerState {
   setTool: (t: Tool) => void;
   setDrawTarget: (t: DrawTarget) => void;
   setSnap: (v: boolean) => void;
+  setSnapKind: (k: SnapKind, v: boolean) => void;
   setRulerFont: (f: RulerFont) => void;
   setQuantity: (q: StaticQuantity) => void;
   setColormap: (c: ColormapKey) => void;
@@ -117,6 +125,7 @@ export const useViewer = create<ViewerState>()(
       tool: "select",
       drawTarget: "region",
       snap: true,
+      snapKinds: { ...DEFAULT_SNAP_KINDS },
       rulerFont: "m",
       quantity: "v",
       colormap: DEFAULT_COLORMAP,
@@ -130,6 +139,7 @@ export const useViewer = create<ViewerState>()(
       setTool: (tool) => set((s) => ({ tool, probe: tool === "probe" ? s.probe : null })),
       setDrawTarget: (drawTarget) => set({ drawTarget }),
       setSnap: (snap) => set({ snap }),
+      setSnapKind: (k, v) => set((st) => ({ snapKinds: { ...st.snapKinds, [k]: v } })),
       setRulerFont: (rulerFont) => set({ rulerFont }),
       // 量を変えたら手動の範囲は外す (単位が違う)
       setQuantity: (quantity) => set((s) => (s.quantity === quantity ? {} : { quantity, range: { min: null, max: null }, probe: null })),
@@ -144,10 +154,10 @@ export const useViewer = create<ViewerState>()(
     {
       name: "es-sim-ui.viewer",
       storage: createJSONStorage(() => localStorage),
-      partialize: (s) => ({ snap: s.snap, drawTarget: s.drawTarget, rulerFont: s.rulerFont, colormap: s.colormap, overlays: s.overlays }),
+      partialize: (s) => ({ snap: s.snap, snapKinds: s.snapKinds, drawTarget: s.drawTarget, rulerFont: s.rulerFont, colormap: s.colormap, overlays: s.overlays }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<ViewerState>;
-        return { ...current, ...p, overlays: { ...DEFAULT_OVERLAYS, ...(p.overlays ?? {}) } };
+        return { ...current, ...p, overlays: { ...DEFAULT_OVERLAYS, ...(p.overlays ?? {}) }, snapKinds: { ...DEFAULT_SNAP_KINDS, ...(p.snapKinds ?? {}) } };
       },
     },
   ),
