@@ -185,3 +185,15 @@ GPU 計算まで動作」): GPU の計算を NVRTC だけで動くようにし (
 スクリプトで確かめた (P8c)。インストーラ 156 MB (P6f の onefile は 1.17 GB で GPU が動かなかった)。CI のリリース・
 使用許諾・署名の差し込み口・文書 (P8d)。**SAC 環境での起動確認はしていない**: 署名しない判断 (当面) のため
 (SAC は署名の無いファイルを止める)。署名するときに ES_SIM_SIGN_SCRIPT で足して確かめる。
+
+## リリースの CI を GitHub で走らせた記録 (2026-10-02、手動実行)
+
+- 1 回目 (run 36883015067): uv の venv (CuPy・NVRTC の wheel)・GPU の無いランナーでの PyInstaller のビルド・凍結した
+  バックエンドの自己テスト (CPU の項目は OK、GPU は「NVIDIA のドライバが見つかりません」で飛ばす) まで通り、
+  `collect_licenses.py` の日本語の出力がランナーの cp1252 で UnicodeEncodeError → 標準出力を UTF-8 に (d7870b1)。
+- 2 回目 (run 36885151051): インストーラのビルド (154 MB) まで通り、黙ってインストール (29 s)・同梱のバックエンドの
+  自己テストも通った。アプリは起動して同梱のバックエンドを立ち上げ、UI はバックエンドにつながった (backend.log に
+  `/v2/schema` とイベントの接続) が、WebView2 の CDP のポートが 60 s 開かず止まった。手元では Windows PowerShell
+  5.1 でも PowerShell 7 でも開く (ランナー固有)。→ `verify_installer.ps1 -AllowNoCdp`: CDP が開かなければ手がかり
+  (WebView2 のランタイムの版・データの置き場・ES-Sim の WebView2 のプロセスの引数) を出し、backend.log で UI の接続を
+  確かめて続ける (UI の操作は飛ばす)。手元でポートを塞いで確かめた。release.yml はこれを使う。

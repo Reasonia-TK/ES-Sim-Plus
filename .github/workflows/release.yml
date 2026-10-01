@@ -64,7 +64,9 @@ jobs:
         run: ./scripts/build_app.ps1
       - name: Verify the installer (CPU)
         shell: pwsh
-        run: ./scripts/verify_installer.ps1 -NoGpu
+        # GitHub のランナーでは WebView2 の CDP が開かないことがある (2026-10-02)。そのときは手がかりを出し、UI が
+        # バックエンドにつながったことを backend.log で確かめて続ける (-AllowNoCdp)
+        run: ./scripts/verify_installer.ps1 -NoGpu -AllowNoCdp
       - name: Collect logs on failure
         if: failure()
         shell: pwsh
