@@ -1,3 +1,0 @@
-# 配布用バックエンドバイナリはコミットしない (scripts/build_backend.* が生成する)
-*
-!.gitignore

@@ -23,21 +23,6 @@
         }
       ]
     },
-    "shell:default",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "binaries/es-sim-backend",
-          "sidecar": true,
-          "args": [
-            "--port",
-            {
-              "validator": "\\d+"
-            }
-          ]
-        }
-      ]
-    }
+    "shell:default"
   ]
 }

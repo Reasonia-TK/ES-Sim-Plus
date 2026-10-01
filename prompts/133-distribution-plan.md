@@ -128,3 +128,28 @@
   読まれていないことを見る形に (venv に wheel があるとそちらが読まれるため)。
 - Tauri 側 (onedir をリソースとして同梱、`main.rs` の起動) は P8c。それまで `npm run tauri build` は旧来の
   `externalBin` のまま (`docs/PACKAGING.md` に移行中と書いた)。
+
+## P8c の記録 (2026-10-01)
+
+- **Tauri**: サイドカー (`externalBin`、onefile) をやめ、バックエンドの onedir をリソースの `backend/` に同梱する。
+  `tauri.conf.json` は `bundle.active: false` (exe だけ。`tauri dev`・`cargo check` はバックエンドのビルドを要らない)、
+  配布ビルドは `tauri.bundle.json` を `--config` で重ねる (NSIS・リソース)。バックエンドの無いインストーラは作れない。
+  `main.rs` はリソースの `backend\es-sim-backend.exe` を `--port` 付きで起動 (無ければ `backend.log` に記録して
+  GUI は開く)、終了時はプロセスの木ごと止める。サイドカー用の権限 (`shell:allow-execute`) と `binaries/` を消した。
+- **MSI は作らない**: Tauri の MSI はマシン全体へのインストール (管理者権限) で、ここでは確かめられないため。
+  NSIS は今のユーザーだけ (`%LOCALAPPDATA%\ES-Sim`、管理者権限なし)。要るときは `targets` に `"msi"` を足す。
+- **スクリプト**: `scripts/build_app.ps1 [-RequireGpu] [-SkipBackend]` (バックエンド → Tauri → インストーラ)、
+  `scripts/verify_installer.ps1 [-Installer] [-KeepInstalled]` (一時フォルダへ `/S /NS /D=` でインストール →
+  同梱のバックエンドの自己テスト → CUDA の環境変数を消して PATH から CUDA Toolkit を除き、WebView2 のデータを
+  一時フォルダにし、CDP のポートを開けてアプリを起動 → `ui/e2e-installed` (Playwright を CDP でつなぐ) →
+  ウィンドウを閉じてバックエンドが残らないこと → `uninstall.exe /S`)。
+- **UI の確認** (`ui/e2e/gpuFlow.ts`): バージョン情報の計算デバイスが GPU、サンプルの容量結合プラズマを直交格子
+  (v2。PIC は GPU だけ) にして 300 ステップ → 完了、実行のページ (実行時間の内訳・300 / 300)。開発用の E2E にも
+  `e2e/gpu.spec.ts` (バックエンドが GPU を使えなければ飛ばす)。閉じる前に新規 (保存しない) にする (未保存の確認で
+  ウィンドウが閉じなかった)。
+- **結果** (`verify_installer.ps1` がすべて通った): インストーラ 156 MB (MSI も作っていたときは 211 MB)、
+  インストール 11 s・505 MB、同梱のバックエンドの自己テストは全部 OK (NVRTC はインストール先から)、起動から
+  ウィンドウ (CDP) まで 0.8 s・バックエンドにつながるまでさらに約 4 s、UI から GPU の PIC が完了 (300 ステップ
+  0.7 s)、閉じるとバックエンドも止まり、アンインストールで消える。**119 の P8 の完了基準「インストーラから GPU
+  計算まで動作」をこの PC で確かめた** (CUDA の無い PC は環境変数と PATH から CUDA Toolkit を除いて模した。
+  別の PC での確認はしていない)。

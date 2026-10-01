@@ -1,7 +1,8 @@
 // Rust シェルは薄く保つ (仕様書 §14)。
-// 配布ビルドでは Python バックエンド (PyInstaller 製) をサイドカーとして
-// 自動起動し、アプリ終了時に kill する (prompts/44)。
-// 開発モード (`tauri dev`) ではサイドカーを起動しない — デバッグは従来通り
+// 配布ビルドでは Python バックエンド (PyInstaller の onedir) を自動起動し、アプリ終了時に止める (prompts/44)。
+// バックエンドはリソースの backend/ に同梱する (tauri.bundle.json、prompts/133 P8c。以前は onefile の
+// サイドカー (externalBin) だったが、起動のたびに数百 MB を展開するのをやめた)。
+// 開発モード (`tauri dev`) ではバックエンドを起動しない — デバッグは従来通り
 // 手動 uvicorn (`uvicorn es_sim.server:app --port 8317`) を使う。
 // フロントエンドは UI v2 (`ui/`、prompts/130 P6f)。v1 (`frontend/`) からここへ移した。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -31,8 +32,9 @@ fn log_line(path: &Option<PathBuf>, msg: &str) {
     }
 }
 
-/// サイドカーをプロセスツリーごと止める。PyInstaller の onefile は展開役の親と本体の子の 2 つのプロセスで動き、
-/// 親だけを kill すると本体 (uvicorn) が残ってポートを塞ぐ (P6f の確認で判明、v1 も同じだった)。
+/// バックエンドをプロセスツリーごと止める。PyInstaller の onefile は展開役の親と本体の子の 2 つのプロセスで動き、
+/// 親だけを kill すると本体 (uvicorn) が残ってポートを塞いだ (P6f)。onedir は 1 つだが、ジョブが起こす子
+/// プロセス (バッチの並列実行など) もまとめて止める。
 #[cfg(windows)]
 fn kill_tree(pid: u32) {
     use std::os::windows::process::CommandExt;
@@ -46,6 +48,12 @@ fn kill_tree(pid: u32) {
 #[cfg(not(windows))]
 fn kill_tree(_pid: u32) {}
 
+/// 同梱したバックエンドの実行ファイル (リソースの backend/、tauri.bundle.json)
+fn backend_exe(app: &tauri::App) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "es-sim-backend.exe" } else { "es-sim-backend" };
+    app.path().resource_dir().ok().map(|d| d.join("backend").join(name))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -53,10 +61,10 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(BackendChild(Mutex::new(None)))
         .setup(|app| {
-            // 配布ビルドのみサイドカーを起動する (cfg!(debug_assertions) で分岐)
+            // 配布ビルドのみバックエンドを起動する (cfg!(debug_assertions) で分岐)
             if !cfg!(debug_assertions) {
                 // GUI (フロントエンド) が AppConfig ディレクトリへ書き込む backend-port.txt を
-                // 読み、サイドカーの --port に渡す (prompts/45)。
+                // 読み、バックエンドの --port に渡す (prompts/45)。
                 // 読み取り専用: ディレクトリ・ファイルが無ければ作成せず既定値 8317 を使う。
                 // parse失敗・不存在時も既定値 8317 にフォールバックする。
                 let config_dir = app.path().app_config_dir().ok();
@@ -70,17 +78,20 @@ fn main() {
                     .and_then(|dir| std::fs::read_to_string(dir.join("backend-port.txt")).ok())
                     .and_then(|s| s.trim().parse::<u32>().ok())
                     .unwrap_or(8317);
-                log_line(&log_path, &format!("spawning es-sim-backend --port {port}"));
-                let sidecar = match app.shell().sidecar("es-sim-backend") {
-                    Ok(cmd) => cmd.args(["--port", &port.to_string()]),
-                    Err(e) => {
-                        // 以前は expect でパニックしていたが、それだとアプリごと落ちて
-                        // 原因が全く分からない。ログに残して GUI は起動させる。
-                        log_line(&log_path, &format!("sidecar command error: {e}"));
+                let exe = match backend_exe(app) {
+                    Some(p) if p.is_file() => p,
+                    other => {
+                        // パニックするとアプリごと落ちて原因が分からないので、ログに残して GUI は起動させる
+                        log_line(&log_path, &format!("backend not found: {other:?}"));
                         return Ok(());
                     }
                 };
-                match sidecar.spawn() {
+                log_line(&log_path, &format!("spawning {} --port {port}", exe.display()));
+                let command = app
+                    .shell()
+                    .command(exe.to_string_lossy().to_string())
+                    .args(["--port", &port.to_string()]);
+                match command.spawn() {
                     Ok((mut rx, child)) => {
                         log_line(&log_path, &format!("spawned pid={}", child.pid()));
                         *app.state::<BackendChild>().0.lock().unwrap() = Some(child);

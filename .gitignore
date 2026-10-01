@@ -16,7 +16,7 @@ ui/playwright-report/
 ui/src-tauri/target/
 ui/src-tauri/gen/
 
-# 配布パッケージ (PyInstaller / サイドカー。binaries/ 内は同梱の .gitignore で除外)
+# 配布パッケージ (PyInstaller の作業フォルダ。生成物の backend/dist/ は上の dist/ で除外)
 backend/build/
 backend/*.spec.bak
 
