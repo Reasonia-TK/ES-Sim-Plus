@@ -46,6 +46,7 @@ const en: Resources = {
     parallel_plates: "Parallel plates + dielectric",
     coaxial: "Coaxial",
     ccp_demo: "Capacitively coupled plasma (PIC)",
+    gec_cell: "GEC reference cell (2D fluid, axisymmetric)",
     egun_rz: "Electron gun (axisymmetric)",
     fn_diode: "FN emission diode (axisymmetric)",
   },

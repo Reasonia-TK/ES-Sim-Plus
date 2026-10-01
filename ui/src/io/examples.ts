@@ -12,7 +12,7 @@ export interface Example {
 }
 
 /** 表示順 (無いものは名前順で後ろに) */
-const ORDER = ["parallel_plates", "coaxial", "ccp_demo", "egun_rz", "fn_diode"];
+const ORDER = ["parallel_plates", "coaxial", "ccp_demo", "gec_cell", "egun_rz", "fn_diode"];
 
 export const EXAMPLES: Example[] = Object.entries(modules)
   .map(([path, data]) => ({ key: path.replace(/^.*\//, "").replace(/\.json$/, ""), data }))

@@ -38,7 +38,7 @@ describe("normalizeProject", () => {
   });
 
   it("opens every bundled example", () => {
-    expect(EXAMPLES.map((e) => e.key)).toEqual(["parallel_plates", "coaxial", "ccp_demo", "egun_rz", "fn_diode"]);
+    expect(EXAMPLES.map((e) => e.key)).toEqual(["parallel_plates", "coaxial", "ccp_demo", "gec_cell", "egun_rz", "fn_diode"]);
     for (const ex of EXAMPLES) {
       const { project } = normalizeProject(ex.data);
       expect(project.geometry.domain.polygon.length).toBeGreaterThanOrEqual(3);

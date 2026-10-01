@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "unit": "m",
+  "coord": "rz_x0",
+  "geometry": {
+    "domain": {
+      "polygon": [
+        [0.0, 0.0],
+        [0.1, 0.0],
+        [0.1, 0.0854],
+        [0.0, 0.0854]
+      ]
+    },
+    "regions": [
+      {
+        "id": "rf_electrode",
+        "type": "conductor",
+        "polygon": [[0.0, 0.02], [0.0508, 0.02], [0.0508, 0.03], [0.0, 0.03]],
+        "voltage": 0.0,
+        "voltage_rf": {"amplitude": 100.0, "freq_hz": 13.56e6, "phase_deg": 0.0},
+        "see_gamma": 0.07
+      },
+      {
+        "id": "lower_insulator",
+        "type": "dielectric",
+        "polygon": [[0.0, 0.0], [0.0548, 0.0], [0.0548, 0.03], [0.0508, 0.03], [0.0508, 0.02], [0.0, 0.02]],
+        "eps_r": 2.1,
+        "see_gamma": 0.07
+      },
+      {
+        "id": "lower_shield",
+        "type": "conductor",
+        "polygon": [[0.0548, 0.0], [0.0588, 0.0], [0.0588, 0.03], [0.0548, 0.03]],
+        "voltage": 0.0,
+        "see_gamma": 0.07
+      },
+      {
+        "id": "ground_electrode",
+        "type": "conductor",
+        "polygon": [[0.0, 0.0554], [0.0508, 0.0554], [0.0508, 0.0654], [0.0, 0.0654]],
+        "voltage": 0.0,
+        "see_gamma": 0.07
+      },
+      {
+        "id": "upper_insulator",
+        "type": "dielectric",
+        "polygon": [[0.0, 0.0654], [0.0508, 0.0654], [0.0508, 0.0554], [0.0548, 0.0554], [0.0548, 0.0854], [0.0, 0.0854]],
+        "eps_r": 2.1,
+        "see_gamma": 0.07
+      },
+      {
+        "id": "upper_shield",
+        "type": "conductor",
+        "polygon": [[0.0548, 0.0554], [0.0588, 0.0554], [0.0588, 0.0854], [0.0548, 0.0854]],
+        "voltage": 0.0,
+        "see_gamma": 0.07
+      }
+    ],
+    "boundaries": [
+      {"edges": [0, 1, 2], "type": "dirichlet", "voltage": 0.0, "see_gamma": 0.07},
+      {"edges": [3], "type": "symmetry"}
+    ]
+  },
+  "mesh": {
+    "size": 0.0005,
+    "mode": "cartesian"
+  },
+  "fluid2d": {
+    "init_density_m3": 1.0e15,
+    "init_te_ev": 2.0,
+    "gas_pressure_pa": 13.33,
+    "gas_temperature_k": 300.0,
+    "ion_mass_amu": 39.948,
+    "n_steps": 40000,
+    "frame_every": 2000,
+    "avg_steps": 4000,
+    "phase_bins": 16
+  }
+}

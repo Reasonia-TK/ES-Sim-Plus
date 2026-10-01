@@ -46,6 +46,7 @@ const ja = {
     parallel_plates: "平行平板 + 誘電体",
     coaxial: "同軸",
     ccp_demo: "容量結合プラズマ (PIC)",
+    gec_cell: "GEC 基準セル (流体 2D、軸対称)",
     egun_rz: "電子銃 (軸対称)",
     fn_diode: "FN 放出ダイオード (軸対称)",
   },
