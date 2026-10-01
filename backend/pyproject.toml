@@ -38,5 +38,11 @@ constraint-dependencies = ["numba<0.67", "cupy-cuda13x<14.1"]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[dependency-groups]
+dist = [
+    "nvidia-cuda-nvrtc>=13.0,<13.1",
+    "pyinstaller>=6.22",
+]
+
 [tool.setuptools.packages.find]
 include = ["es_sim*"]

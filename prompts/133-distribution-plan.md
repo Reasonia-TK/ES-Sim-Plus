@@ -91,5 +91,40 @@
 - **テスト**: `tests/test_v2_gpu_nvrtc_only.py` (16): 逆行列 (大きさ 7 通り)・特異な問題の擬似逆行列が CPU 版と一致・
   正定値でない・対称でない行列は CPU へ・`cuda_status` の条件 6 通り (偽の cupy)・NVRTC だけの環境 (CUDA_PATH に
   NVRTC の 2 つの DLL だけ、PATH から CUDA Toolkit を除く) で GPU のテスト 15 件を子の pytest で走らせ、読まれた
-  DLL に cuBLAS などが無く NVRTC はそのフォルダから (Windows + GPU のときだけ、`tests/cuda_dll_guard.py`)。
+  DLL に cuBLAS などが無いこと (Windows + GPU のときだけ、`tests/cuda_dll_guard.py`)。
   同じ環境で GPU 関係のテスト 215 件が通ることも確かめた。pytest 全体 797 passed (2 skipped)、Vitest 208。
+
+## P8b の記録 (2026-10-01)
+
+- **依存**: 依存グループ `dist` (`pyinstaller` 6.22.3・`nvidia-cuda-nvrtc` 13.0.88) を uv で追加。`uv sync --extra gpu
+  --group dist` で入る (CI のテストは pip の `.[dev]` なので影響なし)。開発の venv でも CuPy はこの wheel の NVRTC を
+  読むようになった (CUDA Toolkit と同じ 13.0)。
+- **spec** (`backend/es_sim_server.spec`): onedir (`dist/es-sim-backend/` に exe と `_internal/`)。CuPy・cupy_backends・
+  cupyx のサブモジュール (拡張の中の import は静的解析に掛からない) と CuPy のヘッダ・`.data`、NVRTC の 2 つの DLL を
+  `_internal/cuda/bin/x64` に (使用許諾は `_internal/cuda/License.txt`)、CUDA Toolkit から拾われるほかの DLL は除く。
+  es_sim はソースのまま (numba のキャッシュが `_internal/es_sim/__pycache__` に書かれることを確かめた)。Python は
+  UTF-8 モード (標準出力が UTF-8)。実行時フック `pyi_rth_es_sim.py` が CUDA_PATH を `_internal/cuda` に向ける。
+- **凍結して分かったこと** (どれも直した):
+  - `cupy/__init__` が `cupy.testing` を LazyLoader で `find_spec` するので、テスト用でも同梱が要る (無いと
+    `import cupy` が AttributeError)。
+  - `cuda.pathfinder` のサブパッケージは `__init__.py` が無く `collect_submodules` が見落とす → ファイルを数える。
+  - CuPy がカーネルのコンパイルで CUDA のヘッダを探すとき、cuda.pathfinder が `sys.executable -m
+    cuda.pathfinder._dynamic_libs.dynamic_lib_subprocess` を子プロセスで起動する。凍結した exe ではこれが
+    argparse のエラーになり CuPy が止まった → `run_server.py` が `-m cuda.pathfinder.*` を受けて実行する
+    (`_run_child_module`、1 プロセスで 1 回・0.3 s)。
+- **自己テスト** (`es_sim/selftest.py`、`es-sim-backend selftest [--require-gpu] [--no-gpu] [--json PATH]`): 環境・numba
+  (JIT)・gmsh と FEM (平行平板の静電容量、解析解と 1e-14)・AMR の静電場 (CPU、pyamg、φ = 1000·x)・DXF (書き出しと
+  読み直し)・Boltzmann (boltzpmp)・GPU (名前・ドライバ・NVRTC の場所)・GPU の静電場 (GMG、CPU と 2e-15 V)・GPU の
+  AMR (AMG-PCG)・GPU の PIC (プラズマ振動 2·f_pe と 0.1%)・GPU の DSMC (閉じた箱の平衡)・GPU の流体 (CPU と 5e-14)。
+- **ビルド** (`scripts/build_backend.ps1 [-RequireGpu] [-SkipTest]`): venv の PyInstaller で onedir を作り、CUDA_PATH
+  などを消して PATH から CUDA Toolkit を除いた状態で自己テスト。Windows PowerShell 5.1 で通した (BOM 付き)。
+  `scripts/build_backend.sh` (Linux の検証用) も onedir と自己テストに。
+- **結果**: 493 MB・2384 ファイル (P6f の onefile は 1.17 GB・展開後 1.76 GB で CuPy が動かなかった)。内訳は
+  llvmlite 115・NVRTC 92・gmsh 86・CuPy 58 (ヘッダ 22)・SciPy 50・OpenBLAS 41 MB など。ビルド 45〜55 s。CUDA の環境
+  変数なしで起動から `/health` まで 1.5 s (GPU の確認を含む)、自己テストは全部 OK (16〜21 s)、NVRTC は
+  `_internal\cuda\bin\x64` から読まれた。
+- **テスト**: `tests/test_selftest.py` (3: CPU の確認が通り GPU は指定で飛ばす・GPU の確認・GPU が無いときは
+  `--require-gpu` だけ失敗で JSON にも)。NVRTC だけの環境のテストは、NVRTC が CUDA Toolkit のフォルダから
+  読まれていないことを見る形に (venv に wheel があるとそちらが読まれるため)。
+- Tauri 側 (onedir をリソースとして同梱、`main.rs` の起動) は P8c。それまで `npm run tauri build` は旧来の
+  `externalBin` のまま (`docs/PACKAGING.md` に移行中と書いた)。

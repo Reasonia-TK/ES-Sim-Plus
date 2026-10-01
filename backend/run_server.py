@@ -5,6 +5,8 @@ Tauri のサイドカーとして起動され、uvicorn で FastAPI サーバー
 
 使い方:
     es-sim-backend [--port 8317] [--host 127.0.0.1]
+    # 配布版の自己テスト (同梱した gmsh・numba・CuPy と NVRTC などを小さな計算で確かめる、prompts/133)
+    es-sim-backend selftest [--require-gpu] [--no-gpu] [--json PATH]
     # PIC バッチ実行 (prompts/78)。複数プロジェクトJSONを別プロセスで並列実行し、
     # GUIの「結果付き保存」形式で書き出す (配布版ユーザーもスイープに使える)
     es-sim-backend batch case1.json case2.json ... [--parallel N] [--out DIR]
@@ -19,7 +21,33 @@ import sys
 import uvicorn
 
 
+#: 凍結した exe を ``<exe> -m <module>`` で子プロセスとして呼んでよいモジュール (_run_child_module)
+_CHILD_MODULES = ("cuda.pathfinder.",)
+
+
+def _run_child_module() -> None:
+    """凍結した exe が ``<exe> -m <module> ...`` で子プロセスとして呼ばれたら、その module を実行して終わる。
+
+    PyInstaller の exe では sys.executable がこの exe なので、``sys.executable -m`` で自分を子プロセスとして呼ぶ
+    ライブラリはここへ来る。cuda.pathfinder は CuPy がカーネルをコンパイルするときに CUDA のヘッダの場所を
+    子プロセスで探る (無いと argparse がエラーにして CuPy が止まった、prompts/133)。決まったモジュールだけを受ける。
+    """
+    if len(sys.argv) >= 3 and sys.argv[1] == "-m" and sys.argv[2].startswith(_CHILD_MODULES):
+        import runpy
+
+        module = sys.argv[2]
+        sys.argv = [sys.argv[0], *sys.argv[3:]]
+        runpy.run_module(module, run_name="__main__", alter_sys=True)
+        sys.exit(0)
+
+
 def _run_server(args: argparse.Namespace) -> None:
+    # GPU を使えるか (と使えない理由) を待ち受けの前に確かめてログへ (アプリの AppConfig/backend.log に残る)。
+    # 初回の /health が CuPy の読み込みとカーネルのコンパイルを待たないようにする意味もある (prompts/133)
+    from es_sim.device import cuda_status
+
+    ok, info = cuda_status()
+    print(f"ES-Sim backend: GPU {'あり' if ok else 'なし'} ({info})", flush=True)
     # ワーカー1・リロード無効 (配布バイナリ)。ログは標準出力へ
     uvicorn.run(
         "es_sim.server:app",
@@ -54,8 +82,16 @@ def main() -> None:
     batch_p.add_argument(
         "--suffix", default="_results", help='出力ファイル名サフィックス (既定 "_results")'
     )
+    # selftest の引数は es_sim.selftest.main が解釈する
+    sub.add_parser("selftest", help="配布版の自己テスト (prompts/133)", add_help=False)
 
-    args = parser.parse_args()
+    args, rest = parser.parse_known_args()
+    if args.cmd == "selftest":
+        from es_sim.selftest import main as selftest_main
+
+        sys.exit(selftest_main(rest))
+    if rest:
+        parser.error(f"不明な引数: {' '.join(rest)}")
 
     if args.cmd == "batch":
         # PyInstaller の単一 exe に同梱された es_sim をそのまま使う (追加の依存なし)
@@ -74,4 +110,5 @@ if __name__ == "__main__":
     # 子プロセスがさらに子プロセスを産む無限増殖 (fork爆弾状態) になる。
     # 非 Windows・非フリーズ環境では no-op なので常時呼んでおいて害はない
     multiprocessing.freeze_support()
+    _run_child_module()
     main()

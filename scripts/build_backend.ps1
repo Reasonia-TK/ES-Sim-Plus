@@ -1,32 +1,59 @@
-﻿# ES-Sim バックエンドの配布ビルド (Windows 用、prompts/44)。
+﻿# ES-Sim バックエンドの配布ビルド (Windows 用、prompts/44、onedir と GPU は prompts/133 P8b)。
 #
-# venv を有効化した PowerShell で実行する:
-#   powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1 [-RequireGpu] [-SkipTest]
 #
-# PyInstaller で backend\dist\es-sim-backend.exe を生成し、Tauri の externalBin が
-# 要求する target triple 付きファイル名 (es-sim-backend-x86_64-pc-windows-msvc.exe)
-# で ui\src-tauri\binaries\ へ配置する (P6f で v1 の frontend\ から移した)。
+# 前提: backend の venv に gpu と依存グループ dist (PyInstaller・NVRTC の wheel) が入っていること
+#   cd backend; uv sync --extra gpu --group dist      (開発用の dev も残すなら --extra dev も)
+#
+# PyInstaller で backend\dist\es-sim-backend\ (onedir: es-sim-backend.exe と _internal\) を作り、CUDA の環境変数を
+# 消して PATH から CUDA Toolkit を除いた状態 (CUDA Toolkit の無い PC と同じ) で自己テスト (selftest) を走らせる。
+# -RequireGpu は GPU を使えないことも失敗にする (GPU のある開発機での確認用。CI は GPU が無いので付けない)。
+param(
+    [switch]$RequireGpu,
+    [switch]$SkipTest
+)
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
-$BinDir = Join-Path $Root "ui\src-tauri\binaries"
+$Backend = Join-Path $Root "backend"
+$Python = Join-Path $Backend ".venv\Scripts\python.exe"
+if (-not (Test-Path $Python)) { throw "backend\.venv がありません。backend で uv sync --extra gpu --group dist を実行してください" }
 
-# ---- target triple の決定 (rustc があればホスト triple、無ければ MSVC 既定) ----
-$Triple = "x86_64-pc-windows-msvc"
-if (Get-Command rustc -ErrorAction SilentlyContinue) {
-    $HostLine = (rustc -vV | Select-String "^host: ").Line
-    if ($HostLine) { $Triple = $HostLine -replace "^host: ", "" }
-}
-
-Write-Host "== PyInstaller ビルド (target: $Triple) =="
-Push-Location (Join-Path $Root "backend")
+Push-Location $Backend
 try {
-    pyinstaller --clean --noconfirm es_sim_server.spec
-    if ($LASTEXITCODE -ne 0) { throw "PyInstaller のビルドに失敗しました" }
+    & $Python -c "import PyInstaller" 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller がありません。backend で uv sync --extra gpu --group dist を実行してください" }
 
-    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-    Copy-Item -Force "dist\es-sim-backend.exe" (Join-Path $BinDir "es-sim-backend-$Triple.exe")
-    Write-Host "== 配置完了: $BinDir\es-sim-backend-$Triple.exe =="
+    Write-Host "== PyInstaller ビルド (onedir) =="
+    & $Python -m PyInstaller --clean --noconfirm es_sim_server.spec
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller のビルドに失敗しました" }
+    $Exe = Join-Path $Backend "dist\es-sim-backend\es-sim-backend.exe"
+
+    if (-not $SkipTest) {
+        Write-Host "== 自己テスト (CUDA の環境変数なし) =="
+        $saved = @{}
+        foreach ($name in @(Get-ChildItem Env: | Where-Object { $_.Name -match '^(CUDA_PATH|CUDA_HOME)' } | ForEach-Object { $_.Name })) {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name)
+            Remove-Item "Env:$name"
+        }
+        $savedPath = $env:PATH
+        $env:PATH = (($env:PATH -split ';') | Where-Object {
+                $_ -and -not ((Test-Path (Join-Path $_ 'nvrtc64_*.dll')) -or (Test-Path (Join-Path $_ 'cublas64_*.dll')) -or
+                    (Test-Path (Join-Path $_ 'x64\nvrtc64_*.dll')))
+            }) -join ';'
+        try {
+            $testArgs = @("selftest")
+            if ($RequireGpu) { $testArgs += "--require-gpu" }
+            & $Exe @testArgs
+            if ($LASTEXITCODE -ne 0) { throw "自己テストに失敗しました" }
+        }
+        finally {
+            $env:PATH = $savedPath
+            foreach ($name in $saved.Keys) { Set-Item "Env:$name" $saved[$name] }
+        }
+    }
+    $size = (Get-ChildItem -Recurse -File (Split-Path $Exe) | Measure-Object -Sum Length).Sum / 1MB
+    Write-Host ("== 完了: {0} ({1:N0} MB) ==" -f (Split-Path $Exe), $size)
 }
 finally {
     Pop-Location

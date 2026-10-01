@@ -2,18 +2,24 @@
 
 エンドユーザーが「exe 一つで起動」できる配布形態のビルド手順。
 
-構成: Python バックエンド (FastAPI/uvicorn) を PyInstaller で単一実行ファイル化し、
-Tauri の **サイドカー (`bundle.externalBin`)** としてアプリに同梱する。
-配布ビルドのアプリはウィンドウ起動時にサイドカーを `--port 8317` で自動起動し、
-終了時に子プロセスを kill する。
+構成: Python バックエンド (FastAPI/uvicorn) を PyInstaller で**フォルダ (onedir)** にまとめ、
+Tauri のアプリに同梱する。配布ビルドのアプリはウィンドウ起動時にバックエンドを `--port 8317` で
+自動起動し、終了時に子プロセスを kill する。GPU (CuPy) は CUDA Toolkit から NVRTC だけを同梱して動かす
+(prompts/133)。
+
+> **移行中 (prompts/133)**: P8b でバックエンドを onefile から onedir に変えた。Tauri 側 (下の手順 3) を
+> onedir をリソースとして同梱する形に変えるのは P8c。それまで `npm run tauri build` は旧来の
+> `externalBin` (単一 exe) を前提にしたまま。
 
 ## 関連ファイル
 
 | ファイル | 役割 |
 |---|---|
-| `backend/run_server.py` | 配布用エントリポイント (uvicorn を 127.0.0.1:8317 で起動、`--port` 対応) |
-| `backend/es_sim_server.spec` | PyInstaller 仕様 (gmsh 共有ライブラリ同梱、uvicorn hidden imports) |
-| `scripts/build_backend.ps1` | Windows 用バックエンドビルド + 配置 |
+| `backend/run_server.py` | 配布用エントリポイント (uvicorn を 127.0.0.1:8317 で起動、`--port` 対応、`selftest`・`batch`) |
+| `backend/es_sim_server.spec` | PyInstaller 仕様 (onedir、gmsh 共有ライブラリ、CuPy とヘッダ、NVRTC だけを `cuda/bin/x64` に) |
+| `backend/pyi_rth_es_sim.py` | 実行時フック (CUDA_PATH を同梱の NVRTC に向ける) |
+| `backend/es_sim/selftest.py` | 自己テスト (`es-sim-backend selftest`: gmsh・numba・pyamg・ezdxf・boltzpmp・GPU の計算) |
+| `scripts/build_backend.ps1` | Windows 用バックエンドビルド (onedir) + CUDA の環境変数なしでの自己テスト |
 | `scripts/build_backend.sh` | Linux/macOS 用 (検証用) |
 | `ui/src-tauri/binaries/` | サイドカー配置先 (**target triple 付きファイル名**。コミットしない) |
 | `ui/src-tauri/tauri.conf.json` | `bundle.externalBin: ["binaries/es-sim-backend"]` |
@@ -21,22 +27,17 @@ Tauri の **サイドカー (`bundle.externalBin`)** としてアプリに同梱
 
 ## Windows での配布ビルド全手順
 
-前提: Python 3.11+、Rust (stable, MSVC)、Node.js、Visual Studio Build Tools。
+前提: uv、Rust (stable, MSVC)、Node.js、Visual Studio Build Tools。GPU の確認には NVIDIA の GPU とドライバ。
 
 ```powershell
-# 1. バックエンドの venv 準備 (初回のみ)
+# 1. バックエンドの venv 準備 (依存グループ dist = PyInstaller と NVRTC の wheel。開発用も残すなら --extra dev も)
 cd ES-Sim\backend
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e .
-pip install pyinstaller
+uv sync --extra gpu --group dist
 
-# 2. バックエンドを単一 exe 化して Tauri へ配置
+# 2. バックエンドを onedir にまとめ、CUDA の環境変数なしで自己テスト (GPU のある PC なら -RequireGpu)
 cd ..
-powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1
-#  → ui\src-tauri\binaries\es-sim-backend-x86_64-pc-windows-msvc.exe が生成される
-#  (uv で管理している venv なら、依存を変えずに: cd backend; uv run --no-sync --with pyinstaller pyinstaller --clean --noconfirm es_sim_server.spec
-#   のあと backend\dist\es-sim-backend.exe を上の名前で ui\src-tauri\binaries\ へ置く)
+powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1 -RequireGpu
+#  → backend\dist\es-sim-backend\ (es-sim-backend.exe と _internal\、約 490 MB) ができる
 
 # 3. フロントエンド (UI v2) + Tauri の配布ビルド
 cd ui
@@ -51,9 +52,20 @@ npm run tauri build
 - 実行ファイル本体: `ui\src-tauri\target\release\es-sim.exe` (`npm run tauri build -- --no-bundle` ならインストーラを作らずこれだけ)
   (同ディレクトリに `es-sim-backend-x86_64-pc-windows-msvc.exe` が並置される)
 
-Tauri の `externalBin` は **target triple 付きのファイル名を要求する**
-(例: `es-sim-backend-x86_64-pc-windows-msvc.exe`)。`scripts/build_backend.ps1` が
-`rustc -vV` のホスト triple を検出して自動でリネーム配置する。
+## GPU (CuPy と NVRTC、prompts/133)
+
+- 同梱する CUDA は NVRTC (`nvrtc64_130_0.dll`・`nvrtc-builtins64_130.dll`、約 95 MB、依存グループ dist の
+  `nvidia-cuda-nvrtc` 13.0 の wheel から) と NVIDIA の使用許諾 (`_internal/cuda/License.txt`) だけ。GPU の計算は
+  cuBLAS・cuSOLVER・cuSPARSE を使わない (P8a。`tests/test_v2_gpu_nvrtc_only.py` が NVRTC だけの環境で GPU の
+  テストを走らせて確かめる)。CUDA のランタイムは NVIDIA のドライバに含まれる。
+- 実行時フック (`pyi_rth_es_sim.py`) が `CUDA_PATH` を `_internal/cuda` に向ける。利用者の PC の CUDA Toolkit の
+  有無・版によらず同梱の NVRTC を使う。
+- GPU を使う条件: NVIDIA のドライバが CUDA 13 に対応 (R580 以降)、GPU が Compute Capability 7.5 以降 (Turing
+  以降)。満たさなければ CPU で計算し、理由をバージョン情報とステータスバーのツールチップに出す。
+- 最初の GPU の計算ではカーネルを NVRTC でコンパイルする (全部で約 4 秒)。結果は `%USERPROFILE%\.cupy\kernel_cache`
+  に残り、2 回目からは速い。
+- 配布物の確認: `backend\dist\es-sim-backend\es-sim-backend.exe selftest [--require-gpu]` (結果は 1 行ずつ、
+  `--json PATH` で JSON にも)。GPU を使えないときは理由を表示する。
 
 ## 開発モードとの違い
 

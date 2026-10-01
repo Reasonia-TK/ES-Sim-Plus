@@ -180,6 +180,7 @@ def test_gpu_solvers_run_with_only_nvrtc(tmp_path):
     mods = json.loads(report.read_text(encoding="utf-8"))["modules"]
     names = [Path(m).name for m in mods]
     assert not [n for n in names if _FORBIDDEN.match(n)], mods
-    loaded_nvrtc = [m for m in mods if Path(m).name.lower().startswith("nvrtc64_")]
-    same = lambda a, b: os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))  # noqa: E731
-    assert loaded_nvrtc and all(same(Path(m).parent, dst) for m in loaded_nvrtc), mods
+    # NVRTC は CUDA Toolkit からではなく、NVRTC だけのフォルダ (CUDA_PATH か、venv にある nvidia-cuda-nvrtc の wheel) から
+    loaded_nvrtc = [Path(m) for m in mods if Path(m).name.lower().startswith("nvrtc64_")]
+    assert loaded_nvrtc and not any(_has_cuda_dlls(m.parent) and any(m.parent.glob("cublas64_*.dll"))
+                                    for m in loaded_nvrtc), mods
