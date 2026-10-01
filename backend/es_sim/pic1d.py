@@ -102,6 +102,13 @@ class Pic1dSimulation:
     def __init__(self, project: Project):
         if project.pic1d is None:
             raise ValueError("project.pic1d が指定されていません")
+        for side in ("left", "right"):
+            if getattr(project.pic1d, side).blocking_capacitor is not None:
+                # 黙って直結で計算すると自己バイアスの無い別の物理になる (prompts/134。流体 1D は対応)
+                raise ValueError(
+                    "PIC 1D はまだ阻止コンデンサ (自己バイアス) に対応していません "
+                    f"({side} の電極)。コンデンサを外すか、流体 1D で実行してください"
+                )
         self.project = project
         self.s: Pic1dSettings = project.pic1d
         s = self.s

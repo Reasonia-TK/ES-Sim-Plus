@@ -91,6 +91,11 @@ z は電子フラックスの z と同一 (μ_e, D_e が同じ比率 5/3 でス�
   ゆるい許容幅には影響しない)。
 - 電位: 両端 Dirichlet。pic1d.electrode_voltage (prompts/93、v_dc + Σ RF +
   Σ CSV波形) を共用する。
+- 阻止コンデンサ (自己バイアス、prompts/134): 電極に blocking_capacitor があれば、電源と電極の間に
+  直列のコンデンサを置き、電極の電位を circuit.BlockingCircuit で決める (モジュール circuit.py の手順)。
+  ψ は直線 (左 1 − x/L、右 x/L)、電極の容量は C = ε0/L (面積あたり)。電極の電荷は端の電束から
+  端の節点 (半セル) の空間電荷を引いたもの (_electrode_charges)。伝導電流は壁への正味の流束
+  e(Γ_i − Γ_e) (Γ_e は入射から二次電子を引いたもの)。
 
 ## 反応源項
 
@@ -114,6 +119,7 @@ import numpy as np
 from scipy.linalg import solve_banded
 
 from .boltz import BoltzCoeffs, boltz_coeffs_at, boltz_coeffs_from_table
+from .circuit import BlockingCircuit, CapacitorSpec
 from .fem import EPS0
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
 from .mcc import KB
@@ -365,6 +371,24 @@ class Fluid1dSimulation:
         else:
             self.dt = 1.0e-10
 
+        # ---- 阻止コンデンサ (自己バイアス、prompts/134・モジュール docstring) ----------
+        self.circuit: BlockingCircuit | None = None
+        self._cap_sides = [side for side in ("left", "right") if getattr(s, side).blocking_capacitor is not None]
+        if self._cap_sides:
+            # ψ_k: 電極 k が 1 V・もう一方が 0 V・空間電荷 0 の解 (三重対角の差分でも厳密に直線)
+            self._cap_psi = np.array(
+                [1.0 - self.xg / self.gap if side == "left" else self.xg / self.gap for side in self._cap_sides]
+            )
+            zero = np.zeros(self.n_nodes)
+            c_matrix = np.array([self._electrode_charges(psi, zero, zero) for psi in self._cap_psi]).T
+            specs = [
+                CapacitorSpec(side, getattr(s, side).blocking_capacitor.capacitance,
+                              getattr(s, side).blocking_capacitor.initial_bias_v)
+                for side in self._cap_sides
+            ]
+            period = 1.0 / self._cycle_freq if self._cycle_freq is not None else None
+            self.circuit = BlockingCircuit(specs, c_matrix, period)
+
         # ---- 安定性の目安警告 (陽的経路のみ。半陰は後退オイラー + サブステップで
         #      無条件安定なので警告不要) -------------------------------------------
         self.warnings: list[str] = []
@@ -537,12 +561,47 @@ class Fluid1dSimulation:
         return ex
 
     def _solve_phi(self, n_e: np.ndarray, n_i: np.ndarray, t: float) -> np.ndarray:
-        """Poisson 求解: −ε0 φ'' = e(n_i−n_e)、両端 Dirichlet (electrode_voltage)。"""
+        """Poisson 求解: −ε0 φ'' = e(n_i−n_e)、両端 Dirichlet (electrode_voltage)。
+
+        阻止コンデンサがあれば、その電極は前のサブステップの電位で φ* を解き、φ* の電極の電荷から
+        circuit が新しい電位を決め、ψ の重ね合わせで φ を直す (circuit.py の手順 1〜3)。
+        """
         rhs = np.empty(self.n_nodes)
         rhs[1:-1] = QE * (n_i[1:-1] - n_e[1:-1])
         rhs[0] = electrode_voltage(self.s.left, t)
         rhs[-1] = electrode_voltage(self.s.right, t)
-        return solve_banded((1, 1), self._poisson_ab, rhs)
+        circuit = self.circuit
+        if circuit is None:
+            return solve_banded((1, 1), self._poisson_ab, rhs)
+        node = {"left": 0, "right": -1}
+        v_src = np.array([rhs[node[side]] for side in self._cap_sides])
+        v_old = circuit.potentials(v_src)
+        for side, v in zip(self._cap_sides, v_old):
+            rhs[node[side]] = v
+        phi = solve_banded((1, 1), self._poisson_ab, rhs)
+        v_new = circuit.solve(self._electrode_charges(phi, n_e, n_i), v_old, v_src)
+        phi = phi + (v_new - v_old) @ self._cap_psi
+        for side, v in zip(self._cap_sides, v_new):
+            phi[node[side]] = v  # 丸めで v_old + (v_new − v_old) ≠ v_new になる分をそろえる
+        return phi
+
+    def _electrode_charges(self, phi: np.ndarray, n_e: np.ndarray, n_i: np.ndarray) -> np.ndarray:
+        """阻止コンデンサを付けた電極の表面の電荷 [C/m²] (self._cap_sides の順)。
+
+        端の電束 ε0 E(dx/2) から端の節点 (半セル、node_vol = dx/2) の空間電荷を引く。Poisson の差分は端の
+        節点の電荷を見ない (Dirichlet) ので、その電荷は電極の表面のすぐ外の層とみなし、残りを導体の電荷と
+        する。こうすると壁の節点の電荷が電極へ流れ込んでも電位が跳ばない (circuit.py の docstring)。
+        """
+        out = []
+        for side in self._cap_sides:
+            if side == "left":
+                flux = EPS0 * (phi[0] - phi[1]) / self.dx
+                own = QE * (n_i[0] - n_e[0]) * self.node_vol[0]
+            else:
+                flux = EPS0 * (phi[-1] - phi[-2]) / self.dx
+                own = QE * (n_i[-1] - n_e[-1]) * self.node_vol[-1]
+            out.append(flux - own)
+        return np.array(out)
 
     def _wall_side_coeffs(self, side: str, ex_boundary: float, te_boundary: float):
         """壁境界の線形フラックス係数 (Γ_wall = c・n[wall] の形の c) を返す。
@@ -681,6 +740,12 @@ class Fluid1dSimulation:
         n_e_new = np.maximum(n_e_new, FLOOR_N)
         gwl_e = c_e_left * n_e_new[0] - see_left
         gwr_e = c_e_right * n_e_new[-1] - see_right
+        if self.circuit is not None:
+            # 阻止コンデンサの電極へ流れ込む伝導電流 e(Γ_i − Γ_e) [A/m²] (Γ_e は二次電子を引いた正味)
+            wall = {"left": (gwl_i, gwl_e), "right": (gwr_i, gwr_e)}
+            self.circuit.conduct(
+                np.array([QE * (wall[side][0] - wall[side][1]) for side in self._cap_sides]), t, dt
+            )
         t2 = time.perf_counter()
         self.timing["transport"] += t2 - t1
 
@@ -950,6 +1015,8 @@ class Fluid1dSimulation:
             "t_e": te.tolist(),
             "counts": counts,
             "elapsed_s": time.perf_counter() - self._run_t0,
+            # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
+            "circuit": None if self.circuit is None else self.circuit.frame(),
         }
 
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
@@ -1020,6 +1087,8 @@ class Fluid1dSimulation:
 
         self.history = {k: [] for k in self.history}
         self.timing = {k: 0.0 for k in self.timing}
+        if self.circuit is not None:
+            self.circuit.reset_history()  # 回路の状態 (コンデンサの電荷) は引き継ぐ
         self._accum_start = None
         self._accum_count = 0
         self._accum_phi = None
@@ -1109,4 +1178,9 @@ def build_fluid1d_result(sim: Fluid1dSimulation, elapsed_s: float) -> dict:
         "elapsed_s": elapsed_s,
         "timing": {**sim.timing, "total": timing_total},
         "settings": sim.s.model_dump(),
+        # 阻止コンデンサ (自己バイアス、prompts/134)。電極ごとの RF 1 周期ごとの V_dc・|V1|・I_dc と最後の
+        # 1 周期の電極の電位。コンデンサが無ければ None
+        "circuit": None if sim.circuit is None else sim.circuit.result(
+            {"capacitance": "F/m^2", "charge": "C/m^2", "current": "A/m^2"}
+        ),
     }

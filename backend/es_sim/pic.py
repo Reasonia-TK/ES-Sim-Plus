@@ -30,6 +30,7 @@ import scipy.sparse.linalg as spla
 from scipy.spatial import cKDTree
 
 from . import _numba_kernels
+from .circuit import reject_blocking_capacitors
 from .fem import EPS0, _material_arrays, _radial_index, assemble
 from .fn import build_fn_surface, distribute_particles, fn_segment_currents
 from .mcc import GasField, MccModel
@@ -234,6 +235,7 @@ class PicSimulation:
     def __init__(self, project: Project, gas_field: GasField | None = None):
         if project.pic is None:
             raise ValueError("project.pic が指定されていません")
+        reject_blocking_capacitors(project, "PIC")
         self.project = project
         self.pic: PicSettings = project.pic
         # 非一様背景ガス場 (prompts/54)。DSMC の定常解などを MCC が参照する

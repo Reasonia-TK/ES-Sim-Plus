@@ -143,6 +143,7 @@ import scipy.sparse.linalg as spla
 
 from . import _numba_kernels
 from .boltz import BoltzCoeffs, boltz_coeffs_at, boltz_coeffs_from_table
+from .circuit import reject_blocking_capacitors
 from .fem import EPS0, _radial_index, assemble, assemble_transport_operator
 from .fluid1d import FLOOR_N, FLOOR_W, _bernoulli, frost_mobility
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
@@ -206,9 +207,15 @@ class Fluid2dSimulation:
     こちらを使う (fluid1d.Fluid1dSimulation と同じ設計)。
     """
 
+    #: 阻止コンデンサ (自己バイアス、prompts/134) に対応しているか。対応していない実装で付けた電極があれば
+    #: エラー (黙って直結で計算すると別の物理になる)
+    _blocking_capacitor_ok = False
+
     def __init__(self, project: Project, explicit: bool = False):
         if project.fluid2d is None:
             raise ValueError("project.fluid2d が指定されていません")
+        if not self._blocking_capacitor_ok:
+            reject_blocking_capacitors(project, "流体 2D")
         # periodic 境界は未対応: EAFE のエッジ抽出・壁境界の集計は「節点番号が
         # そのまま物理的な位置に対応する」ことを前提に実装しており、周期スレーブの
         # 正準化 (mesh.periodic_map) をエッジ重み・壁エッジ分類の両方に一貫して

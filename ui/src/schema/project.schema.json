@@ -165,6 +165,54 @@
    "title": "BField",
    "type": "object"
   },
+  "BlockingCapacitor": {
+   "description": "電極と電源の間に直列の阻止コンデンサ (自己バイアス、prompts/134)。2D の導体・Dirichlet の辺に付ける。\n\n電極の直流電位 (自己バイアス) が放電に合わせて決まる (circuit.py)。電源の直流分 (voltage) は定常では\nコンデンサが止める。流体 (v2 の流体 2D) が使い、PIC はまだ使えない (実行の初めにエラー)。静電場の計算\n(/solve) は無視する。容量は座標系の電荷の単位に合わせ、平面 2D は奥行き 1 m あたり [F/m]、軸対称は\n全周 [F] (静電場の電極の電荷 C/m・C と同じ)。",
+   "properties": {
+    "capacitance": {
+     "description": "容量 (平面 2D は奥行き 1 m あたり、軸対称は全周)",
+     "exclusiveMinimum": 0,
+     "title": "Capacitance",
+     "type": "number",
+     "x-unit": "F/m"
+    },
+    "initial_bias_v": {
+     "default": 0.0,
+     "description": "コンデンサの初期電圧 (電極の電位 − 電源の電圧)",
+     "title": "Initial Bias V",
+     "type": "number",
+     "x-unit": "V"
+    }
+   },
+   "required": [
+    "capacitance"
+   ],
+   "title": "BlockingCapacitor",
+   "type": "object"
+  },
+  "BlockingCapacitor1d": {
+   "description": "1D の電極の阻止コンデンサ (BlockingCapacitor と同じ、容量は面積あたり)。流体 1D が使い、PIC 1D はまだ使えない。",
+   "properties": {
+    "capacitance": {
+     "description": "面積あたりの容量",
+     "exclusiveMinimum": 0,
+     "title": "Capacitance",
+     "type": "number",
+     "x-unit": "F/m^2"
+    },
+    "initial_bias_v": {
+     "default": 0.0,
+     "description": "コンデンサの初期電圧 (電極の電位 − 電源の電圧)",
+     "title": "Initial Bias V",
+     "type": "number",
+     "x-unit": "V"
+    }
+   },
+   "required": [
+    "capacitance"
+   ],
+   "title": "BlockingCapacitor1d",
+   "type": "object"
+  },
   "BoltzTable": {
    "description": "boltzpm による LMEA 係数テーブル (prompts/117)。ε̄=(3/2)Te をキーに参照する。\n\n各リストは ε̄ (mean_energy_ev) 昇順に整列済み (boltz.run_boltz_sweep が保証する)。\needf は表示用に全点分を保存する (eedf[i] が eedf_eps_ev グリッド上の EEDF、\n∫eedf[i] dε ≈ 1 — boltzpm の規格化そのまま、boltz.py モジュール docstring 参照)。",
    "properties": {
@@ -330,6 +378,17 @@
      "title": "See Gamma",
      "type": "number",
      "x-unit": "1"
+    },
+    "blocking_capacitor": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/BlockingCapacitor"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     }
    },
    "required": [
@@ -1104,7 +1163,8 @@
       "voltage_rf": null,
       "waveforms": [],
       "see_gamma": 0.0,
-      "fn": null
+      "fn": null,
+      "blocking_capacitor": null
      }
     },
     "right": {
@@ -1114,7 +1174,8 @@
       "voltage_rf": null,
       "waveforms": [],
       "see_gamma": 0.0,
-      "fn": null
+      "fn": null,
+      "blocking_capacitor": null
      }
     },
     "init_density_m3": {
@@ -2084,6 +2145,17 @@
       }
      ],
      "default": null
+    },
+    "blocking_capacitor": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/BlockingCapacitor1d"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     }
    },
    "title": "Pic1dElectrode",
@@ -2114,7 +2186,8 @@
       "voltage_rf": null,
       "waveforms": [],
       "see_gamma": 0.0,
-      "fn": null
+      "fn": null,
+      "blocking_capacitor": null
      }
     },
     "right": {
@@ -2124,7 +2197,8 @@
       "voltage_rf": null,
       "waveforms": [],
       "see_gamma": 0.0,
-      "fn": null
+      "fn": null,
+      "blocking_capacitor": null
      }
     },
     "init_density_m3": {
@@ -2639,6 +2713,17 @@
      "title": "See Gamma",
      "type": "number",
      "x-unit": "1"
+    },
+    "blocking_capacitor": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/BlockingCapacitor"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     }
    },
    "required": [

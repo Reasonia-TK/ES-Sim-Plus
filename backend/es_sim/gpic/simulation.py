@@ -63,6 +63,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..circuit import reject_blocking_capacitors
 from ..device import Device, get_device
 from ..eb.build import MASK_FIXED
 from ..eb.grid import make_grid
@@ -164,6 +165,7 @@ class GpuPicSimulation:
     def __init__(self, project: Project, gas_field=None, device: Device | str | None = None):
         if project.pic is None:
             raise ValueError("project.pic が指定されていません")
+        reject_blocking_capacitors(project, "PIC")
         dev = device if isinstance(device, Device) else get_device(device or "cuda")
         if not dev.is_gpu:
             raise RuntimeError(

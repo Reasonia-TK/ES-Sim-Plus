@@ -124,6 +124,32 @@ class VoltageWaveform(BaseModel):
         return self
 
 
+class BlockingCapacitor(BaseModel):
+    """電極と電源の間に直列の阻止コンデンサ (自己バイアス、prompts/134)。2D の導体・Dirichlet の辺に付ける。
+
+    電極の直流電位 (自己バイアス) が放電に合わせて決まる (circuit.py)。電源の直流分 (voltage) は定常では
+    コンデンサが止める。流体 (v2 の流体 2D) が使い、PIC はまだ使えない (実行の初めにエラー)。静電場の計算
+    (/solve) は無視する。容量は座標系の電荷の単位に合わせ、平面 2D は奥行き 1 m あたり [F/m]、軸対称は
+    全周 [F] (静電場の電極の電荷 C/m・C と同じ)。
+    """
+
+    capacitance: float = Field(
+        ..., gt=0, description="容量 (平面 2D は奥行き 1 m あたり、軸対称は全周)", json_schema_extra=ui("F/m")
+    )
+    initial_bias_v: float = Field(
+        0.0, description="コンデンサの初期電圧 (電極の電位 − 電源の電圧)", json_schema_extra=ui("V")
+    )
+
+
+class BlockingCapacitor1d(BaseModel):
+    """1D の電極の阻止コンデンサ (BlockingCapacitor と同じ、容量は面積あたり)。流体 1D が使い、PIC 1D はまだ使えない。"""
+
+    capacitance: float = Field(..., gt=0, description="面積あたりの容量", json_schema_extra=ui("F/m^2"))
+    initial_bias_v: float = Field(
+        0.0, description="コンデンサの初期電圧 (電極の電位 − 電源の電圧)", json_schema_extra=ui("V")
+    )
+
+
 class Loop(BaseModel):
     """閉じた経路 (領域の穴、prompts/132)。polygon の辺 i (頂点 i → i+1) が bulges[i] の円弧。"""
 
@@ -155,9 +181,13 @@ class Region(BaseModel):
         description="conductor / dielectric: 二次電子放出係数 γ (0 = 無効、PIC のみ使用)",
         json_schema_extra=ui("1"),
     )
+    # conductor: 電源との間の阻止コンデンサ (自己バイアス、prompts/134)。None なら電源に直結
+    blocking_capacitor: BlockingCapacitor | None = None
 
     @model_validator(mode="after")
     def _check_polygon_xor_shape(self) -> "Region":
+        if self.blocking_capacitor is not None and self.type != "conductor":
+            raise ValueError(f"領域 {self.id}: 阻止コンデンサ (blocking_capacitor) は導体の領域だけに付けられます")
         if (self.polygon is None) == (self.shape is None):
             raise ValueError("Region には polygon か shape のどちらか一方のみを指定してください")
         if self.polygon is not None:
@@ -194,9 +224,14 @@ class BoundaryCondition(BaseModel):
     see_gamma: float = Field(
         0.0, ge=0, description="二次電子放出係数 γ (0 = 無効、PIC のみ使用)", json_schema_extra=ui("1")
     )
+    # 電源との間の阻止コンデンサ (自己バイアス、prompts/134)。dirichlet のみ。複数の辺なら 1 つの電極として
+    # 扱う (辺どうしはつながっている)。None なら電源に直結
+    blocking_capacitor: BlockingCapacitor | None = None
 
     @model_validator(mode="after")
     def _check_periodic_edge_count(self) -> "BoundaryCondition":
+        if self.blocking_capacitor is not None and self.type != "dirichlet":
+            raise ValueError("阻止コンデンサ (blocking_capacitor) は dirichlet の境界条件だけに付けられます")
         if self.type == "periodic":
             if len(self.edges) != 2 or self.edges[0] == self.edges[1]:
                 raise ValueError("periodic 境界には異なるエッジをちょうど2本指定してください")
@@ -667,6 +702,9 @@ class Pic1dElectrode(BaseModel):
     see_gamma: float = Field(0.0, ge=0.0, le=1.0, description="イオン入射あたりのSEE収率 γ", json_schema_extra=ui("1"))
     # FN 電界放出 (prompts/95)。None なら放出なし (従来動作と完全ビット不変)
     fn: Fn1dEmission | None = None
+    # 電源との間の阻止コンデンサ (自己バイアス、prompts/134)。流体 1D のみ (PIC 1D はまだ使えない)。
+    # None なら電源に直結
+    blocking_capacitor: BlockingCapacitor1d | None = None
 
 
 class Eedf1dRegion(BaseModel):
