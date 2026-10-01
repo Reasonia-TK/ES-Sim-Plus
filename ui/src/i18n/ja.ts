@@ -828,6 +828,7 @@ const ja = {
     uiVersion: "UI",
     backendVersion: "バックエンド",
     device: "計算デバイス",
+    gpuReason: "GPU を使えない理由",
     schemaFields: "スキーマ",
     schemaFieldCount: "{{n}} 項目 ({{defs}} 型)",
     notConnected: "未接続",

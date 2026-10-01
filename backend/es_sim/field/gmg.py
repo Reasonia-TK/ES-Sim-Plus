@@ -97,6 +97,7 @@ class _CudaBackend:
         self.k_apply = get_kernel("poisson", "apply_op")
         self.k_restrict = get_kernel("poisson", "restrict_fw")
         self.k_prolong = get_kernel("poisson", "prolong_add")
+        self.k_gemv = get_kernel("poisson", "dense_gemv_idx")
 
     @staticmethod
     def _i(v) -> np.int32:
@@ -140,10 +141,13 @@ def dense_inverse(a, singular: bool, xp=np):
     A⁺ = (A + α u uᵀ)⁻¹ − u uᵀ/α で求める (A u = 0 の対称半正定値行列で厳密)。零空間が定数で
     ない場合 (想定外) は SVD にフォールバックする。
 
-    xp: 配列モジュール (numpy / cupy)。GPU で使う逆行列は cupy (cuSOLVER) で求める — 開発機の
+    xp: 配列モジュール (numpy / cupy)。GPU で使う逆行列は GPU で求める — 開発機の
     マルチスレッド OpenBLAS は LAPACK の呼び出しに行列の大きさによらず ~1.5 s かかるため
-    (750 元の逆行列: OpenBLAS 1.5 s、1 スレッド 0.03 s、cuSOLVER 0.006 s)。
+    (750 元の逆行列: OpenBLAS 1.5 s、1 スレッド 0.03 s、GPU 0.005 s)。GPU は cuSOLVER ではなく自前の
+    ブロック Gauss-Jordan (``device.linalg.spd_inverse``、配布版は NVRTC だけを同梱するため、prompts/133)。
     """
+    if xp is not np:
+        return _dense_inverse_gpu(np.asarray(a.get() if hasattr(a, "get") else a, dtype=np.float64), singular, xp)
     a = xp.asarray(a, dtype=xp.float64)
     if not singular:
         return xp.linalg.inv(a)
@@ -156,6 +160,23 @@ def dense_inverse(a, singular: bool, xp=np):
         return xp.linalg.pinv(a)
     uu = xp.outer(u, u)
     return xp.linalg.inv(a + scale * uu) - uu / scale
+
+
+def _dense_inverse_gpu(a: np.ndarray, singular: bool, cp):
+    """dense_inverse の GPU 版 (a はホストの配列、戻り値は cupy 配列)。判定はホストで、逆行列は GPU で。"""
+    from ..device.linalg import spd_inverse
+
+    if not singular:
+        return spd_inverse(a)
+    n = a.shape[0]
+    if n == 0:
+        return cp.zeros((0, 0))
+    u = np.full(n, 1.0 / np.sqrt(n))
+    scale = float(np.max(np.abs(np.diag(a)))) or 1.0
+    if float(np.max(np.abs(a @ u))) > 1e-9 * scale:
+        return cp.asarray(np.linalg.pinv(a))  # 零空間が定数でない (想定外) ときだけ CPU の SVD
+    uu = np.outer(u, u)
+    return spd_inverse(a + scale * uu) - cp.asarray(uu / scale)
 
 
 def _dense_operator(op: LevelOperator) -> tuple[np.ndarray, np.ndarray]:
@@ -268,10 +289,10 @@ class GMGSolver:
     def _bottom(self, lv: _DevLevel) -> None:
         if self._bottom_idx.size == 0:
             return
-        if self.device.is_gpu and getattr(self, "_async", None) is not None:
-            # 同期・確保なしの融合カーネル (CUDA Graph に取り込めるように)
+        if self.device.is_gpu:
+            # 同期・確保なしの融合カーネル (CUDA Graph に取り込めるように。cuBLAS も使わない、prompts/133)
             m = int(self._bottom_idx.size)
-            self._async["gemv"](
+            self.backend.k_gemv(
                 ((m + 127) // 128,), (128,),
                 (self._bottom_inv, self._bottom_idx, lv.b, lv.x, np.int32(m)),
             )
@@ -405,6 +426,10 @@ class GMGSolver:
         収束判定は ||r||₂ ≤ max(tol·||b||₂, atol)。
         """
         xp = self.xp
+        if xp is np:
+            vdot = np.vdot
+        else:  # cupy.vdot は cuBLAS を使う (配布版は NVRTC だけを同梱する、prompts/133)
+            from ..device.linalg import vdot
         t0 = time.perf_counter()
         unknown = self._unknown
         b = xp.where(unknown, b, 0.0)
@@ -413,28 +438,28 @@ class GMGSolver:
         x = xp.zeros_like(b) if x0 is None else xp.where(unknown, x0, 0.0)
         ax = self.apply(x)
         r = b - ax
-        bnorm = float(xp.sqrt(xp.vdot(b, b)))
+        bnorm = float(xp.sqrt(vdot(b, b)))
         target = max(tol * bnorm, atol)
-        rnorm = float(xp.sqrt(xp.vdot(r, r)))
+        rnorm = float(xp.sqrt(vdot(r, r)))
         it = 0
         if rnorm > target:
             z = self.precondition(r)
             p = z.copy()
-            rz = float(xp.vdot(r, z))
+            rz = float(vdot(r, z))
             ap = xp.empty_like(b)
             for it in range(1, max_iter + 1):
                 self.apply(p, ap)
-                pap = float(xp.vdot(p, ap))
+                pap = float(vdot(p, ap))
                 if pap <= 0.0:
                     break
                 alpha = rz / pap
                 x += alpha * p
                 r -= alpha * ap
-                rnorm = float(xp.sqrt(xp.vdot(r, r)))
+                rnorm = float(xp.sqrt(vdot(r, r)))
                 if rnorm <= target:
                     break
                 z = self.precondition(r)
-                rz_new = float(xp.vdot(r, z))
+                rz_new = float(vdot(r, z))
                 beta = rz_new / rz
                 rz = rz_new
                 p *= beta

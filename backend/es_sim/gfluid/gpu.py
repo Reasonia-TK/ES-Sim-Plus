@@ -280,20 +280,24 @@ class _EbPoisson:
 
 
 class _AmrPoisson:
-    """AMR の合成格子の Poisson (gfluid.amr_graph): b_c = PTq [q; V]、GPU の AMG-PCG、φ = PC [x_c; V]。"""
+    """AMR の合成格子の Poisson (gfluid.amr_graph): b_c = PTq [q; V]、GPU の AMG-PCG、φ = PC [x_c; V]。
+
+    疎行列と列ベクトルの積は amr.cu の csr_spmv (cupyx.scipy.sparse は cuSPARSE を使い、配布版は NVRTC だけを
+    同梱するため、prompts/133)。
+    """
 
     def __init__(self, g: "_GpuFluid", sim) -> None:
-        import cupyx.scipy.sparse as csp
-
-        from ..amr.gpu_solver import AmgGpuSolver
+        from ..amr.gpu_solver import AmgGpuSolver, _Csr
+        from ..device.cuda import get_kernel
 
         cp = g.cp
         lay = sim._lay
         op = lay.op
         self.g = g
         self.K = lay.n_groups
-        self.PTq = csp.csr_matrix(lay.PTq.tocsr())
-        self.PC = csp.csr_matrix(lay.PC.tocsr())
+        self.PTq = _Csr.of(lay.PTq, cp)
+        self.PC = _Csr.of(lay.PC, cp)
+        self.k_spmv = get_kernel("amr", "csr_spmv")
         self.qs = cp.asarray(np.ascontiguousarray(lay.q_static, dtype=np.float64))
         n = g.nn
         self.g_ptr = cp.zeros(n + 1, dtype=np.int32)          # 結合は PTq が受け持つ (右辺には足さない)
@@ -315,7 +319,7 @@ class _AmrPoisson:
             self.qs, g.cp_ptr, g.cp_idx, g.cp_val, g.ni, g.ne, self.g_ptr, self.g_idx, self.g_val,
             g.vgrp, self.mask, g.qsurf, np.float64(g.qdiv), np.int32(n), self.ext[:n]))
         self.ext[n:] = g.vgrp[: self.K]
-        self.bc[...] = self.PTq @ self.ext
+        self._spmv(self.bc, self.PTq, self.ext)
         solver = self.solver
         if solver.n == 0:
             pass
@@ -325,7 +329,12 @@ class _AmrPoisson:
             g._pcg_loop("amg", lambda kk: solver.launch_solve(self.bc, self.xc, kk), solver.monitor)
         self.xv[: self.xc.size] = self.xc
         self.xv[self.xc.size:] = g.vgrp[: self.K]
-        g.phi[...] = self.PC @ self.xv
+        self._spmv(g.phi, self.PC, self.xv)
+
+    def _spmv(self, y, m, x) -> None:
+        """y = m x (m は _Csr、y の長さは m の行数)。"""
+        if m.n:
+            self.k_spmv(((m.n + 255) // 256,), (256,), (y, m.ip, m.ix, m.a, x, np.int32(m.n), np.int32(0)))
 
 
 class _GpuFluid:

@@ -10,6 +10,8 @@ export const HEALTH_INTERVAL_MS = 5000;
 export interface BackendInfo {
   version: string;
   gpu: boolean;
+  /** GPU の名前、使えないときはその理由 (/health の v2.cuda_info、P8a) */
+  gpuInfo?: string;
   numba: boolean;
   /** サーバープロセスの識別子 (変われば再起動した。古いバックエンドは返さない) */
   instance?: string;
@@ -39,13 +41,15 @@ interface ConnectionState {
 export function parseHealth(body: unknown): BackendInfo {
   const b = (body ?? {}) as Record<string, unknown>;
   if (b.status !== "ok") throw new Error("/health の応答が不正です");
+  const v2 = (b.v2 as Record<string, unknown> | undefined) ?? undefined;
   return {
     version: String(b.version ?? "?"),
     gpu: Boolean(b.gpu),
+    gpuInfo: typeof v2?.cuda_info === "string" ? v2.cuda_info : undefined,
     numba: b.numba === undefined ? true : Boolean(b.numba),
     instance: typeof b.instance === "string" ? b.instance : undefined,
     jobs: b.jobs === true,
-    v2: (b.v2 as Record<string, unknown> | undefined) ?? undefined,
+    v2,
   };
 }
 

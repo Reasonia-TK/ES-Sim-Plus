@@ -12,21 +12,12 @@ from __future__ import annotations
 
 import numpy as np
 
-_gpu_available: bool | None = None
-
-
 def gpu_available() -> bool:
-    """CuPy がインストールされ、CUDA デバイスが見えるかどうか。"""
-    global _gpu_available
-    if _gpu_available is None:
-        try:
-            import cupy  # noqa: F401
+    """CuPy で GPU を使えるか (v2 の ``es_sim.device.cuda_status`` と同じ条件: ドライバ・Compute Capability・
+    NVRTC でカーネルを実行できること、prompts/133)。"""
+    from .device import cuda_available
 
-            cupy.cuda.runtime.getDeviceCount()
-            _gpu_available = True
-        except Exception:
-            _gpu_available = False
-    return _gpu_available
+    return cuda_available()
 
 
 def get_xp(backend: str = "numpy"):

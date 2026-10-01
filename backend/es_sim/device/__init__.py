@@ -14,6 +14,10 @@ AMReX の「同じソースを CPU/GPU で動かす」考え方を Python で実
 Windows の Smart App Control 下では公開直後の CuPy バイナリがブロックされることがある
 (pyproject.toml の [tool.uv] 参照)。その場合 CuPy の import が失敗し ``auto`` は CPU に
 フォールバックする。理由は ``cuda_status()`` で確認できる。
+
+GPU を使う条件 (``cuda_status()`` が順に確かめる、prompts/133): CuPy が import できる、NVIDIA のドライバが
+CuPy の CUDA と同じメジャー版 (CUDA 13 = R580 以降) に対応している、Compute Capability 7.5 以降
+(CUDA 13 の対象 = Turing 以降)、NVRTC で小さなカーネルをコンパイルして実行できる (配布版は NVRTC を同梱)。
 """
 
 from __future__ import annotations
@@ -29,6 +33,15 @@ DeviceKind = Literal["cpu", "cuda"]
 
 _ENV_VAR = "ES_SIM_DEVICE"
 
+#: CUDA 13 が対象とする GPU の Compute Capability の下限 (7.5 = Turing。Maxwell・Pascal・Volta は対象外)
+MIN_COMPUTE_CAPABILITY = (7, 5)
+#: CUDA のメジャー版ごとのドライバの下限 (Windows、案内用)
+_MIN_DRIVER = {13: "R580"}
+
+
+def _cuda_version_text(v: int) -> str:
+    return f"{v // 1000}.{(v % 1000) // 10}"
+
 
 @lru_cache(maxsize=1)
 def cuda_status() -> tuple[bool, str]:
@@ -38,6 +51,20 @@ def cuda_status() -> tuple[bool, str]:
     except Exception as exc:  # ImportError / DLL ブロック (SAC) など
         return False, f"CuPy を import できません: {type(exc).__name__}: {exc}"
     try:
+        driver = int(cp.cuda.runtime.driverGetVersion())
+        runtime = int(cp.cuda.runtime.runtimeGetVersion())
+    except Exception as exc:
+        return False, f"NVIDIA のドライバが見つかりません: {type(exc).__name__}: {exc}"
+    if driver // 1000 < runtime // 1000:
+        major = runtime // 1000
+        need = f"CUDA {major} に対応したドライバ" + (f" ({_MIN_DRIVER[major]} 以降)" if major in _MIN_DRIVER else "")
+        if driver <= 0:
+            return False, f"NVIDIA のドライバが見つかりません ({need}が必要です)"
+        return False, (
+            f"NVIDIA のドライバが古いため GPU を使えません (ドライバは CUDA {_cuda_version_text(driver)} まで。"
+            f"{need}が必要です)"
+        )
+    try:
         n = cp.cuda.runtime.getDeviceCount()
     except Exception as exc:
         return False, f"CUDA ランタイムを初期化できません: {type(exc).__name__}: {exc}"
@@ -46,8 +73,21 @@ def cuda_status() -> tuple[bool, str]:
     try:
         props = cp.cuda.runtime.getDeviceProperties(0)
         name = props["name"].decode() if isinstance(props["name"], bytes) else str(props["name"])
+        cc = (int(props["major"]), int(props["minor"]))
     except Exception:  # pragma: no cover - 名前取得だけの失敗は致命的でない
-        name = "CUDA device 0"
+        name, cc = "CUDA device 0", MIN_COMPUTE_CAPABILITY
+    if cc < MIN_COMPUTE_CAPABILITY:
+        return False, (
+            f"{name} (Compute Capability {cc[0]}.{cc[1]}) は CUDA {runtime // 1000} の対象外です "
+            f"({MIN_COMPUTE_CAPABILITY[0]}.{MIN_COMPUTE_CAPABILITY[1]} 以降が必要)"
+        )
+    try:
+        # NVRTC・CuPy のヘッダ・カーネルの起動までを確かめる (配布版で同梱が欠けていても CPU で動くように)
+        ok = float((cp.arange(4, dtype=cp.float64) * 2.0).sum()) == 12.0
+    except Exception as exc:
+        return False, f"GPU ({name}) でカーネルを実行できません: {type(exc).__name__}: {exc}"
+    if not ok:  # pragma: no cover
+        return False, f"GPU ({name}) の計算の確認に失敗しました"
     return True, name
 
 
@@ -135,6 +175,10 @@ def describe() -> dict:
 
         out["cupy"] = cp.__version__
         out["cuda_runtime"] = int(cp.cuda.runtime.runtimeGetVersion())
+        out["cuda_driver"] = int(cp.cuda.runtime.driverGetVersion())
+        out["nvrtc"] = ".".join(str(v) for v in cp.cuda.nvrtc.getVersion())
+        props = cp.cuda.runtime.getDeviceProperties(0)
+        out["compute_capability"] = f"{int(props['major'])}.{int(props['minor'])}"
     return out
 
 

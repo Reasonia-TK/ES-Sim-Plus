@@ -828,6 +828,7 @@ const en: Resources = {
     uiVersion: "UI",
     backendVersion: "Backend",
     device: "Compute device",
+    gpuReason: "Why the GPU is not used",
     schemaFields: "Schema",
     schemaFieldCount: "{{n}} fields ({{defs}} types)",
     notConnected: "not connected",

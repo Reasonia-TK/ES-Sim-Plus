@@ -31,7 +31,15 @@ function AboutBody() {
       <span>{t("dialog.backendVersion")}</span>
       <span>{status === "connected" && info ? info.version : t("dialog.notConnected")}</span>
       <span>{t("dialog.device")}</span>
-      <span>{info ? (info.gpu ? t("status.gpu") : t("status.cpu")) + (info.numba ? "" : ` · ${t("status.backendNumbaOff")}`) : "-"}</span>
+      <span>
+        {info ? (info.gpu ? t("status.gpu") + (info.gpuInfo ? ` (${info.gpuInfo})` : "") : t("status.cpu")) + (info.numba ? "" : ` · ${t("status.backendNumbaOff")}`) : "-"}
+      </span>
+      {info && !info.gpu && info.gpuInfo && (
+        <>
+          <span>{t("dialog.gpuReason")}</span>
+          <span className="hint">{info.gpuInfo}</span>
+        </>
+      )}
       <span>{t("dialog.schemaFields")}</span>
       <span>{schema ? t("dialog.schemaFieldCount", { n: stats.fields, defs: stats.defs }) : "-"}</span>
     </div>

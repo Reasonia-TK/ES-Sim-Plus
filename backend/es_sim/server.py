@@ -26,7 +26,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from . import _numba_kernels  # noqa: F401 (eager import。理由は下のコメント参照)
-from .backend import gpu_available
 from .boltz import DEFAULT_BOLTZ_OPTS, boltzpm_available, run_boltz_sweep
 from .fem import solve
 from .lxcat import parse_lxcat
@@ -106,8 +105,8 @@ def health():
         "status": "ok",
         "version": __version__,
         "instance": SERVER_INSTANCE,
-        # "gpu" は v2 エンジン (mesh.mode="cartesian") が CUDA を使えるか (prompts/119)
-        "gpu": bool(dev["cuda"]) or gpu_available(),
+        # "gpu" は v2 エンジン (mesh.mode="cartesian") が CUDA を使えるか (prompts/119)。使えない理由は v2.cuda_info
+        "gpu": bool(dev["cuda"]),
         "numba": _numba_kernels.HAVE_NUMBA,
         # UI v2 のジョブ (/v2/jobs・/v2/events、prompts/130 P6d) がある
         "jobs": True,

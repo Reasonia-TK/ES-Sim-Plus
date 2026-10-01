@@ -19,6 +19,12 @@ describe("backend connection", () => {
       numba: false,
     });
     expect(parseHealth({ status: "ok", version: "1" }).numba).toBe(true);
+    // GPU の名前か、使えない理由 (v2.cuda_info、P8a)
+    expect(parseHealth({ status: "ok", version: "1", gpu: false, v2: { cuda: false, cuda_info: "NVIDIA のドライバが古い" } })).toMatchObject({
+      gpu: false,
+      gpuInfo: "NVIDIA のドライバが古い",
+    });
+    expect(parseHealth({ status: "ok", version: "1" }).gpuInfo).toBeUndefined();
     expect(() => parseHealth({ status: "down" })).toThrow();
   });
 

@@ -50,7 +50,7 @@ def _lam_max(A: sp.csr_matrix, dinv: np.ndarray, iters: int = 15, seed: int = 0)
 
 
 def _dense_inverse(A: sp.spmatrix, singular: bool, cp):
-    """密な逆行列 (GPU の cuSOLVER で。field.gmg.dense_inverse 参照)。"""
+    """密な逆行列 (GPU で。field.gmg.dense_inverse 参照)。"""
     from ..field.gmg import dense_inverse
 
     return dense_inverse(A.toarray(), singular, xp=cp)

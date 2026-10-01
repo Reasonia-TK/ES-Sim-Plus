@@ -2,8 +2,9 @@
 // 長さの単位・バックエンドの状態 (クリックで接続の設定、未接続なら起動の仕方を添える)。
 
 import { useState } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import { useConnection } from "../backend/connection";
+import { useConnection, type BackendInfo } from "../backend/connection";
 import { ProgressBar, useTicker } from "../jobs/JobRow";
 import { jobElapsed, jobName, sortedJobs, useJobs } from "../jobs/jobsStore";
 import { formatElapsed } from "../util/format";
@@ -14,6 +15,12 @@ import { useStatic } from "../results/staticResults";
 import { lengthUnitLabel } from "../util/format";
 import { showPortDialog } from "./dialogs";
 import { useMessages } from "./messages";
+
+/** 計算デバイスの説明 (GPU の名前、CPU なら GPU を使えない理由) */
+function deviceText(t: TFunction, info: BackendInfo | null): string {
+  if (!info?.gpuInfo) return "";
+  return info.gpu ? `${t("status.gpu")}: ${info.gpuInfo}` : `${t("dialog.gpuReason")}: ${info.gpuInfo}`;
+}
 
 export function BackendBadge() {
   const { t } = useTranslation();
@@ -39,7 +46,7 @@ export function BackendBadge() {
       type="button"
       className={`status-badge badge-${tone}`}
       onClick={() => void showPortDialog()}
-      title={status === "connected" ? t("menu.backendPort") : t("status.startHint", { port })}
+      title={status === "connected" ? [deviceText(t, info), t("menu.backendPort")].filter(Boolean).join("\n") : t("status.startHint", { port })}
     >
       {text}
     </button>
