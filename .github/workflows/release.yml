@@ -1,13 +1,15 @@
-# ES-Sim 配布ビルド (Windows インストーラ) — GitHub Actions
+# ES-Sim 配布ビルド (Windows インストーラ) — GitHub Actions (prompts/133 P8d)
 #
 # トリガー:
-#   - `v*` タグの push (例: v0.1.0) → ビルドして GitHub Release に添付
-#   - 手動実行 (workflow_dispatch)   → ビルドして Artifacts にのみ保存 (Release は作らない)
+#   - `v*` タグの push (例: v0.2.0。ui/src-tauri/tauri.conf.json の version と同じにする) → ビルドして GitHub Release に添付
+#   - 手動実行 (workflow_dispatch) → ビルドして Artifacts にのみ保存 (Release は作らない)
 #
-# 構成: windows-latest 上で
-#   Python + PyInstaller でバックエンドを exe 化 (scripts/build_backend.ps1)
-#   → Node + Rust で Tauri をビルド (UI v2 = ui/、サイドカー同梱)
-#   → NSIS/MSI インストーラを Release へアップロード
+# 手順は scripts/build_app.ps1 と同じ: uv で backend の venv (gpu・依存グループ dist = PyInstaller と NVRTC の wheel)
+#   → PyInstaller の onedir と自己テスト → 第三者の使用許諾 → Tauri (tauri.bundle.json を重ねてバックエンドを
+#   リソースに同梱) → NSIS のインストーラ → scripts/verify_installer.ps1 -NoGpu (一時フォルダへ黙ってインストール、
+#   同梱のバックエンドの自己テスト、アプリを起動して UI から静電場、閉じてバックエンドが残らない、アンインストール)。
+# GitHub のランナーには GPU が無いので GPU の確認はしない。GPU のある PC で scripts/verify_installer.ps1 を走らせる。
+# 署名はしていない (prompts/133)。する場合は ES_SIM_SIGN_SCRIPT (scripts/build_backend.ps1 を参照) を用意する。
 name: release
 
 on:
@@ -24,76 +26,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---- バックエンド (PyInstaller) ----
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ver = (Get-Content ui/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$ver") { throw "タグ $env:GITHUB_REF_NAME と tauri.conf.json の version ($ver) が違います" }
+
+      # ---- バックエンド (uv の venv。Python はランナーの 3.13) ----
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install backend deps + PyInstaller
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+      - name: Backend venv (gpu + dist)
         working-directory: backend
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install pyinstaller
-      - name: Build backend exe (sidecar)
-        shell: pwsh
-        run: |
-          # 診断プローブ (失敗時に ci-log ブランチへ公開される)
-          $ErrorActionPreference = "Continue"
-          "== python ==" | Tee-Object -FilePath backend-build.log
-          python -VV 2>&1 | Tee-Object -Append backend-build.log
-          python -c "import sys; print('prefix:', sys.prefix)" 2>&1 | Tee-Object -Append backend-build.log
-          pip show gmsh pyinstaller 2>&1 | Select-String "Name|Version|Location" | Tee-Object -Append backend-build.log
-          "== import probe ==" | Tee-Object -Append backend-build.log
-          python -c "import gmsh; print('gmsh import ok')" 2>&1 | Tee-Object -Append backend-build.log
-          python -c "import es_sim.server; print('es_sim import ok')" 2>&1 | Tee-Object -Append backend-build.log
-          "== build_backend.ps1 ==" | Tee-Object -Append backend-build.log
-          & powershell -ExecutionPolicy Bypass -File scripts\build_backend.ps1 2>&1 | Tee-Object -Append backend-build.log
-          $code = $LASTEXITCODE
-          "== exit code: $code ==" | Tee-Object -Append backend-build.log
-          if ($code -ne 0) { exit 1 }
-      - name: Publish failure log to ci-log branch (公開診断用)
-        if: failure()
-        shell: pwsh
-        run: |
-          git config user.name "ci"
-          git config user.email "ci@localhost"
-          git switch --orphan ci-log
-          Copy-Item backend-build.log log.txt -ErrorAction SilentlyContinue
-          if (-not (Test-Path log.txt)) { "no log captured" | Set-Content log.txt }
-          git add -f log.txt
-          git commit -m "ci failure log"
-          git push -f origin ci-log
-      - name: Smoke test backend exe
-        shell: pwsh
-        run: |
-          $exe = Get-ChildItem ui\src-tauri\binaries\es-sim-backend-*.exe | Select-Object -First 1
-          $proc = Start-Process -FilePath $exe.FullName -ArgumentList "--port","8317" -PassThru
-          try {
-            $ok = $false
-            foreach ($i in 1..60) {
-              Start-Sleep -Seconds 2
-              try {
-                $r = Invoke-RestMethod -Uri "http://127.0.0.1:8317/health" -TimeoutSec 2
-                if ($r.status -eq "ok") { $ok = $true; break }
-              } catch {}
-            }
-            if (-not $ok) { throw "backend /health が応答しません" }
-            Write-Host "backend health OK: $($r | ConvertTo-Json -Compress)"
-            # numba パッケージ漏れの早期検出 (prompts/76)。PyInstaller ビルドで
-            # numba/llvmlite の同梱が欠けると、_numba_kernels.py の try/except が
-            # ImportError を握りつぶして numpy フォールバックへ静かに倒れるため、
-            # 起動やシミュレーション自体は失敗しない。ここで明示的に落とさないと
-            # 配布版だけが体感で遅い状態のまま気付かれずにリリースされてしまう
-            if ($r.numba -ne $true) { throw "backend /health の numba が true ではありません (PyInstaller のパッケージ漏れの可能性): $($r | ConvertTo-Json -Compress)" }
-          } finally {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-          }
+        env:
+          UV_PYTHON_PREFERENCE: only-system
+        run: uv sync --python 3.13 --extra gpu --group dist
 
-      # ---- フロントエンド (Tauri) ----
+      # ---- フロントエンドと Tauri ----
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
@@ -103,30 +57,40 @@ jobs:
       - name: npm ci
         working-directory: ui
         run: npm ci
-      - name: Tauri build
-        working-directory: ui
+
+      # ---- ビルド (バックエンド → 自己テスト → 使用許諾 → Tauri → インストーラ) と確認 ----
+      - name: Build the installer
+        shell: pwsh
+        run: ./scripts/build_app.ps1
+      - name: Verify the installer (CPU)
+        shell: pwsh
+        run: ./scripts/verify_installer.ps1 -NoGpu
+      - name: Collect logs on failure
+        if: failure()
         shell: pwsh
         run: |
-          $out = & npm run tauri build 2>&1 | Out-String
-          Write-Host $out
-          if ($LASTEXITCODE -ne 0) {
-            $tail = if ($out.Length -gt 6000) { $out.Substring($out.Length - 6000) } else { $out }
-            "## tauri build failed (exit $LASTEXITCODE)`n``````text`n$tail`n``````" |
-              Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
-            exit 1
-          }
+          New-Item -ItemType Directory -Force -Path failure-logs | Out-Null
+          Copy-Item "$env:APPDATA/com.tk.es-sim/backend.log" failure-logs/ -ErrorAction SilentlyContinue
+          Copy-Item -Recurse ui/test-results failure-logs/ -ErrorAction SilentlyContinue
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: es-sim-release-logs
+          path: failure-logs/
+          if-no-files-found: ignore
 
       # ---- 成果物 ----
-      - name: Collect installers
+      - name: Collect the installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release-out | Out-Null
-          Get-ChildItem -Recurse ui\src-tauri\target\release\bundle -Include *.exe,*.msi |
-            Copy-Item -Destination release-out
+          Copy-Item ui/src-tauri/target/release/bundle/nsis/*-setup.exe release-out/
+          Copy-Item ui/src-tauri/target/licenses/THIRD_PARTY_NOTICES.txt release-out/
           Get-ChildItem release-out
       - uses: actions/upload-artifact@v4
         with:
-          name: es-sim-windows-installers
+          name: es-sim-windows-installer
           path: release-out/*
       - name: Create GitHub Release (tag push のみ)
         if: startsWith(github.ref, 'refs/tags/v')

@@ -1,12 +1,10 @@
 # ES-Sim
 
-[![Latest Release](https://img.shields.io/github/v/release/Syb04/ES-Sim)](https://github.com/Syb04/ES-Sim/releases/latest)
-
 2Dスケッチ CAD + 静電場シミュレーション(FEM → 粒子軌道 → PIC-MCC)の個人研究用デスクトップアプリ。
 
-**📦 ダウンロード**: Windows 用インストーラー(setup.exe / msi)は
-**[リリースページ](https://github.com/Syb04/ES-Sim/releases)** から。最新版は
-[こちら](https://github.com/Syb04/ES-Sim/releases/latest)(バックエンド同梱、exe 一つで起動)。
+**📦 ダウンロード**: Windows 用インストーラー (`ES-Sim_<版>_x64-setup.exe`) は **[リリースページ](../../releases)**
+から。バックエンドと GPU の計算に要るもの (CUDA の NVRTC) を同梱していて、インストーラを実行するだけで使える
+(動作条件と注意は下の「インストール (配布版)」)。
 
 平面上に電極・誘電体・空間電荷をスケッチし、そのまま静電場解析(P1-FEM)・荷電粒子の軌道追跡・
 自己無撞着な PIC-MCC 粒子シミュレーションへと展開できる。バックエンドは Python(FastAPI ローカル
@@ -29,7 +27,22 @@
 - `docs/VALIDATION.md` / `docs/validation_report.html` — 検証記録
 - `prompts/` — 開発時のサブエージェント指示書(下記参照)
 
-## 必要環境
+## インストール (配布版)
+
+- **動作条件**: Windows 10/11 (64 ビット)。インストーラは今のユーザーに入れる (既定は `%LOCALAPPDATA%\ES-Sim`、
+  管理者権限は要らない)。
+- **GPU**: NVIDIA の GPU (Turing 以降 = Compute Capability 7.5 以降) と CUDA 13 に対応したドライバ (R580 以降) が
+  あれば、v2 エンジン (メッシュの方式「直交格子 + 埋め込み境界」) の静電場・PIC・DSMC・流体 2D が GPU で動く。
+  CUDA Toolkit は要らない。条件を満たさなければ CPU で計算し、理由を「ヘルプ › バージョン情報」に出す。
+  最初の GPU の計算ではカーネルのコンパイルに数秒かかる (2 回目からは速い)。
+- **署名**: インストーラとアプリは署名していない。実行すると SmartScreen の警告が出る (「詳細情報」→「実行」)。
+  Smart App Control が有効な PC では起動できない。
+- **同梱のソフトウェアの使用許諾**: インストール先の `THIRD_PARTY_NOTICES.txt` (gmsh は GPL-2.0 以降、CUDA の
+  NVRTC は NVIDIA の使用許諾、ほかは MIT・BSD・Apache など)。
+- アンインストールは Windows の「設定 › アプリ」から。困ったときは [docs/PACKAGING.md](docs/PACKAGING.md) の
+  トラブルシューティング。
+
+## 必要環境 (開発)
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (Python依存関係・仮想環境の管理)
@@ -39,10 +52,13 @@
   (v2 エンジン `mesh.mode: "cartesian"` の GPU 実行に使う。CUDA カーネルは実行時に NVRTC で
   コンパイルするので nvcc・MSVC は不要。Windows の Smart App Control 有効環境では公開直後の
   CuPy/numba のバイナリがブロックされるため、`pyproject.toml` の `[tool.uv]` で動作確認済みの版に制限している)
+- (配布ビルド)依存グループ dist (PyInstaller と NVRTC の wheel) → `uv sync --extra gpu --group dist`。
+  手順は [docs/PACKAGING.md](docs/PACKAGING.md)
 
 ## セットアップと起動
 
-エンドユーザー向けの配布ビルド(exe 一つで起動)は **[docs/PACKAGING.md](docs/PACKAGING.md)** を参照。
+配布ビルド (インストーラ) の作り方と確かめ方は **[docs/PACKAGING.md](docs/PACKAGING.md)** を参照
+(`scripts\build_app.ps1` → `scripts\verify_installer.ps1`)。
 
 ### 1. バックエンド
 
@@ -72,7 +88,7 @@ npm run tauri dev   # Tauri のアプリ (UI v2)。ブラウザだけなら npm 
 > が追加済み。既存の `node_modules` が古い状態で残っていると解決に失敗するため、
 > pull 後は毎回 `npm install` を実行しておくこと。
 
-アプリが起動したらツールバー右上に `backend v0.1.0` と表示されれば疎通OK。
+アプリが起動したらステータスバー右下に `backend v<版> (GPU)` (GPU を使えなければ `(CPU)`) と表示されれば疎通OK。
 
 ### UI v2 のテスト(prompts/130)
 
@@ -247,10 +263,13 @@ GUI のメッシュ設定で「直交格子+埋め込み境界 (v2・GPU)」を�
   適応細分化 (`adaptive`) は静電場のみ
 - バッチ実行(`python -m es_sim.batch`)はプロセスごとに独立しているため、
   `pic.mcc.use_dsmc_gas`(直前のDSMC結果をサーバー保持状態から参照する機能)は未対応
+- 配布版 (インストーラ) は Windows だけ・署名なし。GPU は CUDA 13 の対象 (Turing 以降、ドライバ R580 以降) だけで、
+  古い GPU・ドライバでは CPU で計算する ([prompts/133](prompts/133-distribution-plan.md))
 
 ## ロードマップ
 
-- v2 再構築 (UI/CAD の作り直し・配布) — [prompts/119](prompts/119-v2-rebuild-plan.md)
+- v2 再構築 (計算の GPU 化・UI/CAD の作り直し・配布) — 済み (P0〜P8、[prompts/119](prompts/119-v2-rebuild-plan.md))
+- 配布物のコード署名 (Smart App Control が有効な PC 向け。今は署名なし、[prompts/133](prompts/133-distribution-plan.md))
 - Turnerベンチマーク ケース1 の v2 GPU PIC での再検証、ケース2〜4 の追加検証
 - 粒子軌道追跡の着地点分布ヒストグラム表示
 - バイナリ転送(大規模メッシュ時のJSON転送オーバーヘッド対策)

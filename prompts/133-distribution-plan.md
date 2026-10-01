@@ -153,3 +153,35 @@
   0.7 s)、閉じるとバックエンドも止まり、アンインストールで消える。**119 の P8 の完了基準「インストーラから GPU
   計算まで動作」をこの PC で確かめた** (CUDA の無い PC は環境変数と PATH から CUDA Toolkit を除いて模した。
   別の PC での確認はしていない)。
+
+## P8d の記録 (2026-10-02)
+
+- **CI のリリース** (`.github/workflows/release.yml` を書き直し): windows-latest で Python 3.13・uv (`uv sync --extra gpu
+  --group dist`)・Node 22 (`npm ci`)・Rust → `scripts/build_app.ps1` → `scripts/verify_installer.ps1 -NoGpu` →
+  インストーラと `THIRD_PARTY_NOTICES.txt` を Artifacts と (タグのとき) Release に。タグと `tauri.conf.json` の版が
+  違えば止める。失敗したら backend.log と Playwright の結果を Artifacts に (以前の、診断を `ci-log` ブランチへ
+  強制 push する手順はやめた)。GitHub で実際に走らせての確認はまだ (手動実行かタグの push が要る)。
+- **GPU の無い PC・CI の確認**: `verify_installer.ps1 -NoGpu` は `CUDA_VISIBLE_DEVICES=-1` で GPU を隠し、自己テストの
+  GPU の項目は飛ばし、UI ではバッジが CPU・バージョン情報に「GPU を使えない理由」・静電場 (gmsh と FEM) を確かめる
+  (`ui/e2e-installed`、`E2E_EXPECT_GPU=0`。流れは `ui/e2e/flows.ts` にまとめた)。この PC で通した。GPU が隠されて
+  いるときの理由は「NVIDIA の GPU が見つかりません (CUDA_VISIBLE_DEVICES=-1 で隠されています)」。
+- **第三者の使用許諾** (`scripts/collect_licenses.py`): CPython と `es-sim[gpu]`・`nvidia-cuda-nvrtc` の実行時の依存
+  (extras を含めて再帰、作るときだけのものは除く) 33・npm の `dependencies` (再帰) 92・Tauri の Windows 向けの通常の
+  依存 (cargo metadata) 242 の名前・版・使用許諾と文面を `THIRD_PARTY_NOTICES.txt` (2.7 MB) に。インストール先の
+  ルートに入れる。GPL は gmsh だけ (ソースの入手先を冒頭に書いた)。文面がパッケージに無いもの 12 (npm 2・Rust 10) は
+  使用許諾の名前だけ。ES-Sim 自身の使用許諾は未定 (公開するときに決める)。
+- **署名の差し込み口**: 環境変数 `ES_SIM_SIGN_SCRIPT` (引数のファイル 1 つに署名する PowerShell のスクリプト) を
+  指定すると、`build_backend.ps1` がバックエンドの署名の無い exe・dll・pyd (211) に、Tauri が `signCommand` で
+  アプリの exe・リソースの exe・NSIS のプラグイン・アンインストーラ・インストーラに同じスクリプトで署名する。
+  記録するだけの仮のスクリプトで呼ばれる順と対象を確かめた (本物の証明書では試していない)。
+- **文書**: README (配布版のインストール・動作条件・署名なし・使用許諾、開発の必要環境に dist、ロードマップで v2 再構築を
+  済みに)、SPEC (配布形態・gmsh の GPL・署名のリスク)、PACKAGING (使用許諾・署名・CI)。
+
+## P8 のまとめ
+
+119 の P8 (PyInstaller に CuPy + CUDA ランタイム (NVRTC 等) を同梱、SAC 環境での起動確認、完了基準「インストーラから
+GPU 計算まで動作」): GPU の計算を NVRTC だけで動くようにし (P8a)、バックエンドを onedir にして NVRTC だけを同梱
+(P8b)、Tauri のリソースとして NSIS のインストーラに入れ、インストール → UI から GPU の PIC → アンインストールまでを
+スクリプトで確かめた (P8c)。インストーラ 156 MB (P6f の onefile は 1.17 GB で GPU が動かなかった)。CI のリリース・
+使用許諾・署名の差し込み口・文書 (P8d)。**SAC 環境での起動確認はしていない**: 署名しない判断 (当面) のため
+(SAC は署名の無いファイルを止める)。署名するときに ES_SIM_SIGN_SCRIPT で足して確かめる。

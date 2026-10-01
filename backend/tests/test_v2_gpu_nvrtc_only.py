@@ -88,16 +88,25 @@ def test_spd_inverse_falls_back_to_cpu_when_not_spd():
     np.testing.assert_allclose(inv, np.linalg.inv(asym), rtol=1e-14)
 
 
+class _NoDevice(RuntimeError):
+    status = 100  # cudaErrorNoDevice (CuPy の CUDARuntimeError と同じ属性)
+
+
 def _fake_cupy(driver=13010, runtime=13000, count=1, cc=(8, 6), kernel_error=None):
     def arange(n, dtype=None):
         if kernel_error:
             raise kernel_error
         return np.arange(n, dtype=dtype)
 
+    def device_count():
+        if count is None:
+            raise _NoDevice("cudaErrorNoDevice: no CUDA-capable device is detected")
+        return count
+
     rt = types.SimpleNamespace(
         driverGetVersion=lambda: driver,
         runtimeGetVersion=lambda: runtime,
-        getDeviceCount=lambda: count,
+        getDeviceCount=device_count,
         getDeviceProperties=lambda i: {"name": b"Fake GPU", "major": cc[0], "minor": cc[1]},
     )
     return types.SimpleNamespace(cuda=types.SimpleNamespace(runtime=rt), arange=arange, float64=np.float64)
@@ -109,13 +118,15 @@ def _fake_cupy(driver=13010, runtime=13000, count=1, cc=(8, 6), kernel_error=Non
         ({}, True, "Fake GPU"),
         ({"driver": 12040}, False, r"ドライバが古い.*CUDA 12\.4 まで.*CUDA 13 に対応したドライバ \(R580 以降\)"),
         ({"driver": 0}, False, "ドライバが見つかりません"),
-        ({"count": 0}, False, "デバイスが見つかりません"),
+        ({"count": 0}, False, "NVIDIA の GPU が見つかりません$"),
+        ({"count": None}, False, "NVIDIA の GPU が見つかりません$"),
         ({"cc": (6, 1)}, False, r"Compute Capability 6\.1.*対象外"),
         ({"kernel_error": RuntimeError("nvrtc64_130_0.dll not found")}, False, "カーネルを実行できません.*nvrtc"),
     ],
 )
 def test_cuda_status_conditions(monkeypatch, kw, ok, pattern):
     monkeypatch.setitem(sys.modules, "cupy", _fake_cupy(**kw))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device_mod.cuda_status.cache_clear()
     try:
         got_ok, info = device_mod.cuda_status()
@@ -123,6 +134,17 @@ def test_cuda_status_conditions(monkeypatch, kw, ok, pattern):
         device_mod.cuda_status.cache_clear()
     assert got_ok is ok
     assert re.search(pattern, info), info
+
+
+def test_cuda_status_mentions_hidden_devices(monkeypatch):
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy(count=None))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "-1")
+    device_mod.cuda_status.cache_clear()
+    try:
+        ok, info = device_mod.cuda_status()
+    finally:
+        device_mod.cuda_status.cache_clear()
+    assert not ok and info == "NVIDIA の GPU が見つかりません (CUDA_VISIBLE_DEVICES=-1 で隠されています)"
 
 
 # ---- NVRTC だけの環境 ------------------------------------------------------------------------------

@@ -67,9 +67,14 @@ def cuda_status() -> tuple[bool, str]:
     try:
         n = cp.cuda.runtime.getDeviceCount()
     except Exception as exc:
-        return False, f"CUDA ランタイムを初期化できません: {type(exc).__name__}: {exc}"
+        if getattr(exc, "status", None) == 100:  # cudaErrorNoDevice
+            n = 0
+        else:
+            return False, f"CUDA ランタイムを初期化できません: {type(exc).__name__}: {exc}"
     if n <= 0:
-        return False, "CUDA デバイスが見つかりません"
+        hidden = os.environ.get("CUDA_VISIBLE_DEVICES")
+        return False, "NVIDIA の GPU が見つかりません" + (
+            f" (CUDA_VISIBLE_DEVICES={hidden} で隠されています)" if hidden is not None else "")
     try:
         props = cp.cuda.runtime.getDeviceProperties(0)
         name = props["name"].decode() if isinstance(props["name"], bytes) else str(props["name"])

@@ -4,7 +4,7 @@
 
 - 版: 0.1(初版・対話による仕様決定の結果)
 - 日付: 2026-07-21
-- 用途: 個人の研究・検討ツール(配布は当面考慮しない)
+- 用途: 個人の研究・検討ツール(配布は v2 P8 で Windows のインストーラを用意、prompts/133)
 
 ---
 
@@ -87,7 +87,9 @@ FEM の疎行列直接法ソルブ(スパースLU)は CPU の方が実装・安�
 ```
 
 - 開発中はフロント(`npm run tauri dev`)とバックエンド(`uvicorn`)を別々に起動する
-- 配布形態にする段階で、Tauri のサイドカー機能(PyInstaller 等で固めた exe)に移行する
+- 配布形態 (v2 P8、prompts/133・docs/PACKAGING.md): バックエンドを PyInstaller の onedir にまとめ、Tauri の
+  リソースとして NSIS のインストーラに同梱する。アプリが起動時に立ち上げ、終了時に止める。GPU は CUDA の NVRTC
+  だけを同梱して動かす (cuBLAS などは使わない)
 - 計算結果のうち大きい配列(節点座標・要素・解ベクトル)は転送量を意識し、
   まず JSON、プロファイル次第でバイナリ(ArrayBuffer)化する
 
@@ -275,7 +277,7 @@ ES-Sim/
     ├── package.json     # React 19 + Vite + TypeScript
     ├── src/             # app / model / pages / graphics (WebGL2) / plots / jobs / results / io / i18n
     ├── e2e/             # E2E (Playwright)
-    └── src-tauri/       # Tauri 2 (Rust シェル、サイドカーの起動と停止)
+    └── src-tauri/       # Tauri 2 (Rust シェル、同梱のバックエンドの起動と停止)
 ```
 
 ## 12. ロードマップと完了基準
@@ -301,6 +303,7 @@ ES-Sim/
 |---|---|
 | FEM-PIC の実装難度(粒子位置特定・電荷堆積) | フェーズ2で walk探索・重心座標補間を先に固め、PICで再利用 |
 | Windows での GPU 制約 | numpy で全機能完結。CuPy は NVIDIA 限定のオプションと割り切る |
-| gmsh の配布サイズ・ライセンス(GPL) | 個人利用のため問題なし。配布する場合は Triangle 等への差し替えを検討 |
+| gmsh の配布サイズ・ライセンス(GPL) | 配布物に同梱 (GPL-2.0 以降)。使用許諾とソースの入手先は THIRD_PARTY_NOTICES.txt。開発が一通り終わったらリポジトリを公開する予定 (prompts/133) |
+| 配布物の署名 | 当面は署名しない (SmartScreen の警告、Smart App Control の PC では起動できない)。署名は ES_SIM_SIGN_SCRIPT で後から足せる (docs/PACKAGING.md) |
 | JSON転送のオーバーヘッド | メッシュ10万要素程度までは実測上許容の見込み。超えたらバイナリ化 |
 | Tauri(Rust)ビルド環境 | シェルは薄く保ち、Rustコードはほぼ触らない構成にする |

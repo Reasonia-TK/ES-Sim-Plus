@@ -1,19 +1,21 @@
 ﻿# ES-Sim のインストーラの確認 (Windows、prompts/133 P8c)。
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 [-Installer <setup.exe>] [-KeepInstalled]
+#   powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 [-Installer <setup.exe>] [-KeepInstalled] [-NoGpu]
 #
 # 1. 一時フォルダへ黙ってインストール (今のユーザーだけ、ショートカットは作らない: /S /NS /D=)
-# 2. 同梱のバックエンドの自己テスト (selftest --require-gpu)
+# 2. 同梱のバックエンドの自己テスト (selftest --require-gpu。-NoGpu なら GPU の確認は飛ばす)
 # 3. CUDA の環境変数を消して PATH から CUDA Toolkit を除いた状態 (CUDA Toolkit の無い PC と同じ) でアプリを起動。
 #    WebView2 のデータは一時フォルダ (普段のアプリのデータ・自動保存に触れない)、CDP のポートを開ける
 # 4. ui/e2e-installed (Playwright を CDP でつなぐ): 同梱のバックエンドにつながり GPU を使えること、サンプルの
-#    容量結合プラズマを直交格子 (PIC は GPU だけ) で走らせて結果まで
+#    容量結合プラズマを直交格子 (PIC は GPU だけ) で走らせて結果まで。-NoGpu (GPU の無い PC・CI) は
+#    CUDA_VISIBLE_DEVICES=-1 で GPU を隠し、CPU で動くこと・GPU を使えない理由の表示・静電場 (gmsh と FEM) を見る
 # 5. アプリを閉じて、バックエンドのプロセスが残らないこと
 # 6. 黙ってアンインストール (-KeepInstalled なら残す)
-# アプリの設定フォルダ (AppConfig) の backend.log には追記される。GPU が要る (NVIDIA のドライバ R580 以降)。
+# アプリの設定フォルダ (AppConfig) の backend.log には追記される。-NoGpu でなければ GPU が要る (ドライバ R580 以降)。
 param(
     [string]$Installer = "",
     [switch]$KeepInstalled,
+    [switch]$NoGpu,
     [int]$CdpPort = 9233
 )
 $ErrorActionPreference = "Stop"
@@ -44,6 +46,11 @@ $env:PATH = (($env:PATH -split ';') | Where-Object {
             (Test-Path (Join-Path $_ 'x64\nvrtc64_*.dll')))
     }) -join ';'
 
+if ($NoGpu) {
+    $env:CUDA_VISIBLE_DEVICES = "-1"   # GPU のある PC でも CPU の流れを確かめる (CI はもともと GPU が無い)
+    $env:E2E_EXPECT_GPU = "0"
+}
+
 $app = $null
 $ok = $false
 try {
@@ -52,14 +59,16 @@ try {
     $t0 = Get-Date
     $p = Start-Process -FilePath $Installer -ArgumentList "/S", "/NS", "/D=$Dir" -PassThru -Wait
     if ($p.ExitCode -ne 0) { throw "インストーラが失敗しました (exit $($p.ExitCode))" }
-    foreach ($f in @("es-sim.exe", "uninstall.exe", "backend\es-sim-backend.exe", "backend\_internal\cuda\bin\x64\nvrtc64_130_0.dll")) {
+    foreach ($f in @("es-sim.exe", "uninstall.exe", "THIRD_PARTY_NOTICES.txt", "backend\es-sim-backend.exe", "backend\_internal\cuda\bin\x64\nvrtc64_130_0.dll")) {
         if (-not (Test-Path (Join-Path $Dir $f))) { throw "インストール先に $f がありません" }
     }
     $installed = (Get-ChildItem -Recurse -File $Dir | Measure-Object -Sum Length).Sum / 1MB
     Write-Host ("インストール {0:N1} s、{1:N0} MB" -f ((Get-Date) - $t0).TotalSeconds, $installed)
 
     Step "同梱のバックエンドの自己テスト"
-    & (Join-Path $Dir "backend\es-sim-backend.exe") selftest --require-gpu
+    $testArgs = @("selftest")
+    if (-not $NoGpu) { $testArgs += "--require-gpu" }
+    & (Join-Path $Dir "backend\es-sim-backend.exe") @testArgs
     if ($LASTEXITCODE -ne 0) { throw "同梱のバックエンドの自己テストに失敗しました" }
 
     Step "アプリを起動 (CDP $CdpPort、WebView2 のデータ $WebView)"
@@ -83,7 +92,7 @@ try {
     }
     if ((Backend-Processes).Count -lt 1) { throw "同梱のバックエンドが起動していません (AppConfig の backend.log を確認)" }
 
-    Step "UI から GPU の計算 (Playwright、e2e-installed)"
+    Step ("UI から計算 (Playwright、e2e-installed、{0})" -f $(if ($NoGpu) { "CPU" } else { "GPU" }))
     $env:E2E_CDP_URL = "http://127.0.0.1:$CdpPort"
     $Shot = Join-Path ([IO.Path]::GetTempPath()) "es-sim-verify-last.png"   # 確認用 (一時フォルダの外に残す)
     $env:E2E_SCREENSHOT = $Shot

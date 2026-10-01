@@ -16,8 +16,10 @@
 | `backend/pyi_rth_es_sim.py` | 実行時フック (CUDA_PATH を同梱の NVRTC に向ける) |
 | `backend/es_sim/selftest.py` | 自己テスト (`es-sim-backend selftest`: gmsh・numba・pyamg・ezdxf・boltzpmp・GPU の計算) |
 | `scripts/build_backend.ps1` | バックエンドのビルド (onedir) + CUDA の環境変数なしでの自己テスト |
-| `scripts/build_app.ps1` | 配布ビルド一式 (バックエンド → Tauri → NSIS のインストーラ) |
-| `scripts/verify_installer.ps1` | インストーラの確認 (インストール → UI から GPU の計算 → 終了 → アンインストール) |
+| `scripts/build_app.ps1` | 配布ビルド一式 (バックエンド → 使用許諾 → Tauri → NSIS のインストーラ) |
+| `scripts/verify_installer.ps1` | インストーラの確認 (インストール → UI から計算 (GPU、`-NoGpu` は CPU) → 終了 → アンインストール) |
+| `scripts/collect_licenses.py` | 第三者のソフトウェアの使用許諾を `THIRD_PARTY_NOTICES.txt` にまとめる (Python・npm・Rust) |
+| `.github/workflows/release.yml` | リリースビルド (タグ `v*` の push か手動実行、GitHub のランナーで CPU の確認まで) |
 | `scripts/build_backend.sh` | Linux/macOS 用 (検証用) |
 | `ui/src-tauri/tauri.conf.json` | アプリの設定。`bundle.active: false` (これだけでビルドすると exe だけ。開発も) |
 | `ui/src-tauri/tauri.bundle.json` | 配布ビルドで重ねる設定 (`--config`): NSIS、`backend/dist/es-sim-backend/` をリソースの `backend/` に |
@@ -41,6 +43,7 @@ cd ..
 powershell -ExecutionPolicy Bypass -File scripts\build_app.ps1 -RequireGpu
 
 # 3. 確かめる: 一時フォルダへインストール → CUDA の環境変数なしで起動 → UI から GPU の計算 → 閉じる → アンインストール
+#    (GPU の無い PC は -NoGpu: GPU を隠して CPU で動くこと・GPU を使えない理由の表示・静電場を見る)
 powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1
 ```
 
@@ -50,6 +53,34 @@ powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1
   `scripts\build_app.ps1 -SkipBackend` はそれを使ってアプリだけ作り直す。
 - `npm run tauri build` を `--config src-tauri/tauri.bundle.json` なしで実行すると exe だけでインストーラは作らない
   (バックエンドの無いインストーラを作らないため)。
+
+## 第三者のソフトウェアの使用許諾
+
+`scripts\collect_licenses.py` (build_app.ps1 が実行) が配布物に入るものの一覧と使用許諾の文面を
+`ui\src-tauri\target\licenses\THIRD_PARTY_NOTICES.txt` にまとめ、インストール先のルートに入れる (GitHub Release にも
+添付)。対象は CPython と `es-sim[gpu]` と `nvidia-cuda-nvrtc` の実行時の依存 (再帰、PyInstaller・pytest など作る
+ときだけのものは除く)、UI の npm の `dependencies` (再帰)、Tauri のアプリの Windows 向けの通常の依存 (cargo
+metadata)。gmsh は GPL-2.0 以降 (ソースは https://gmsh.info/)、NVRTC は NVIDIA の使用許諾 (再配布できる部品)。
+ES-Sim 自身の使用許諾はまだ決めていない (リポジトリを公開するときに決める)。
+
+## 署名 (後から足す)
+
+今は署名しない (prompts/133 の判断)。署名するときは「引数のファイル 1 つに署名する」PowerShell のスクリプトを
+用意し、環境変数 `ES_SIM_SIGN_SCRIPT` に指定して `scripts\build_app.ps1` を実行する。`build_backend.ps1` が
+バックエンドの署名の無い exe・dll・pyd 全部に (Smart App Control の PC で動かすには同梱のもの全部に要る)、Tauri が
+アプリの exe とインストーラに (`bundle.windows.signCommand`) 同じスクリプトで署名する。
+
+```powershell
+# sign.ps1 (例。証明書・タイムスタンプのサーバは持っているものに合わせる)
+param([string]$File)
+& signtool.exe sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /a $File
+if ($LASTEXITCODE -ne 0) { throw "署名に失敗しました: $File" }
+```
+
+```powershell
+$env:ES_SIM_SIGN_SCRIPT = "C:\path\to\sign.ps1"
+powershell -ExecutionPolicy Bypass -File scripts\build_app.ps1 -RequireGpu
+```
 
 ## インストーラ (NSIS)
 
@@ -133,6 +164,10 @@ cd ../ui/src-tauri && cargo check
 
 ## GitHub Actions によるリリースビルド
 
-`v*` タグを push すると GitHub Actions (windows-latest) がインストーラを作り GitHub Release に添付する
-(`.github/workflows/release.yml`)。手動実行 (workflow_dispatch) では Artifacts にのみ保存される。
-**onedir・NVRTC・自己テストに合わせるのは P8d** (それまでは旧来の手順のまま)。
+`v*` タグを push すると GitHub Actions (windows-latest) がインストーラを作り、`THIRD_PARTY_NOTICES.txt` と一緒に
+GitHub Release に添付する (`.github/workflows/release.yml`)。手動実行 (workflow_dispatch) では Artifacts にのみ
+保存される。手順は `scripts\build_app.ps1` と同じ (uv の venv に gpu と dist、npm ci、Rust) で、最後に
+`scripts\verify_installer.ps1 -NoGpu` (インストール・同梱のバックエンドの自己テスト・アプリを起動して UI から
+静電場・閉じる・アンインストール) まで行う。GitHub のランナーには GPU が無いので、GPU の確認は GPU のある PC で
+`scripts\verify_installer.ps1` を走らせる。タグは `ui/src-tauri/tauri.conf.json` の `version` と同じにする
+(違うと止める)。失敗したときは backend.log と Playwright の結果を Artifacts (`es-sim-release-logs`) に残す。

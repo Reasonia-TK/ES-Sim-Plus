@@ -4,7 +4,8 @@
     "active": true,
     "targets": ["nsis"],
     "resources": {
-      "../../backend/dist/es-sim-backend/": "backend/"
+      "../../backend/dist/es-sim-backend/": "backend/",
+      "target/licenses/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
     }
   }
 }

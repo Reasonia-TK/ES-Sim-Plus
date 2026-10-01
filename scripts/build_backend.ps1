@@ -8,6 +8,9 @@
 # PyInstaller で backend\dist\es-sim-backend\ (onedir: es-sim-backend.exe と _internal\) を作り、CUDA の環境変数を
 # 消して PATH から CUDA Toolkit を除いた状態 (CUDA Toolkit の無い PC と同じ) で自己テスト (selftest) を走らせる。
 # -RequireGpu は GPU を使えないことも失敗にする (GPU のある開発機での確認用。CI は GPU が無いので付けない)。
+# 署名 (prompts/133: 当面は署名しない): 環境変数 ES_SIM_SIGN_SCRIPT に「引数のファイル 1 つに署名する」PowerShell の
+# スクリプトを指定すると、署名の無い exe・dll・pyd に署名してから自己テストする (Smart App Control の PC で動かすには
+# 同梱のもの全部に署名が要る)。失敗したらスクリプトが例外を投げるか、終了コード 0 以外を返すこと。
 param(
     [switch]$RequireGpu,
     [switch]$SkipTest
@@ -28,6 +31,18 @@ try {
     & $Python -m PyInstaller --clean --noconfirm es_sim_server.spec
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller のビルドに失敗しました" }
     $Exe = Join-Path $Backend "dist\es-sim-backend\es-sim-backend.exe"
+
+    if ($env:ES_SIM_SIGN_SCRIPT) {
+        $sign = (Resolve-Path $env:ES_SIM_SIGN_SCRIPT).Path
+        $files = @(Get-ChildItem -Recurse -File (Split-Path $Exe) -Include *.exe, *.dll, *.pyd |
+                Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne "Valid" })
+        Write-Host "== 署名 ($($files.Count) ファイル、$sign) =="
+        foreach ($f in $files) {
+            $global:LASTEXITCODE = 0
+            & $sign $f.FullName
+            if ($LASTEXITCODE -ne 0) { throw "署名に失敗しました: $($f.FullName)" }
+        }
+    }
 
     if (-not $SkipTest) {
         Write-Host "== 自己テスト (CUDA の環境変数なし) =="
