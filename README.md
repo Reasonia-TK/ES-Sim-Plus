@@ -37,8 +37,8 @@
   最初の GPU の計算ではカーネルのコンパイルに数秒かかる (2 回目からは速い)。
 - **署名**: インストーラとアプリは署名していない。実行すると SmartScreen の警告が出る (「詳細情報」→「実行」)。
   Smart App Control が有効な PC では起動できない。
-- **同梱のソフトウェアの使用許諾**: インストール先の `THIRD_PARTY_NOTICES.txt` (gmsh は GPL-2.0 以降、CUDA の
-  NVRTC は NVIDIA の使用許諾、ほかは MIT・BSD・Apache など)。
+- **使用許諾**: ES-Sim は GPL-3.0-or-later (NVIDIA CUDA のライブラリについての追加許可付き、下の「ライセンス」)。同梱のソフトウェアはインストール先の
+  `THIRD_PARTY_NOTICES.txt` (gmsh は GPL-2.0 以降、CUDA の NVRTC は NVIDIA の使用許諾、ほかは MIT・BSD・Apache など)。
 - アンインストールは Windows の「設定 › アプリ」から。困ったときは [docs/PACKAGING.md](docs/PACKAGING.md) の
   トラブルシューティング。
 
@@ -265,6 +265,14 @@ GUI のメッシュ設定で「直交格子+埋め込み境界 (v2・GPU)」を�
   `pic.mcc.use_dsmc_gas`(直前のDSMC結果をサーバー保持状態から参照する機能)は未対応
 - 配布版 (インストーラ) は Windows だけ・署名なし。GPU は CUDA 13 の対象 (Turing 以降、ドライバ R580 以降) だけで、
   古い GPU・ドライバでは CPU で計算する ([prompts/133](prompts/133-distribution-plan.md))
+
+## ライセンス
+
+ES-Sim は [GNU General Public License version 3](LICENSE) またはそれ以降 (GPL-3.0-or-later) で配布する。
+NVIDIA CUDA のライブラリ (配布物に同梱する NVRTC など、NVIDIA の使用許諾のもの) と組み合わせて配ることを許す
+追加許可 (GPL v3 第 7 条) を付けている (`LICENSE` の冒頭)。
+配布物 (インストーラ) に同梱している第三者のソフトウェアの使用許諾は、インストール先の `THIRD_PARTY_NOTICES.txt`
+(作り方は [docs/PACKAGING.md](docs/PACKAGING.md))。
 
 ## ロードマップ
 

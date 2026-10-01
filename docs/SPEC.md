@@ -303,7 +303,7 @@ ES-Sim/
 |---|---|
 | FEM-PIC の実装難度(粒子位置特定・電荷堆積) | フェーズ2で walk探索・重心座標補間を先に固め、PICで再利用 |
 | Windows での GPU 制約 | numpy で全機能完結。CuPy は NVIDIA 限定のオプションと割り切る |
-| gmsh の配布サイズ・ライセンス(GPL) | 配布物に同梱 (GPL-2.0 以降)。使用許諾とソースの入手先は THIRD_PARTY_NOTICES.txt。開発が一通り終わったらリポジトリを公開する予定 (prompts/133) |
+| gmsh の配布サイズ・ライセンス(GPL) | 配布物に同梱 (GPL-2.0 以降)。使用許諾とソースの入手先は THIRD_PARTY_NOTICES.txt。ES-Sim 自身も GPL-3.0-or-later にし、同梱の NVRTC (NVIDIA の使用許諾) と組み合わせて配ることを許す追加許可を付けた (LICENSE。gmsh の側の曖昧さは残る)。開発が一通り終わったらリポジトリを公開する予定 (prompts/133) |
 | 配布物の署名 | 当面は署名しない (SmartScreen の警告、Smart App Control の PC では起動できない)。署名は ES_SIM_SIGN_SCRIPT で後から足せる (docs/PACKAGING.md) |
 | JSON転送のオーバーヘッド | メッシュ10万要素程度までは実測上許容の見込み。超えたらバイナリ化 |
 | Tauri(Rust)ビルド環境 | シェルは薄く保ち、Rustコードはほぼ触らない構成にする |

@@ -219,6 +219,8 @@ def write_notices(comps: list[Component], out_dir: Path) -> Path:
         "ES-Sim に含まれる第三者のソフトウェア (THIRD-PARTY NOTICES)",
         "=" * 78,
         "",
+        "ES-Sim は GNU General Public License version 3 またはそれ以降 (GPL-3.0-or-later) で、NVIDIA CUDA のライブラリ",
+        "(NVRTC など) と組み合わせて配ることを許す追加許可 (GPL v3 第 7 条) を付けています (LICENSE.txt)。",
         "ES-Sim の配布物 (インストーラ) は次のソフトウェアを含みます。各ソフトウェアはそれぞれの使用許諾に従います。",
         "gmsh は GNU General Public License (version 2 以降) で、そのソースは https://gmsh.info/ から入手できます。",
         "NVIDIA CUDA の NVRTC (nvrtc64_*.dll・nvrtc-builtins64_*.dll) は NVIDIA の使用許諾 (下記) による再配布です。",
@@ -250,6 +252,9 @@ def write_notices(comps: list[Component], out_dir: Path) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 日本語の Windows 以外 (GitHub のランナーは cp1252) でも標準出力に日本語を書けるように UTF-8 にする
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=str(ROOT / "ui" / "src-tauri" / "target" / "licenses"))
     args = ap.parse_args(argv)

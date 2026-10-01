@@ -1,7 +1,8 @@
 [project]
 name = "es-sim"
-version = "0.1.0"
+version = "1.0.0"
 description = "2D sketch CAD + electrostatic FEM / particle / PIC simulation backend"
+license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
@@ -35,7 +36,7 @@ dev = ["pytest>=8.0", "httpx>=0.27"]
 constraint-dependencies = ["numba<0.67", "cupy-cuda13x<14.1"]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]  # license の SPDX の式 (PEP 639)
 build-backend = "setuptools.build_meta"
 
 [dependency-groups]

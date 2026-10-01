@@ -3,6 +3,7 @@
 import { AlertDialog, Dialog } from "radix-ui";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import pkg from "../../package.json";
 import { useConnection } from "../backend/connection";
 import { parsePort } from "../backend/port";
 import { countsText } from "../io/dxf";
@@ -10,7 +11,8 @@ import { DXF_UNITS, type DxfImportOptions } from "../model/dxfImport";
 import { useDialogs, type DialogRequest } from "./dialogs";
 import { errorText, logError } from "./messages";
 
-const UI_VERSION = "0.2.0";
+/** UI の版 (ui/package.json。アプリ・バックエンドと同じ版にそろえる) */
+const UI_VERSION = pkg.version;
 
 function schemaStats(schema: Record<string, unknown> | undefined): { fields: number; defs: number } {
   const defs = (schema?.$defs ?? {}) as Record<string, { properties?: Record<string, unknown> }>;

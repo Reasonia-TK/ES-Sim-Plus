@@ -61,7 +61,9 @@ powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1
 添付)。対象は CPython と `es-sim[gpu]` と `nvidia-cuda-nvrtc` の実行時の依存 (再帰、PyInstaller・pytest など作る
 ときだけのものは除く)、UI の npm の `dependencies` (再帰)、Tauri のアプリの Windows 向けの通常の依存 (cargo
 metadata)。gmsh は GPL-2.0 以降 (ソースは https://gmsh.info/)、NVRTC は NVIDIA の使用許諾 (再配布できる部品)。
-ES-Sim 自身の使用許諾はまだ決めていない (リポジトリを公開するときに決める)。
+ES-Sim 自身は GPL-3.0-or-later で、NVIDIA CUDA のライブラリ (同梱の NVRTC など) と組み合わせて配ることを許す追加許可
+(GPL v3 第 7 条) を付けている (リポジトリの `LICENSE` の冒頭、インストール先の `LICENSE.txt`)。gmsh (GPL-2.0 以降) の
+作者はこの追加許可を出していないので、gmsh と NVRTC を同じ配布物に入れることには曖昧さが残る。
 
 ## 署名 (後から足す)
 

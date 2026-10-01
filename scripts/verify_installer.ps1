@@ -59,7 +59,7 @@ try {
     $t0 = Get-Date
     $p = Start-Process -FilePath $Installer -ArgumentList "/S", "/NS", "/D=$Dir" -PassThru -Wait
     if ($p.ExitCode -ne 0) { throw "インストーラが失敗しました (exit $($p.ExitCode))" }
-    foreach ($f in @("es-sim.exe", "uninstall.exe", "THIRD_PARTY_NOTICES.txt", "backend\es-sim-backend.exe", "backend\_internal\cuda\bin\x64\nvrtc64_130_0.dll")) {
+    foreach ($f in @("es-sim.exe", "uninstall.exe", "LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "backend\es-sim-backend.exe", "backend\_internal\cuda\bin\x64\nvrtc64_130_0.dll")) {
         if (-not (Test-Path (Join-Path $Dir $f))) { throw "インストール先に $f がありません" }
     }
     $installed = (Get-ChildItem -Recurse -File $Dir | Measure-Object -Sum Length).Sum / 1MB

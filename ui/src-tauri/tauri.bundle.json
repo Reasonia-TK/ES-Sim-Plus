@@ -5,7 +5,8 @@
     "targets": ["nsis"],
     "resources": {
       "../../backend/dist/es-sim-backend/": "backend/",
-      "target/licenses/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
+      "target/licenses/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
+      "../../LICENSE": "LICENSE.txt"
     }
   }
 }
