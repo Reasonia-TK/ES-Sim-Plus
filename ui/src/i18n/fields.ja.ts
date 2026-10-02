@@ -91,6 +91,8 @@ export const fieldsJa = {
     PicMerge: { n_max: "マクロ粒子数の上限 (種ごと)", every: "確認の間隔" },
     PicSettings: { ion_subcycle: "イオンのサブサイクル" },
     Pic1dElectrode: { v_dc: "直流電圧" },
+    BlockingCapacitor: { capacitance: "容量 C_b", initial_bias_v: "初期バイアス" },
+    BlockingCapacitor1d: { capacitance: "容量 C_b (面積あたり)", initial_bias_v: "初期バイアス" },
     Eedf1dRegion: { x1: "x1", x2: "x2" },
     Fluid2dSettings: { linear_solver: "線形ソルバー" },
     TlSettings: {
@@ -172,6 +174,8 @@ export const fieldsJa = {
     Fn1dEmission: { macro_weight: "空欄で初期プラズマの重み" },
     EedfRegion: { e_max_ev: "空欄で自動 (最初に見た最大エネルギーの 1.2 倍)" },
     Eedf1dRegion: { e_max_ev: "空欄で自動" },
+    BlockingCapacitor: { initial_bias_v: "コンデンサの初めの電圧 (電極の電位 − 電源の電圧)。落ち着く値の近くに置くと早く定常になる" },
+    BlockingCapacitor1d: { initial_bias_v: "コンデンサの初めの電圧 (電極の電位 − 電源の電圧)。落ち着く値の近くに置くと早く定常になる" },
     Collector: { tol: "空欄でメッシュ幅" },
     DsmcBoundary: { pressure_pa: "流出口で空欄は真空排気" },
   },

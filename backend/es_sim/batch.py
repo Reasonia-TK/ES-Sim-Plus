@@ -202,6 +202,20 @@ def _resolve_module(project: Project, module: str) -> str:
     )
 
 
+def self_bias_metrics(bundle: dict) -> list[dict]:
+    """結果のバンドルから阻止コンデンサの電極ごとの最後の周期の自己バイアス (prompts/134)。
+
+    スイープのケースの一覧に出す小さな要約 ({label, v_dc, v1})。回路が無い・周期が閉じていなければ空。
+    """
+    out: list[dict] = []
+    for key in ("fluid1d", "fluid2d"):
+        circuit = (bundle.get(key) or {}).get("circuit") if isinstance(bundle.get(key), dict) else None
+        for e in (circuit or {}).get("electrodes", []):
+            if e.get("v_dc"):
+                out.append({"label": e["label"], "v_dc": e["v_dc"][-1], "v1": e["v1"][-1]})
+    return out
+
+
 def _worker(
     case_path: str, out_path: str, case_name: str, progress_q: "mp.Queue", module: str = "pic"
 ) -> None:
@@ -359,6 +373,8 @@ def _worker(
                 "kind": "done",
                 "elapsed": time.perf_counter() - t0,
                 "out_path": out_path,
+                # 阻止コンデンサの自己バイアス (スイープのケースの一覧に出す、prompts/134)
+                "self_bias": self_bias_metrics(bundle),
             }
         )
     except Exception as exc:  # noqa: BLE001 - 子プロセスの例外は文字列化して親へ伝える

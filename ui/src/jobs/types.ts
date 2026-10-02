@@ -47,12 +47,20 @@ export interface JobLimits {
   per_kind: Record<string, number>;
 }
 
+/** 阻止コンデンサの電極ごとの最後の周期の自己バイアス (prompts/134) */
+export interface SweepSelfBias {
+  label: string;
+  v_dc: number;
+  v1: number;
+}
+
 export interface SweepCase {
   value?: number;
   ok?: boolean;
   error?: string;
   step?: number;
   n_steps?: number;
+  self_bias?: SweepSelfBias[];
 }
 
 export type JobEvent =
@@ -64,7 +72,7 @@ export type JobEvent =
   | ({ type: "frame"; id: string } & Record<string, unknown>)
   | { type: "done"; id: string; state: JobState; elapsed_s: number }
   | { type: "error"; id: string; detail: string }
-  | { type: "case"; id: string; case: number; value: number; ok: boolean; error?: string }
+  | { type: "case"; id: string; case: number; value: number; ok: boolean; error?: string; self_bias?: SweepSelfBias[] }
   | { type: "case_progress"; id: string; case: number; step: number; n_steps: number }
   | { type: "pong" };
 

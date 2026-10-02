@@ -290,3 +290,34 @@ def test_engines_without_support_reject_capacitor():
     fluid.mesh.mode = "structured"
     with pytest.raises(ValueError, match="流体 2D はまだ阻止コンデンサ"):
         make_fluid2d_simulation(fluid)
+
+
+# ---- 9. スイープのケースの自己バイアス ---------------------------------------------------------------
+
+
+def test_sweep_summary_carries_self_bias():
+    """流体 1D の阻止コンデンサの容量をスイープすると、ケースの要約に最後の周期の自己バイアスが載る。"""
+    import time
+
+    from fastapi.testclient import TestClient
+
+    import es_sim.server as server
+
+    s = _settings(BlockingCapacitor1d(capacitance=1e-7), n_steps=2100, avg_steps=100)
+    project = _project(s).model_dump(mode="json")
+    client = TestClient(server.app)
+    body = {"kind": "sweep", "project": project,
+            "options": {"param_path": "fluid1d.left.blocking_capacitor.capacitance", "values": [1e-8, 1e-7], "parallel": 2}}
+    jid = client.post("/v2/jobs", json=body).json()["id"]
+    t0 = time.time()
+    while client.get(f"/v2/jobs/{jid}").json()["state"] not in ("done", "error"):
+        assert time.time() - t0 < 180, "timeout"
+        time.sleep(0.05)
+    res = client.get(f"/v2/jobs/{jid}/result").json()
+    assert res["module"] == "fluid1d" and [c["ok"] for c in res["summary"]] == [True, True]
+    for c in res["summary"]:
+        (bias,) = c["self_bias"]
+        assert bias["label"] == "left" and bias["v1"] > 100.0 and abs(bias["v_dc"]) < 150.0
+    # 容量が小さいほど自己バイアスが早く動く (最初の周期の片寄りが大きい)
+    assert abs(res["summary"][0]["self_bias"][0]["v_dc"]) > abs(res["summary"][1]["self_bias"][0]["v_dc"])
+    client.delete(f"/v2/jobs/{jid}")

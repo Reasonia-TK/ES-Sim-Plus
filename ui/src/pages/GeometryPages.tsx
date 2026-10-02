@@ -60,6 +60,7 @@ import { formatNumber, lengthUnitLabel, toDisplayLength, type LengthUnit } from 
 import { rfComponents, type VoltageWaveform } from "../util/waveform";
 import { CommitText, Field, LengthInput, Select } from "./inputs";
 import { useLengthUnitLabel } from "./useLengthUnitLabel";
+import { CapacitorEditor } from "./widgets/CapacitorEditor";
 import { DefQuantity, Hint } from "./widgets/common";
 import { LayerSelect } from "./LayersPage";
 import { PathTable, type PathTableOps } from "./widgets/PathTable";
@@ -452,6 +453,7 @@ export function RegionPage({ id }: { id: string }) {
       {r.type === "conductor" && (
         <>
           <SchemaField path={[...base, "voltage"]} required />
+          {r.blocking_capacitor && <Hint>{t("capacitor.dcBlocked")}</Hint>}
           <RfEditor path={[...base, "voltage_rf"]} />
           <div className="subsection-title">{t("widgets.waveform")}</div>
           <WaveformEditor path={[...base, "voltage_waveform"]} />
@@ -461,6 +463,7 @@ export function RegionPage({ id }: { id: string }) {
             waveforms={r.voltage_waveform ? [r.voltage_waveform as VoltageWaveform] : []}
           />
           <SchemaField path={[...base, "see_gamma"]} />
+          <CapacitorEditor path={[...base]} kind="2d" />
         </>
       )}
       {r.type === "dielectric" && (
@@ -626,6 +629,7 @@ export function EdgePage({ id }: { id: string }) {
       {type === "dirichlet" && bc && (
         <>
           <SchemaField path={[...base, "voltage"]} required />
+          {bc.blocking_capacitor && <Hint>{t("capacitor.dcBlocked")}</Hint>}
           <RfEditor path={[...base, "voltage_rf"]} />
           <div className="subsection-title">{t("widgets.waveform")}</div>
           <WaveformEditor path={[...base, "voltage_waveform"]} />
@@ -635,6 +639,7 @@ export function EdgePage({ id }: { id: string }) {
             waveforms={bc.voltage_waveform ? [bc.voltage_waveform as VoltageWaveform] : []}
           />
           <SchemaField path={[...base, "see_gamma"]} />
+          <CapacitorEditor path={[...base]} kind="2d" />
         </>
       )}
       {type === "symmetry" && <Hint>{t("bcPage.symmetryHint")}</Hint>}

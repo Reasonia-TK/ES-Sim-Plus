@@ -33,6 +33,7 @@ import {
 } from "./common";
 import { EedfCard, WallIedfCard } from "./Distributions";
 import { electrode1d, RfMonitor } from "./RfMonitor";
+import { attachCircuit, SelfBiasCard } from "./SelfBias";
 
 export type Kind1d = "pic1d" | "fluid1d";
 type Result1d = Pic1dResult | Fluid1dResult;
@@ -116,7 +117,15 @@ export function Live1d({ job, kind, project }: { job: JobSummary; kind: Kind1d; 
         <span>{t("charts.elapsedFrame")}</span>
         <span className="mono">{frame.elapsed_s.toFixed(3)} s</span>
       </div>
-      {b && <RfMonitor title={t("charts.rfLeft")} electrodes={[electrode1d(b.left, t("charts.leftElectrode"))].filter((e) => e !== null)} t={frame.t} />}
+      {b && (
+        <RfMonitor
+          title={t("charts.rfLeft")}
+          electrodes={[electrode1d(b.left, t("charts.leftElectrode"))]
+            .filter((e) => e !== null)
+            .map((e) => attachCircuit(e, "left", { frame: frame.circuit }, t))}
+          t={frame.t}
+        />
+      )}
     </>
   );
 }
@@ -488,6 +497,7 @@ export function Result1d({ job, kind, result }: { job: JobSummary; kind: Kind1d;
       {pic && <SheathOscCard result={pic} />}
       {pic && pic.eedf.length > 0 && <EedfCard eedf={pic.eedf} csvPrefix="pic1d" prefKey="pic1d.eedf" defaultMode="eepf" />}
       {result.wall_iedf && <WallIedfCard iedf={result.wall_iedf} csvPrefix={kind} prefKey={`${kind}.wallIedf`} hint={kind === "fluid1d" ? t("charts.wallIedfFluidHint") : undefined} />}
+      {"circuit" in result && result.circuit && <SelfBiasCard circuit={result.circuit} project={null} csvPrefix={kind} />}
       <History1d kind={kind} result={result} />
     </>
   );

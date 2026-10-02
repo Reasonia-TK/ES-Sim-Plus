@@ -467,6 +467,8 @@ class SweepRunner(BaseRunner):
                 entry = {"case": ev["case"], "value": st.values[ev["case"]], "ok": ev["ok"]}
                 if not ev["ok"]:
                     entry["error"] = ev.get("error")
+                if ev.get("self_bias"):
+                    entry["self_bias"] = ev["self_bias"]   # [{label, v_dc, v1}] (prompts/134)
                 summary.append(entry)
                 emit.event({"type": "case", **entry})
                 emit.progress(len(summary), n)

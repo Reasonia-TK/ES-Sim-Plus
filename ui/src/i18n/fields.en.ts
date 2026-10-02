@@ -93,6 +93,8 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
     PicMerge: { n_max: "Max macro-particles per species", every: "Check interval" },
     PicSettings: { ion_subcycle: "Ion subcycling" },
     Pic1dElectrode: { v_dc: "DC voltage" },
+    BlockingCapacitor: { capacitance: "Capacitance C_b", initial_bias_v: "Initial bias" },
+    BlockingCapacitor1d: { capacitance: "Capacitance C_b (per area)", initial_bias_v: "Initial bias" },
     Eedf1dRegion: { x1: "x1", x2: "x2" },
     Fluid2dSettings: { linear_solver: "Linear solver" },
     TlSettings: {
@@ -174,6 +176,8 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
     Fn1dEmission: { macro_weight: "Blank = the initial plasma weight" },
     EedfRegion: { e_max_ev: "Blank = automatic (1.2 × the first maximum energy seen)" },
     Eedf1dRegion: { e_max_ev: "Blank = automatic" },
+    BlockingCapacitor: { initial_bias_v: "Initial capacitor voltage (electrode potential − source voltage). Starting near the settled value shortens the transient" },
+    BlockingCapacitor1d: { initial_bias_v: "Initial capacitor voltage (electrode potential − source voltage). Starting near the settled value shortens the transient" },
     Collector: { tol: "Blank = the mesh size" },
     DsmcBoundary: { pressure_pa: "Blank at an outlet = vacuum pumping" },
   },

@@ -216,7 +216,10 @@ def run_sweep(
                 on_event({"type": "progress", "case": idx, "step": msg["step"], "n_steps": msg["n_steps"]})
             elif msg["kind"] == "done":
                 reported.add(idx)
-                on_event({"type": "case_done", "case": idx, "ok": True})
+                ev = {"type": "case_done", "case": idx, "ok": True}
+                if msg.get("self_bias"):
+                    ev["self_bias"] = msg["self_bias"]  # 阻止コンデンサの自己バイアス (prompts/134)
+                on_event(ev)
             elif msg["kind"] == "error":
                 reported.add(idx)
                 on_event({"type": "case_done", "case": idx, "ok": False, "error": msg["error"]})

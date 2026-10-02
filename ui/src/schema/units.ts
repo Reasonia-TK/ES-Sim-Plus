@@ -13,10 +13,17 @@ const LABELS: Record<string, string> = {
   "m^2": "m²",
   "C/m^3": "C/m³",
   "m^2/(V*s)": "m²/(V·s)",
+  "F/m^2": "F/m²",
 };
 
 /** SI 接頭辞を付けて入力できる単位 (記号 → そのまま SI の基本単位として扱う) */
-const PREFIXABLE = new Set(["m", "s", "Hz", "V", "eV", "Pa", "K", "T", "A/m", "A", "C", "kg", "sccm"]);
+const PREFIXABLE = new Set(["m", "s", "Hz", "V", "eV", "Pa", "K", "T", "A/m", "A", "C", "kg", "sccm", "F", "F/m", "F/m^2"]);
+
+/**
+ * 平面 2D の「奥行き 1 m あたり」の単位 → 軸対称で読み替える全体の量の単位 (v1 と同じ A/m → A。阻止コンデンサの
+ * 容量も平面は F/m、軸対称は全周の F、prompts/134)
+ */
+const PER_DEPTH: Record<string, string> = { "A/m": "A", "F/m": "F" };
 
 const PREFIX: Record<string, number> = {
   T: 1e12,
@@ -52,9 +59,7 @@ export interface UnitContext {
 export function displayUnit(unit: string | undefined, geom: boolean, ctx: UnitContext): string {
   if (geom) return ctx.lengthUnit === "um" ? "µm" : "mm";
   if (!unit) return "";
-  if (ctx.axisymmetric) {
-    if (unit === "A/m") return "A";
-  }
+  if (ctx.axisymmetric && PER_DEPTH[unit]) return PER_DEPTH[unit];
   return LABELS[unit] ?? unit;
 }
 
@@ -134,10 +139,12 @@ export function unitFactor(sym: string, base: string, ctx?: UnitContext): number
   if (alias !== undefined) return alias;
   const label = LABELS[base];
   if (s === base || (label && label !== "" && s === label)) return 1;
-  if (ctx?.axisymmetric && base === "A/m" && s === "A") return 1;
-  if (PREFIXABLE.has(base) || (ctx?.axisymmetric && base === "A/m")) {
-    const b = ctx?.axisymmetric && base === "A/m" ? "A" : base;
-    if (s.endsWith(b) && s.length === b.length + 1) {
+  const total = ctx?.axisymmetric ? PER_DEPTH[base] : undefined;
+  if (total && s === total) return 1;
+  if (PREFIXABLE.has(base) || total) {
+    const b = total ?? base;
+    for (const name of [b, LABELS[b]]) {
+      if (!name || !s.endsWith(name) || s.length !== name.length + 1) continue;
       const p = PREFIX[s[0]];
       // m (メートル) の c は cm のみ、ほかの単位に c は付けない
       if (p !== undefined && (s[0] !== "c" || b === "m")) return p;

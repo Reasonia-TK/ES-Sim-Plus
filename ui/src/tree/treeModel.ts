@@ -55,7 +55,7 @@ export function edgeLabel(p: Project, i: number, t: TFunction): string {
   return t("edge.generic", { n: i });
 }
 
-/** 辺の境界条件の概要 (v1 のツリーと同じ: 対称軸 / なし / Dirichlet NV [+RF] / 対称 / 周期) */
+/** 辺の境界条件の概要 (v1 のツリーと同じ: 対称軸 / なし / Dirichlet NV [+RF] [+C_b] / 対称 / 周期) */
 export function edgeSummary(p: Project, i: number, t: TFunction): string {
   if (isAxisEdge(p, i)) return t("bc.axis");
   const bc = boundaryOfEdge(p, i);
@@ -65,6 +65,7 @@ export function edgeSummary(p: Project, i: number, t: TFunction): string {
     let s = `${t("bc.dirichlet")} ${formatNumber(v)} V`;
     if (bc.voltage_rf) s += ` + ${t("bc.rf")}`;
     if (bc.voltage_waveform) s += ` + ${t("bc.waveform")}`;
+    if (bc.blocking_capacitor) s += ` + ${t("bc.capacitor")}`;
     return s;
   }
   return t(`bc.${bc.type}`);

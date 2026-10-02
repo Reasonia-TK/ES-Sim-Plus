@@ -26,11 +26,15 @@ import type { PicCollectorResult, PicDiag, PicFrame, PicResult } from "../types"
 import { EEDF_COLORS, ELECTRON_COLOR, ION_COLOR, useLength } from "./common";
 import { EedfCard } from "./Distributions";
 import { RfMonitor, type RfElectrode } from "./RfMonitor";
+import { attachCircuit, SelfBiasCard, type CircuitSrc } from "./SelfBias";
 
 // ---- RF 波形 (2D の電極) ----
 
-/** 時間で変わる電極 (Dirichlet の境界は辺ごと、導体の領域は領域ごと。v1 RfPhaseMonitor と同じ) */
-export function electrodes2d(project: Project, t: TFunction): RfElectrode[] {
+/**
+ * 時間で変わる電極 (Dirichlet の境界は辺ごと、導体の領域は領域ごと。v1 RfPhaseMonitor と同じ)。circuit があれば
+ * 阻止コンデンサの電極は実際の電極の電位にする (prompts/134)
+ */
+export function electrodes2d(project: Project, t: TFunction, circuit?: CircuitSrc): RfElectrode[] {
   const out: RfElectrode[] = [];
   const wfOf = (v: unknown) => (v && typeof v === "object" ? [v as VoltageWaveform] : []);
   for (const bc of project.geometry.boundaries) {
@@ -38,33 +42,33 @@ export function electrodes2d(project: Project, t: TFunction): RfElectrode[] {
     const rf = rfComponents(bc.voltage_rf);
     const wf = wfOf(bc.voltage_waveform);
     if (!waveformFreqs(rf, wf).length) continue;
-    for (const e of bc.edges) out.push({ label: edgeLabel(project, e, t), dc: bc.voltage ?? 0, rf, waveforms: wf });
+    for (const e of bc.edges) out.push(attachCircuit({ label: edgeLabel(project, e, t), dc: bc.voltage ?? 0, rf, waveforms: wf }, `edge${e}`, circuit, t));
   }
   for (const r of project.geometry.regions) {
     if (r.type !== "conductor") continue;
     const rf = rfComponents(r.voltage_rf);
     const wf = wfOf(r.voltage_waveform);
     if (!waveformFreqs(rf, wf).length) continue;
-    out.push({ label: r.id, dc: r.voltage ?? 0, rf, waveforms: wf });
+    out.push(attachCircuit({ label: r.id, dc: r.voltage ?? 0, rf, waveforms: wf }, r.id, circuit, t));
   }
   return out;
 }
 
 /** 2D の電極の RF 波形 (時間で変わる電極が無ければ何も出さない) */
-export function RfCardBody({ project, time, title, height }: { project: Project | null; time: number | null; title: string; height: number }) {
+export function RfCardBody({ project, time, title, height, circuit }: { project: Project | null; time: number | null; title: string; height: number; circuit?: CircuitSrc }) {
   const { t } = useTranslation();
-  const electrodes = useMemo(() => (project ? electrodes2d(project, t) : []), [project, t]);
+  const electrodes = useMemo(() => (project ? electrodes2d(project, t, circuit) : []), [project, t, circuit]);
   if (!electrodes.length) return null;
   return <RfMonitor title={title} electrodes={electrodes} t={time} height={height} />;
 }
 
-export function RfCard({ project, time }: { project: Project | null; time: number | null }) {
+export function RfCard({ project, time, circuit }: { project: Project | null; time: number | null; circuit?: CircuitSrc }) {
   const { t } = useTranslation();
   const has = useMemo(() => (project ? electrodes2d(project, t).length > 0 : false), [project, t]);
   if (!has) return null;
   return (
     <ChartCard title={t("charts.rfTitle")}>
-      <RfCardBody project={project} time={time} title="" height={120} />
+      <RfCardBody project={project} time={time} title="" height={120} circuit={circuit} />
     </ChartCard>
   );
 }
@@ -359,8 +363,9 @@ export function PicCharts({ job, project, result }: { job: JobSummary; project: 
 export function Fluid2dCharts({ job, project, result }: { job: JobSummary; project: Project | null; result: import("../types").Fluid2dResult | null }) {
   const liveRows = useJobs((s) => s.liveHistory[job.id]);
   const started = useJobs((s) => s.startedFull[job.id]);
-  const frame = useFrame<{ t: number }>(job);
+  const frame = useFrame<{ t: number; circuit?: import("../types").CircuitFrame[] | null }>(job);
   const running = job.state === "running" || job.state === "queued";
+  const circuit = useMemo<CircuitSrc>(() => ({ result: running ? null : result?.circuit, frame: frame?.circuit }), [running, result, frame]);
   const hist = useMemo(() => {
     if (!running && result?.history?.t) return { t: result.history.t, ne: result.history.n_e_total ?? [], ni: result.history.n_i_total ?? [] };
     const rows = liveRows ?? [];
@@ -370,7 +375,8 @@ export function Fluid2dCharts({ job, project, result }: { job: JobSummary; proje
   const mesh = meshSrc ? viewMeshOf(meshSrc) : null;
   return (
     <>
-      <RfCard project={project} time={running ? (frame?.t ?? null) : null} />
+      <RfCard project={project} time={running ? (frame?.t ?? null) : null} circuit={circuit} />
+      {result?.circuit && <SelfBiasCard circuit={result.circuit} project={project} csvPrefix="fluid2d" />}
       <Fluid2dHistoryCard t={hist.t} ne={hist.ne} ni={hist.ni} />
       {mesh && result && (result.fields || result.cycle) && <SheathCard kind="fluid2d" src={{ mesh, fields: result.fields, cycle: result.cycle }} />}
     </>

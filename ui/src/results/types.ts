@@ -117,6 +117,44 @@ export interface Fluid2dStarted {
   mesh?: { nodes: Point[]; triangles: [number, number, number][] };
 }
 
+// ---- 阻止コンデンサ (自己バイアス、prompts/134。backend circuit.BlockingCircuit) ----
+
+/** 回路の電極ごとの結果 (単位は CircuitResult.units: 軸対称 F・C・A、平面は奥行きあたり、1D は面積あたり) */
+export interface CircuitElectrode {
+  /** 2D は導体の region id か "edge3"・"edge1+edge3"、1D は "left"・"right" */
+  label: string;
+  capacitance: number;
+  initial_bias_v: number;
+  /** 電極の容量 C (真空) */
+  c_self: number;
+  /** 真空の RF の分圧 C_b / (C_b + C) */
+  rf_division: number;
+  v_e: number | null;
+  q_node: number | null;
+  /** RF 1 周期ごと: 周期の終わりの時刻・電極の電位の平均 V_dc・基本波の振幅 |V1|・正味の伝導電流 */
+  t: number[];
+  v_dc: number[];
+  v1: number[];
+  i_dc: number[];
+  /** 最後の 1 周期の電極の電位 (t は周期の始まりからの時刻 [s]) */
+  last_period: { t: number[]; v: number[] } | null;
+}
+
+export interface CircuitResult {
+  period_s: number | null;
+  units: { capacitance: string; charge: string; current: string };
+  c_matrix: number[][];
+  electrodes: CircuitElectrode[];
+}
+
+/** フレームに載る今の値 (v_dc・v1 は最後に閉じた周期のもの) */
+export interface CircuitFrame {
+  label: string;
+  v_e: number | null;
+  v_dc?: number;
+  v1?: number;
+}
+
 export interface Fluid2dFrame {
   step: number;
   t: number;
@@ -126,6 +164,7 @@ export interface Fluid2dFrame {
   t_e: number[];
   counts: Record<string, number>;
   elapsed_s: number;
+  circuit?: CircuitFrame[] | null;
 }
 
 export interface Fluid2dFields {
@@ -157,6 +196,7 @@ export interface Fluid2dResult {
   timing: Record<string, number>;
   settings: Record<string, unknown>;
   mesh?: { nodes: Point[]; triangles: [number, number, number][] };
+  circuit?: CircuitResult | null;
 }
 
 // ---- DSMC ----
@@ -282,6 +322,7 @@ export interface Fluid1dResult {
   elapsed_s: number;
   timing: Record<string, number>;
   settings: Record<string, unknown>;
+  circuit?: CircuitResult | null;
 }
 
 export interface Frame1d {
@@ -294,6 +335,7 @@ export interface Frame1d {
   counts: Record<string, number>;
   elapsed_s: number;
   sample?: { x: number[]; vx: number[] };
+  circuit?: CircuitFrame[] | null;
 }
 
 // ---- VHF 定在波 ----

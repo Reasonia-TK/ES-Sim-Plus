@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { errorText, logError, logInfo } from "../../app/messages";
 import { fetchResult, isTerminal, jobName, sortedJobs, useJobs } from "../../jobs/jobsStore";
 import { sweepCase } from "../../jobs/api";
-import type { SweepCase } from "../../jobs/types";
+import type { SweepCase, SweepSelfBias } from "../../jobs/types";
 import { useDocument } from "../../model/documentStore";
 import { normalizeProject } from "../../model/project";
 import { VIEWER_KINDS } from "../../graphics/runScene";
@@ -16,8 +16,14 @@ import { formatNumber } from "../../util/format";
 import { t } from "../../i18n";
 
 interface SweepSummary {
-  summary: { case: number; value: number; ok: boolean; error?: string }[];
+  summary: { case: number; value: number; ok: boolean; error?: string; self_bias?: SweepSelfBias[] }[];
   values: number[];
+}
+
+/** ケースの自己バイアス (阻止コンデンサの電極ごとの V_dc、prompts/134) */
+function selfBiasText(c: SweepCase | undefined): string {
+  if (!c?.self_bias?.length) return "-";
+  return c.self_bias.map((s) => (c.self_bias!.length > 1 ? `${s.label}: ${s.v_dc.toFixed(1)} V` : `${s.v_dc.toFixed(1)} V`)).join(", ");
 }
 
 export async function loadSweepCase(jobId: string, i: number, label: string): Promise<void> {
@@ -64,12 +70,13 @@ export function SweepCases({ jobId }: { jobId?: string }) {
     void fetchResult<SweepSummary>(job.id).then((r) => {
       if (!r) return;
       const filled: Record<number, SweepCase> = {};
-      for (const c of r.summary) filled[c.case] = { value: c.value, ok: c.ok, error: c.error };
+      for (const c of r.summary) filled[c.case] = { value: c.value, ok: c.ok, error: c.error, self_bias: c.self_bias };
       useJobs.setState((s) => ({ cases: { ...s.cases, [job.id]: { ...filled, ...(s.cases[job.id] ?? {}) } } }));
     });
   }, [job, cases]);
   if (!job) return null;
   const values = (started?.values as number[] | undefined) ?? ((job.options.values as number[] | undefined) ?? []);
+  const hasBias = Object.values(cases ?? {}).some((c) => (c.self_bias?.length ?? 0) > 0);
   return (
     <div className="subsection">
       <div className="subsection-title">
@@ -80,6 +87,7 @@ export function SweepCases({ jobId }: { jobId?: string }) {
           <tr>
             <th>#</th>
             <th>{t("jobs.sweepValue")}</th>
+            {hasBias && <th>{t("jobs.sweepSelfBias")}</th>}
             <th>{t("jobs.sweepStatus")}</th>
             <th />
           </tr>
@@ -101,6 +109,7 @@ export function SweepCases({ jobId }: { jobId?: string }) {
               <tr key={i}>
                 <td>{i}</td>
                 <td className="mono">{formatNumber(v)}</td>
+                {hasBias && <td className="mono">{selfBiasText(c)}</td>}
                 <td className={c?.ok === false ? "text-error" : undefined}>{status}</td>
                 <td>
                   {c?.ok === true && (

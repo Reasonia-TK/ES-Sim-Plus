@@ -35,6 +35,12 @@ export interface Loop {
   bulges?: number[] | null;
 }
 
+/** 電源との間の阻止コンデンサ (自己バイアス、prompts/134)。容量は平面 2D で F/m、軸対称で F、1D で F/m² */
+export interface BlockingCapacitor {
+  capacitance: number;
+  initial_bias_v?: number;
+}
+
 export interface Region {
   id: string;
   type: RegionType;
@@ -48,6 +54,7 @@ export interface Region {
   voltage?: number | null;
   eps_r?: number;
   rho?: number;
+  blocking_capacitor?: BlockingCapacitor | null;
   [key: string]: unknown;
 }
 
@@ -58,6 +65,7 @@ export interface BoundaryCondition {
   voltage_rf?: unknown;
   voltage_waveform?: unknown;
   see_gamma?: number;
+  blocking_capacitor?: BlockingCapacitor | null;
   [key: string]: unknown;
 }
 

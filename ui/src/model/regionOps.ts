@@ -87,7 +87,7 @@ export function duplicateRegion(p: P, id: string): string | null {
   return copy.id;
 }
 
-/** 種類の変更: 形と対応する値は保ち、RF・CSV 波形・γ は外す (v1 と同じ) */
+/** 種類の変更: 形と対応する値は保ち、RF・CSV 波形・γ・阻止コンデンサは外す (v1 と同じ。コンデンサは prompts/134) */
 export function setRegionType(p: P, id: string, type: RegionType): void {
   const r = p.geometry.regions.find((x) => x.id === id);
   if (!r || r.type === type) return;
@@ -95,6 +95,7 @@ export function setRegionType(p: P, id: string, type: RegionType): void {
   delete r.voltage_rf;
   delete r.voltage_waveform;
   delete r.see_gamma;
+  delete r.blocking_capacitor;
   if (type === "conductor" && typeof r.voltage !== "number") r.voltage = 0;
   if (type === "dielectric" && typeof r.eps_r !== "number") r.eps_r = 1;
   if (type === "charge" && typeof r.rho !== "number") r.rho = 0;

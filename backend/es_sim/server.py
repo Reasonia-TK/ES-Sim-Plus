@@ -1598,6 +1598,8 @@ async def _run_sweep_session(ws: WebSocket, msg: dict) -> None:
                 entry = {"case": ev["case"], "value": values[ev["case"]], "ok": ev["ok"]}
                 if not ev["ok"]:
                     entry["error"] = ev["error"]
+                if ev.get("self_bias"):
+                    entry["self_bias"] = ev["self_bias"]   # 阻止コンデンサの自己バイアス (prompts/134)
                 summary.append(entry)
             await ws.send_json(ev)
         await run_task  # 例外があれば (通常は起きない想定だが) ここで送出される

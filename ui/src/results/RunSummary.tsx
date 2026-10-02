@@ -9,6 +9,7 @@ import { hasArcs, pathHandles } from "../cad/path";
 import { coordOf, domainPath, type Project } from "../model/project";
 import { formatNumber, formatSi } from "../util/format";
 import { ampAtF0, center1d } from "./charts/Charts1d";
+import { circuitFrameRows, circuitResultRows } from "./charts/SelfBias";
 import { timingRows, useLength } from "./charts/common";
 import { useFrame, useRunProject, useRunResult } from "./runData";
 import type { BoltzTable, DsmcFrame, DsmcResult, Fluid1dResult, Fluid2dFrame, Fluid2dResult, Frame1d, Pic1dResult, PicDiag, PicFrame, PicResult, TlResult, TraceResult } from "./types";
@@ -118,13 +119,14 @@ function Summary1d({ job, kind }: { job: JobSummary; kind: "pic1d" | "fluid1d" }
   const aR = pic ? ampAtF0(pic, "right") : null;
   return (
     <>
-      {frame && <Kv title={t("summary.diag")} rows={diag} />}
+      {frame && <Kv title={t("summary.diag")} rows={[...diag, ...(frame.circuit ? circuitFrameRows(frame.circuit, null, t) : [])]} />}
       {r && (
         <Kv
           title={t("summary.title")}
           rows={[
             [t("summary.elapsedWall"), `${r.elapsed_s.toFixed(3)} s`],
             ...timing,
+            ...(fl?.circuit ? circuitResultRows(fl.circuit, null, t) : []),
             [t("summary.wallLeft"), pair(num(r.walls.left.electron), num(r.walls.left.ion))],
             [t("summary.wallRight"), pair(num(r.walls.right.electron), num(r.walls.right.ion))],
             fl ? [t("summary.genTotal"), `${formatNumber(fl.gen_total)} m^-2`] : null,
@@ -232,6 +234,7 @@ function Fluid2dSummary({ job, project }: { job: JobSummary; project: Project | 
             [t("summary.walls"), pair(num(c.wall_e), num(c.wall_i))],
             [t("summary.genTotal"), num(c.gen_total)],
             [t("summary.surfQTotal"), exp3(c.surf_q)],
+            ...(frame.circuit ? circuitFrameRows(frame.circuit, project, t) : []),
           ]}
         />
       )}
@@ -240,6 +243,7 @@ function Fluid2dSummary({ job, project }: { job: JobSummary; project: Project | 
           title={t("summary.title")}
           rows={[
             [t("summary.elapsedWall"), `${result.elapsed_s.toFixed(3)} s`],
+            ...(result.circuit ? circuitResultRows(result.circuit, project, t) : []),
             result.fields ? [t("summary.avgSteps"), result.fields.avg_steps] : null,
             ...timing,
             [t("summary.total"), `${(result.timing?.total ?? 0).toFixed(3)} s`],

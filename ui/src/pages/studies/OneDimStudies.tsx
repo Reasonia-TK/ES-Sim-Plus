@@ -26,6 +26,7 @@ interface Electrode {
   voltage_rf?: unknown;
   waveforms?: VoltageWaveform[];
   fn?: unknown;
+  blocking_capacitor?: unknown;
 }
 
 interface RunBlock {
@@ -226,6 +227,9 @@ export function Fluid1dPage() {
       for (const side of ["left", "right"] as const) {
         const el = JSON.parse(JSON.stringify(src[side] ?? {})) as Electrode; // draft は structuredClone できない
         delete el.fn;
+        // 阻止コンデンサは流体 1D だけの設定 (PIC 1D はまだ使えない) なので、流体 1D の側のものを残す
+        const cap = (dst[side] as Electrode | undefined)?.blocking_capacitor;
+        if (cap) el.blocking_capacitor = JSON.parse(JSON.stringify(cap));
         dst[side] = el;
       }
       dst.init_density_m3 = src.init_density_m3;
@@ -250,10 +254,10 @@ export function Fluid1dPage() {
         <SchemaField path={[...P, "n_cells"]} />
       </Section>
       <Section title={t("studyCommon.leftElectrode")}>
-        <ElectrodeEditor path={[...P, "left"]} fn={false} />
+        <ElectrodeEditor path={[...P, "left"]} fn={false} capacitor />
       </Section>
       <Section title={t("studyCommon.rightElectrode")}>
-        <ElectrodeEditor path={[...P, "right"]} fn={false} />
+        <ElectrodeEditor path={[...P, "right"]} fn={false} capacitor />
       </Section>
       <FluidPhysics base="fluid1d" />
       <Section title={t("studyCommon.run")}>
