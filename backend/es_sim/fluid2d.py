@@ -76,6 +76,15 @@ symmetry・see_gamma・conductor/dielectric 領域) は既存のプロジェク�
   イオンエネルギー方程式が無いためこの点はそもそも扱わない — prompts/111 の
   逸脱として明記)。
 
+## 阻止コンデンサ (自己バイアス、prompts/134)
+
+電極に blocking_capacitor があれば、電源と電極の間に直列のコンデンサを置き、電極の電位を
+circuit.BlockingCircuit で決める (手順は circuit.py)。共通の部分 (伝導電流の積算・途中停止の退避・
+フレームと結果) はこのクラスに置き、ψ・電極の電荷・壁の小片の行き先は対応する派生クラスが
+_init_circuit で用意する (今は v2 の一様格子版 es_sim.gfluid だけ。対応していない実装は
+_blocking_capacitor_ok = False で、付けた電極があれば実行の初めにエラー)。伝導電流は壁損失と同じ
+係数・同じ新しい密度で、小片ごとに e·(Γ_i(1 + γ) − Γ_e) を行き先の電極へ足す (_accumulate_circuit)。
+
 ## Poisson (電場) の解法
 
 pic.py の PicSimulation が毎ステップやっている「fixed/free 分解 + K_ff の splu
@@ -143,7 +152,7 @@ import scipy.sparse.linalg as spla
 
 from . import _numba_kernels
 from .boltz import BoltzCoeffs, boltz_coeffs_at, boltz_coeffs_from_table
-from .circuit import reject_blocking_capacitors
+from .circuit import BlockingCircuit, reject_blocking_capacitors
 from .fem import EPS0, _radial_index, assemble, assemble_transport_operator
 from .fluid1d import FLOOR_N, FLOOR_W, _bernoulli, frost_mobility
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
@@ -236,6 +245,11 @@ class Fluid2dSimulation:
         # 設定しない派生クラスでも _accumulate_surface_charge が素通りするようにしておく
         self.surf_elem = self.surf_loc = self.surf_node = np.zeros(0, dtype=np.int64)
         self.surf_area = np.zeros(0)
+        # 阻止コンデンサの回路 (prompts/134)。対応する派生クラスが _init_circuit で作る。_cap_wall は電極へ電荷が
+        # 流れ込む壁要素の番号、_cap_wall_elec はその電極 (回路の電極の番号)
+        self.circuit: BlockingCircuit | None = None
+        self._cap_wall = np.zeros(0, dtype=np.int64)
+        self._cap_wall_elec = np.zeros(0, dtype=np.int64)
 
         # 輸送グラフ (節点体積・エッジ重み・壁) と Poisson の組み立ては派生クラス
         # (v2 直交格子版 es_sim.gfluid) が差し替えられるようにメソッドへ分けている
@@ -359,6 +373,12 @@ class Fluid2dSimulation:
         self.fields: dict | None = None
         self.cycle: dict | None = None
         self._run_t0 = 0.0
+
+        # ---- 阻止コンデンサ (Poisson の前処理・RF の周期が決まってから) ----------------------
+        self._init_circuit()
+
+    def _init_circuit(self) -> None:
+        """阻止コンデンサの回路を組む (対応する派生クラスが差し替える。モジュール docstring)。"""
 
     # ---- 幾何前処理 --------------------------------------------------------------
 
@@ -632,6 +652,26 @@ class Fluid2dSimulation:
         ge = self.surf_area * (0.25 * v_th_e_node[loc]) * n_e_new[loc]
         rate = gi * (1.0 + self.gamma_see[loc]) - ge
         self.q_surf += (QE * dt) * np.bincount(self.surf_node, weights=rate, minlength=self.n_nodes)
+
+    def _accumulate_circuit(self, dt, t, c_i_wall, v_th_e_node, n_i_new, n_e_new) -> None:
+        """阻止コンデンサの電極へ流れ込む伝導電流を回路に積む (モジュール docstring)。
+
+        壁要素ごとに、壁損失と同じ係数・同じ新しい密度で e·(Γ_i(1 + γ) − Γ_e) を求め (両端の節点の分を足す。
+        v2 は片側だけ)、行き先の電極ごとに合計する。反射壁 (検証用) では 0。
+        """
+        circuit = self.circuit
+        if circuit is None:
+            return
+        rate = np.zeros(circuit.m)
+        if self._cap_wall.size and not self.debug_reflective_walls:
+            sel = self._cap_wall
+            out = np.zeros(sel.size)
+            for nodes, weights in ((self.wall_n1, self.wall_w1), (self.wall_n2, self.wall_w2)):
+                loc = nodes[sel]
+                out += weights[sel] * (c_i_wall[sel] * n_i_new[loc] * (1.0 + self.gamma_see[loc])
+                                       - 0.25 * v_th_e_node[loc] * n_e_new[loc])
+            rate = np.bincount(self._cap_wall_elec, weights=out, minlength=circuit.m)
+        circuit.conduct(QE * rate, t, dt)
 
     def _find_rf_freq(self) -> float | None:
         """boundaries / conductor 領域から位相分解の基本周波数を返す (pic.py._find_rf_freq と同じ)。"""
@@ -960,6 +1000,8 @@ class Fluid2dSimulation:
         gw_e = 0.0 if self.debug_reflective_walls else (wall_diag_e * n_e_new - see_source)
         # 誘電体の表面電荷 (壁損失と同じ流束。次のサブステップの Poisson から効く)
         self._accumulate_surface_charge(dt, c_i_edge, v_th_e_node, n_i_new, n_e_new)
+        # 阻止コンデンサの電極へ流れ込む伝導電流 (同じ流束、prompts/134)
+        self._accumulate_circuit(dt, t, c_i_edge, v_th_e_node, n_i_new, n_e_new)
         t2 = time.perf_counter()
         self.timing["transport"] += t2 - t1
 
@@ -1101,10 +1143,10 @@ class Fluid2dSimulation:
         timing・反復回数・warnings は診断値なので戻さない。
         """
         return (self.n_e.copy(), self.n_i.copy(), self.w.copy(), self.phi.copy(), dict(self.wall), self.gen_total,
-                self.q_surf.copy())
+                self.q_surf.copy(), None if self.circuit is None else self.circuit.snapshot())
 
     def _restore_step_state(self, saved) -> None:
-        n_e, n_i, w, phi, wall, gen_total, q_surf = saved
+        n_e, n_i, w, phi, wall, gen_total, q_surf, circuit = saved
         self.n_e[:] = n_e
         self.n_i[:] = n_i
         self.w[:] = w
@@ -1112,6 +1154,8 @@ class Fluid2dSimulation:
         self.wall.update(wall)
         self.gen_total = gen_total
         self.q_surf[:] = q_surf
+        if circuit is not None:
+            self.circuit.restore(circuit)
 
     def step(self, should_stop=None) -> np.ndarray | None:
         """流体1サイクル (fluid1d.Fluid1dSimulation.step と同じ設計)。
@@ -1300,6 +1344,8 @@ class Fluid2dSimulation:
             "t_e": te_full.tolist(),
             "counts": counts,
             "elapsed_s": time.perf_counter() - self._run_t0,
+            # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
+            "circuit": None if self.circuit is None else self.circuit.frame(),
         }
 
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
@@ -1369,6 +1415,8 @@ class Fluid2dSimulation:
 
         self.history = {k: [] for k in self.history}
         self.timing = {k: 0.0 for k in self.timing}
+        if self.circuit is not None:
+            self.circuit.reset_history()  # 回路の状態 (コンデンサの電荷) は引き継ぐ
         self._accum_start = None
         self._accum_count = 0
         self._accum_phi = None
@@ -1430,4 +1478,10 @@ def build_fluid2d_result(sim: Fluid2dSimulation, elapsed_s: float) -> dict:
         "elapsed_s": elapsed_s,
         "timing": {**sim.timing, "total": timing_total},
         "settings": sim.s.model_dump(),
+        # 阻止コンデンサ (自己バイアス、prompts/134)。電極ごとの RF 1 周期ごとの V_dc・|V1|・I_dc と最後の
+        # 1 周期の電極の電位 (単位は座標系の電荷の単位: 軸対称は全周、平面は奥行き 1 m あたり)。無ければ None
+        "circuit": None if sim.circuit is None else sim.circuit.result(
+            {"capacitance": "F", "charge": "C", "current": "A"} if sim.rz
+            else {"capacitance": "F/m", "charge": "C/m", "current": "A/m"}
+        ),
     }

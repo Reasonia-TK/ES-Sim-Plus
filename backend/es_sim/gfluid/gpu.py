@@ -14,6 +14,9 @@ CartesianFluid2dSimulation (gfluid.simulation) と同じ輸送グラフ・物理
   制御量) と、BiCGSTAB・GMG の収束判定だけ。サブステップ数の上限 (超えたら ValueError)・サブステップの
   合間の停止要求 (デバイスの状態をその場でステップ開始時へ戻す)・Joule 緩和時間 (体積あたりの加熱率、
   電子がほぼ空の節点を除く) は v1 の step と同じ判定。
+- 阻止コンデンサ (自己バイアス、prompts/134): 回路 (circuit.BlockingCircuit) はホストに置き、CPU 版と同じ量を
+  デバイスで集約して読む (Poisson のあとに電極の電荷、輸送のあとに伝導電流。1 サブステップに 2 回の小さな読み出し)。
+  新しい電極の電位はグループの電位に入れ直し、ψ の重ね合わせ (x += ΣΔV ψ) で解を直す。
 - n_e / n_i / w / phi / q_surf (誘電体の表面電荷、prompts/129) はデバイスが正。属性として読むとホストへ
   写し、代入 (または読んだ配列の書き換え) は次のステップの前にデバイスへ戻す。フレーム・時間平均・
   位相分解は v1 と同じ形。
@@ -61,7 +64,7 @@ _KERNELS = (
     "fl_coeffs", "fl_edges", "fl_nodes", "fl_wall_ci", "fl_wall_diag", "fl_diag", "fl_rhs", "fl_floor",
     "fl_see", "fl_gwe", "fl_joule", "fl_scale2", "fl_energy_off", "fl_wallgen", "fl_poisson_rhs",
     "fl_fixed", "bcg_init", "bcg_p", "bcg_v", "bcg_s", "bcg_t", "bcg_x", "fl_nemax", "fl_stats", "fl_accum",
-    "fl_tri_e", "fl_surf", "fl_sum",
+    "fl_tri_e", "fl_surf", "fl_sum", "fl_cap_charge", "fl_cap_current", "fl_axpy",
 )
 
 
@@ -163,18 +166,23 @@ class GpuCartesianFluid2dSimulation(CartesianFluid2dSimulation):
         """ステップ開始時のデバイスの状態 (n_e・n_i・w・φ・誘電体の表面電荷と壁損失・生成の積算) の複製。"""
         g = self._g
         with g.stream:
-            return tuple(a.copy() for a in (g.ne, g.ni, g.w, g.phi, g.acc_wg, g.qsurf))
+            dev = tuple(a.copy() for a in (g.ne, g.ni, g.w, g.phi, g.acc_wg, g.qsurf))
+        return dev, (None if self.circuit is None else self.circuit.snapshot())
 
     def _restore_step_state(self, saved) -> None:
         """退避した状態へその場で戻す (CUDA Graph が配列のポインタを持つので差し替えない)。
 
         ホスト側の壁損失・生成の累計・全量・制御量はステップの終わりにしか更新しないので戻す必要が無い。
+        阻止コンデンサの回路 (ホスト) は退避した写しへ戻す。
         """
+        dev, circuit = saved
         g = self._g
         with g.stream:
-            for dst, src in zip((g.ne, g.ni, g.w, g.phi, g.acc_wg, g.qsurf), saved):
+            for dst, src in zip((g.ne, g.ni, g.w, g.phi, g.acc_wg, g.qsurf), dev):
                 dst[...] = src
             g.version += 1           # 途中のサブステップで読まれたホスト側の写しを無効にする
+        if circuit is not None:
+            self.circuit.restore(circuit)
 
     # ---- 時間平均・位相分解 (デバイスで積算し、取り出すときに v1 の形へ) ---------------------------
 
@@ -275,6 +283,20 @@ class _EbPoisson:
         else:
             g._pcg_loop("pcg", lambda kk: solver.launch_solve(self.b2, self.x2, kk), solver.monitor)
         g.phi[...] = self.x2.ravel()
+        if self.fidx.size:
+            g.k["fl_fixed"](*g._g1(self.fidx.size), (g.phi, self.fidx, self.fgrp, g.vgrp, np.int32(self.fidx.size)))
+
+    def shift(self, dv) -> None:
+        """阻止コンデンサの電極の電位の変化 dv を ψ の重ね合わせで解に足し、固定節点を埋め直す (prompts/134)。
+
+        解のバッファ x2 も直すので、次のサブステップの PCG はこの解から始まる。
+        """
+        g = self.g
+        x = self.x2.ravel()
+        for psi, d in zip(g.cap_psi, dv):
+            if d != 0.0:
+                g.k["fl_axpy"](*g._g1(x.size), (x, psi, np.float64(d), np.int64(x.size)))
+        g.phi[...] = x
         if self.fidx.size:
             g.k["fl_fixed"](*g._g1(self.fidx.size), (g.phi, self.fidx, self.fgrp, g.vgrp, np.int32(self.fidx.size)))
 
@@ -430,6 +452,8 @@ class _GpuFluid:
         self.b = cp.zeros(nn)
         self.pcg_k = PCG_ITERS_START
         self.poisson = _AmrPoisson(self, sim) if getattr(sim, "_lay", None) is not None else _EbPoisson(self, sim)
+        if sim.circuit is not None:
+            self._init_circuit(act, wo)
 
         # ---- 係数表 ----
         s = sim.s
@@ -554,8 +578,91 @@ class _GpuFluid:
         vg = np.zeros(self.n_groups + 1)
         if self.n_groups:
             vg[:self.n_groups] = group_voltages(sim.model, t)
+        circuit = sim.circuit
+        if circuit is not None:
+            # 阻止コンデンサの電極は前のサブステップの電位で解く (CPU 版の _solve_phi と同じ手順)
+            v_src = np.array([vg[groups[0]] for groups in sim._cap_groups])
+            v_old = circuit.potentials(v_src)
+            vg[:self.n_groups] = sim._cap_set(vg[:self.n_groups], v_old)
         self.vgrp.set(vg)
         self.poisson.solve()
+        if circuit is not None:
+            v_new = circuit.solve(self._cap_charges(), v_old, v_src)
+            vg = vg.copy()
+            vg[:self.n_groups] = sim._cap_set(vg[:self.n_groups], v_new)
+            self.vgrp.set(vg)
+            self.poisson.shift(v_new - v_old)
+
+    # ---- 阻止コンデンサ (prompts/134): CPU 版 (gfluid.simulation) と同じ量をデバイスで集約する ------------
+
+    def _init_circuit(self, act: np.ndarray, wo: np.ndarray) -> None:
+        """電極の電荷と伝導電流の集計の表 (電極ごとに連続に並べ、区間ごとに和を取る: 決定的)。"""
+        cp = self.cp
+        sim = self.sim
+        g = sim.graph
+        m = sim.circuit.m
+
+        def offsets(elec):
+            return cp.asarray(np.concatenate([[0], np.cumsum(np.bincount(elec, minlength=m))]).astype(np.int64))
+
+        def i64(a):
+            return cp.asarray(np.ascontiguousarray(a, dtype=np.int64))
+
+        # 電束 Σ G (V − φ): 結合のうち電極のもの
+        rows, cols, data, ej = sim._cap_coo
+        o = np.argsort(ej, kind="stable")
+        self.cap_rows, self.cap_cols = i64(rows[o]), i64(cols[o])
+        self.cap_data = cp.asarray(np.ascontiguousarray(data[o], dtype=np.float64))
+        self.cap_flux_off = offsets(ej)
+        # 電極の固定節点の電荷: 固定の電荷 (定数) + e·w·(n_i − n_e) (charge_map の行の和) + 表面電荷 / qdiv
+        nodes, fe = sim._cap_fixed_nodes, sim._cap_fixed_elec
+        self.cap_static = np.bincount(fe, weights=sim._q_static[nodes], minlength=m)
+        cm = g.charge_map[:, act].tocsr()
+        widx, wval = [], []
+        for j in range(m):
+            row = np.asarray(cm[nodes[fe == j]].sum(axis=0)).ravel()
+            nz = np.nonzero(row)[0]
+            widx.append(nz)
+            wval.append(row[nz])
+        self.cap_widx = i64(np.concatenate(widx))
+        self.cap_wval = cp.asarray(np.ascontiguousarray(np.concatenate(wval), dtype=np.float64))
+        self.cap_woff = i64(np.concatenate([[0], np.cumsum([a.size for a in widx])]))
+        o = np.argsort(fe, kind="stable")
+        self.cap_fnodes = i64(nodes[o])
+        self.cap_foff = offsets(fe)
+        # ψ (全節点、解のバッファに x += ΔV ψ で足す)
+        self.cap_psi = [cp.asarray(np.ascontiguousarray(sim._cap_psi[j], dtype=np.float64)) for j in range(m)]
+        # 伝導電流: 行き先が電極の壁の小片 (節点順に並べ替えた位置) と、その節点 (アクティブ節点の番号)
+        inv = np.empty(len(wo), dtype=np.int64)
+        inv[wo] = np.arange(len(wo))
+        o = np.argsort(sim._cap_wall_elec, kind="stable")
+        self.cap_piece = i64(inv[sim._cap_wall][o])
+        self.cap_ploc = i64(sim._glob_to_loc[g.wall_node[sim._cap_wall]][o])
+        self.cap_poff = offsets(sim._cap_wall_elec)
+        self.cap_part = cp.zeros(3 * NB)          # fl_cap_charge / fl_cap_current の電極ごとの和 (slot × NB + j)
+
+    def _cap_charges(self) -> np.ndarray:
+        """今の φ (デバイス) での電極の表面の電荷 (CPU 版の _cap_charges と同じ量)。"""
+        sim = self.sim
+        m = sim.circuit.m
+        self.k["fl_cap_charge"]((m,), (NT,), (
+            self.phi, self.vgrp, self.cap_rows, self.cap_cols, self.cap_data, self.cap_flux_off,
+            self.ni, self.ne, self.cap_widx, self.cap_wval, self.cap_woff, self.qsurf, self.cap_fnodes,
+            self.cap_foff, self.cap_part))
+        s = self.cap_part.get().reshape(3, NB)[:, :m]
+        own = self.cap_static + QE * s[1] + s[2] / self.qdiv
+        return sim._cap_factor * (s[0] - own)
+
+    def _cap_current(self) -> np.ndarray:
+        """電極へ流れ込む伝導電流 (壁の小片ごとの e·(Γ_i(1 + γ) − Γ_e) の和、CPU 版の _accumulate_circuit と同じ)。"""
+        sim = self.sim
+        m = sim.circuit.m
+        if sim.debug_reflective_walls or self.cap_piece.size == 0:
+            return np.zeros(m)
+        self.k["fl_cap_current"]((m,), (NT,), (
+            self.warea, self.ci, self.ni_new, self.ne_new, self.gamma, self.ce, self.cap_piece, self.cap_ploc,
+            self.cap_poff, self.cap_part))
+        return QE * self.cap_part[:m].get()
 
     def _pcg_loop(self, key, launch, monitor) -> None:
         """前のサブステップの解から pcg_k 反復ずつ (グラフで再生) 積み、残差を 1 回読んで判定する。"""
@@ -687,6 +794,9 @@ class _GpuFluid:
         if self.n_surf and not sim.debug_reflective_walls:
             k["fl_surf"](*g1, (self.ci, self.warea, self.wchg, self.wptr, self.sarea, self.ni_new, self.ne_new,
                                self.gamma, self.ce, self.gidx, n, np.float64(QE * dt), self.qsurf))
+        # 阻止コンデンサの電極へ流れ込む伝導電流 (同じ流束、prompts/134)
+        if sim.circuit is not None:
+            sim.circuit.conduct(self._cap_current(), t, dt)
         t2 = time.perf_counter()
         sim.timing["transport"] += t2 - t1
 

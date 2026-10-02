@@ -606,6 +606,53 @@ extern "C" __global__ void fl_accum(const double* phi, int nn, const double* ne,
     }
 }
 
+// ---- blocking capacitor (prompts/134): per-electrode sums -----------------------------------------------
+// Same quantities as the CPU path (es_sim/gfluid/simulation.py _cap_charges, fluid2d._accumulate_circuit).
+// Launched with m blocks (one per electrode j) of FL_NT threads; the entries of electrode j are contiguous
+// ([off[j], off[j + 1])) and block j stores its fixed-tree sums to part[slot * FL_NB + j] (no atomics).
+
+// slot 0: sum G (V_g - phi_P) over the coupling entries of the electrode; slot 1: sum w (n_i - n_e) over the
+// charge weights of its fixed nodes; slot 2: sum q_surf over those fixed nodes
+extern "C" __global__ void fl_cap_charge(const double* phi, const double* vgrp, const long long* rows,
+                                         const long long* cols, const double* g, const long long* goff,
+                                         const double* ni, const double* ne, const long long* widx,
+                                         const double* wval, const long long* woff, const double* qsurf,
+                                         const long long* fnodes, const long long* foff, double* part)
+{
+    __shared__ double sh[FL_NT];
+    int j = blockIdx.x;
+    double a = 0.0, b = 0.0, c = 0.0;
+    for (long long k = goff[j] + threadIdx.x; k < goff[j + 1]; k += FL_NT) a += g[k] * (vgrp[cols[k]] - phi[rows[k]]);
+    for (long long k = woff[j] + threadIdx.x; k < woff[j + 1]; k += FL_NT) b += wval[k] * (ni[widx[k]] - ne[widx[k]]);
+    for (long long k = foff[j] + threadIdx.x; k < foff[j + 1]; k += FL_NT) c += qsurf[fnodes[k]];
+    fl_store(a, sh, part, 0, 0);
+    fl_store(b, sh, part, 1, 0);
+    fl_store(c, sh, part, 2, 0);
+}
+
+// slot 0: conduction current into the electrode = sum over its wall pieces of area (c_i n_i (1 + gamma) - c_e n_e)
+extern "C" __global__ void fl_cap_current(const double* area, const double* ci, const double* ni,
+                                          const double* ne, const double* gamma, const double* ce,
+                                          const long long* piece, const long long* loc, const long long* poff,
+                                          double* part)
+{
+    __shared__ double sh[FL_NT];
+    int j = blockIdx.x;
+    double s = 0.0;
+    for (long long k = poff[j] + threadIdx.x; k < poff[j + 1]; k += FL_NT) {
+        long long p = piece[k], n = loc[k];
+        s += area[p] * (ci[p] * ni[n] * (1.0 + gamma[n]) - ce[n] * ne[n]);
+    }
+    fl_store(s, sh, part, 0, 0);
+}
+
+// y += a x
+extern "C" __global__ void fl_axpy(double* y, const double* x, double a, long long n)
+{
+    long long k = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < n) y[k] += a * x[k];
+}
+
 // E = -grad phi of every display triangle, added to acc (ex, ey)
 extern "C" __global__ void fl_tri_e(const double* phi, const int* tri, const double* bb, const double* cc,
                                     const double* det, int nt, double* acc)

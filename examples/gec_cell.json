@@ -18,7 +18,8 @@
         "polygon": [[0.0, 0.02], [0.0508, 0.02], [0.0508, 0.03], [0.0, 0.03]],
         "voltage": 0.0,
         "voltage_rf": {"amplitude": 100.0, "freq_hz": 13.56e6, "phase_deg": 0.0},
-        "see_gamma": 0.07
+        "see_gamma": 0.07,
+        "blocking_capacitor": {"capacitance": 5e-9, "initial_bias_v": -85.0}
       },
       {
         "id": "lower_insulator",

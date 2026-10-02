@@ -17,6 +17,11 @@ v1 ``fluid2d.Fluid2dSimulation`` と**同じ物理・同じ時間積分・同じ
   (/mesh の直交格子の表示用メッシュと同じ節点番号。/ws/fluid2d の started にも載せる)。
   mesh.amr の局所細分化は AMR 版 (gfluid.amr.AmrFluid2dSimulation、prompts/128) が
   _build_graph / Poisson を差し替えて解く (make_fluid2d_simulation が振り分ける)。
+- 阻止コンデンサ (自己バイアス、prompts/134): 電極 (導体・Dirichlet の辺。1 つの境界条件の辺はまとめて 1 つ)
+  ごとに ψ (その電極 1 V・ほか 0 V・空間電荷 0) を最初に 1 回解き、容量行列もそこから求める。毎サブステップ、
+  前の電極の電位で φ* を解き、電極の電荷 (結合の電束 ΣG(V − φ) − 電極の固定節点の電荷) から回路
+  (circuit.BlockingCircuit) が新しい電位を決め、φ = φ* + ΣΔV ψ に直す。伝導電流は壁の小片ごとに行き先の
+  電極へ足す (導体の表面・外周の Dirichlet の辺・電極に接した誘電体の縁)。AMR 版はまだ対応していない (SB-d)。
 - v1 と同じく periodic 境界は未対応。
 """
 
@@ -28,6 +33,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
+from ..circuit import BlockingCircuit, CapacitorSpec
 from ..device import Device, get_device
 from ..eb.build import MASK_FIXED, MASK_UNKNOWN, LevelOperator, build_level
 from ..eb.grid import make_grid
@@ -74,6 +80,8 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
 
     #: Poisson を CPU の疎行列 LU で解いてよいか (GPU 版は常に GPU の GMG を使う)
     _allow_lu = True
+    #: 阻止コンデンサ (自己バイアス、prompts/134) に対応する (一様格子の CPU・GPU。AMR 版は外す)
+    _blocking_capacitor_ok = True
 
     def __init__(self, project: Project, explicit: bool = False, device: Device | str | None = None):
         self._device = device if isinstance(device, Device) else get_device(device)
@@ -181,26 +189,163 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
         """
         v = group_voltages(self.model, t)
         q = QE * np.asarray(self.graph.charge_map @ (self.n_i - self.n_e)).ravel()
-        b = self._q_static + q + (self.q_surf / (2.0 * np.pi) if self.rz else self.q_surf)
-        if self._n_groups:
-            b = b + self._coupling @ v
+        b_q = self._q_static + q + (self.q_surf / (2.0 * np.pi) if self.rz else self.q_surf)
+        circuit = self.circuit
+        if circuit is not None:
+            # 阻止コンデンサの電極は前のサブステップの電位で φ* を解く (モジュール docstring)
+            v_src = np.array([v[groups[0]] for groups in self._cap_groups])
+            v_old = circuit.potentials(v_src)
+            v = self._cap_set(v, v_old)
+        b = b_q + self._coupling @ v if self._n_groups else b_q
         op = self._op
+        dev = self._device
+        if self._lu is not None:
+            x = np.zeros(self.n_nodes)
+            x[self._lu_idx] = self._lu.solve(b[self._lu_idx])
+            phi = fill_fixed(op, x.reshape(op.grid.shape), v).ravel()
+        else:
+            x, info = self._gmg.solve(dev.asarray(b.reshape(op.grid.shape)), x0=self._x_prev, tol=POISSON_TOL)
+            self._x_prev = x
+            self.poisson_iters += info.iterations
+            if not info.converged and not self._poisson_warned:
+                self.warnings.append(
+                    f"Poisson (GMG-PCG) が収束しませんでした (相対残差 {info.relative_residual:.2e}、"
+                    "このメッセージは初回のみ)"
+                )
+                self._poisson_warned = True
+            phi = fill_fixed(op, dev.to_host(x), v).ravel()
+        if circuit is not None:
+            v_new = circuit.solve(self._cap_charges(phi, v, b_q), v_old, v_src)
+            shift = (v_new - v_old) @ self._cap_psi
+            v = self._cap_set(v, v_new)
+            phi = fill_fixed(op, (phi + shift).reshape(op.grid.shape), v).ravel()
+            if self._lu is None:
+                self._x_prev = self._x_prev + dev.asarray(shift.reshape(op.grid.shape))
         self._v_now = v
+        return phi
+
+    # ---- 阻止コンデンサ (自己バイアス、prompts/134・モジュール docstring) ----------------------
+
+    def _capacitor_electrodes(self) -> list[tuple[CapacitorSpec, list[int]]]:
+        """阻止コンデンサを付けた電極と、その Dirichlet グループの番号。
+
+        外周の境界条件は辺ごとに別のグループになる (geom.model) ので、1 つの境界条件の辺はまとめて 1 つの電極に
+        する (辺どうしはつながった 1 つの導体とみなす)。導体の領域は 1 つのグループ。
+        """
+        model = self.model
+        out: list[tuple[CapacitorSpec, list[int]]] = []
+        for bc in self.project.geometry.boundaries:
+            cap = bc.blocking_capacitor
+            if bc.type != "dirichlet" or cap is None:
+                continue
+            groups: list[int] = []
+            for e in bc.edges:
+                g = model.side_group.get(model.domain.edge_sides.get(e))
+                if g is not None and g not in groups:
+                    groups.append(g)
+            if groups:
+                label = "+".join(f"edge{e}" for e in bc.edges)
+                out.append((CapacitorSpec(label, cap.capacitance, cap.initial_bias_v), groups))
+        for k, c in enumerate(model.conductors):
+            cap = c.region.blocking_capacitor
+            if cap is not None:
+                out.append((CapacitorSpec(c.id, cap.capacitance, cap.initial_bias_v), [model.conductor_group[k]]))
+        used: set[int] = set()
+        for spec, groups in out:
+            if used & set(groups):
+                raise ValueError(f"阻止コンデンサの電極 {spec.label} の辺が、ほかの阻止コンデンサの電極と重なっています")
+            used |= set(groups)
+        return out
+
+    def _init_circuit(self) -> None:
+        """阻止コンデンサの回路を組む: 電荷の集計の表、ψ と容量行列、壁の小片の行き先。"""
+        elecs = self._capacitor_electrodes()
+        if not elecs:
+            return
+        op = self._op
+        n_groups = len(self.model.groups)
+        m = len(elecs)
+        self._cap_groups = [groups for _, groups in elecs]
+        group_elec = np.full(n_groups, -1, dtype=np.int64)
+        for j, groups in enumerate(self._cap_groups):
+            group_elec[groups] = j
+        # 電極の電荷 = 結合 (未知節点 P → グループ g) の電束 − 電極の固定節点に置かれた電荷
+        coo = op.coupling.tocoo()
+        ej = group_elec[coo.col]
+        keep = ej >= 0
+        self._cap_coo = (coo.row[keep].astype(np.int64), coo.col[keep].astype(np.int64), coo.data[keep], ej[keep])
+        fixed = op.fixed_group.ravel()
+        fixed_elec = np.where(fixed >= 0, group_elec[np.maximum(fixed, 0)], -1)
+        self._cap_fixed_nodes = np.nonzero((op.mask.ravel() == MASK_FIXED) & (fixed_elec >= 0))[0]
+        self._cap_fixed_elec = fixed_elec[self._cap_fixed_nodes]
+        self._cap_factor = 2.0 * np.pi if self.rz else 1.0
+        self._cap_m = m
+        # ψ_j (その電極 1 V・ほかの電極 0 V・空間電荷 0) と容量行列 C_jk = ψ_k の解での電極 j の電荷
+        units = [self._cap_set(np.zeros(n_groups), np.eye(m)[k]) for k in range(m)]
+        self._cap_psi = np.array([self._solve_unit(v) for v in units])
+        zero = np.zeros(self.n_nodes)
+        c_matrix = np.array([self._cap_charges(self._cap_psi[k], units[k], zero) for k in range(m)]).T
+        period = 1.0 / self._cycle_freq if self._cycle_freq is not None else None
+        self.circuit = BlockingCircuit([spec for spec, _ in elecs], c_matrix, period)
+        # 伝導電流: 壁の小片ごとの行き先の電極
+        sink = self._wall_sink_groups()
+        elec = np.where(sink >= 0, group_elec[np.maximum(sink, 0)], -1)
+        self._cap_wall = np.nonzero(elec >= 0)[0]
+        self._cap_wall_elec = elec[self._cap_wall]
+
+    def _cap_set(self, v: np.ndarray, values) -> np.ndarray:
+        """グループの電位 v のうち、阻止コンデンサの電極のグループを values (電極ごと) にしたもの。"""
+        v = np.array(v, dtype=np.float64)
+        for groups, value in zip(self._cap_groups, values):
+            v[groups] = value
+        return v
+
+    def _solve_unit(self, v: np.ndarray) -> np.ndarray:
+        """空間電荷 0・グループの電位 v の解 (全節点。ψ 用)。"""
+        op = self._op
+        b = self._coupling @ v
         if self._lu is not None:
             x = np.zeros(self.n_nodes)
             x[self._lu_idx] = self._lu.solve(b[self._lu_idx])
             return fill_fixed(op, x.reshape(op.grid.shape), v).ravel()
         dev = self._device
-        x, info = self._gmg.solve(dev.asarray(b.reshape(op.grid.shape)), x0=self._x_prev, tol=POISSON_TOL)
-        self._x_prev = x
-        self.poisson_iters += info.iterations
-        if not info.converged and not self._poisson_warned:
+        x, info = self._gmg.solve(dev.asarray(b.reshape(op.grid.shape)), tol=POISSON_TOL)
+        if not info.converged:
             self.warnings.append(
-                f"Poisson (GMG-PCG) が収束しませんでした (相対残差 {info.relative_residual:.2e}、"
-                "このメッセージは初回のみ)"
+                f"阻止コンデンサの ψ の Poisson (GMG-PCG) が収束しませんでした (相対残差 {info.relative_residual:.2e})"
             )
-            self._poisson_warned = True
         return fill_fixed(op, dev.to_host(x), v).ravel()
+
+    def _cap_charges(self, phi: np.ndarray, v: np.ndarray, b_q: np.ndarray) -> np.ndarray:
+        """阻止コンデンサの電極の表面の電荷 (軸対称は 2π 込み、平面は奥行き 1 m あたり)。
+
+        電極から領域への電束 Σ G_Pk (V_k − φ_P) (静電場の電極の電荷と同じ) から、電極の固定節点に置かれた
+        電荷 (b_q: 体積電荷・誘電体の表面電荷・固定の電荷) を引く。Poisson はその電荷を見ない (固定節点) ので、
+        電極の表面のすぐ外の層とみなし、残りを導体の電荷とする (circuit.py の docstring)。
+        """
+        rows, cols, data, ej = self._cap_coo
+        flux = np.bincount(ej, weights=data * (v[cols] - phi[rows]), minlength=self._cap_m)
+        own = np.bincount(self._cap_fixed_elec, weights=b_q[self._cap_fixed_nodes], minlength=self._cap_m)
+        return self._cap_factor * (flux - own)
+
+    def _wall_sink_groups(self) -> np.ndarray:
+        """壁の小片ごとに、流れ込む電荷を受け取る Dirichlet グループ (−1 は電極でない: 帯電する誘電体の面)。
+
+        導体の表面は wall_group。外周の Dirichlet の辺の小片 (wall_group = −1 で誘電体でない) は法線 (気体 → 壁)
+        の向きから辺を決める。電極に接した誘電体の縁 (受け持つ節点が Poisson の固定節点) は表面電荷にならず
+        電極へ流れる扱い (_adopt_graph) なので、その節点のグループ。
+        """
+        g = self.graph
+        sink = np.array(g.wall_group, dtype=np.int64)
+        side = (sink < 0) & ~g.wall_dielectric
+        if np.any(side):
+            nx_, ny_ = g.wall_normal[side, 0], g.wall_normal[side, 1]
+            names = np.where(ny_ < -0.5, "bottom", np.where(ny_ > 0.5, "top", np.where(nx_ < -0.5, "left", "right")))
+            sink[side] = [self.model.side_group.get(str(s), -1) for s in names]
+        fixed = self._op.fixed_group.ravel()
+        diel = g.wall_dielectric & (fixed[g.wall_node] >= 0)
+        sink[diel] = fixed[g.wall_node[diel]]
+        return sink
 
     def _wall_en(self, phi: np.ndarray) -> np.ndarray:
         """壁小片ごとの E·n = (φ(A) − φ(W)) / L (gfluid.geometry のモジュール docstring)。"""

@@ -261,7 +261,7 @@ def test_schema_allows_capacitor_only_on_electrodes():
 
 
 def test_engines_without_support_reject_capacitor():
-    """PIC (1D・2D) と流体 2D は、まだ対応していないので実行の初めにエラーにする。"""
+    """PIC (1D・2D)・AMR の流体 2D・v1 の流体 2D (三角形メッシュ) は、まだ対応していないので実行の初めにエラー。"""
     pic1d = Pic1dSettings(
         gap_m=GAP, init_density_m3=1e15,
         left=Pic1dElectrode(blocking_capacitor=BlockingCapacitor1d(capacitance=1e-7)),
@@ -269,7 +269,8 @@ def test_engines_without_support_reject_capacitor():
     with pytest.raises(ValueError, match="阻止コンデンサ"):
         Pic1dSimulation(Project(geometry=_GEOMETRY, mesh=_MESH, pic1d=pic1d))
 
-    from es_sim.gfluid import make_fluid2d_simulation
+    from es_sim.gfluid import CartesianFluid2dSimulation, make_fluid2d_simulation
+    from es_sim.gfluid.amr import AmrFluid2dSimulation
     from es_sim.gpic import make_pic_simulation
 
     base = _project_2d(
@@ -283,5 +284,9 @@ def test_engines_without_support_reject_capacitor():
         with pytest.raises(ValueError, match="PIC はまだ阻止コンデンサ"):
             make_pic_simulation(pic)
     fluid = Project.model_validate({**base, "fluid2d": {"init_density_m3": 1e15, "gas_pressure_pa": 30.0}})
+    assert CartesianFluid2dSimulation(fluid, device="cpu").circuit.labels == ["rf"]  # v2 の一様格子版は対応
+    with pytest.raises(ValueError, match="流体 2D はまだ阻止コンデンサ"):
+        AmrFluid2dSimulation(fluid, device="cpu")
+    fluid.mesh.mode = "structured"
     with pytest.raises(ValueError, match="流体 2D はまだ阻止コンデンサ"):
         make_fluid2d_simulation(fluid)

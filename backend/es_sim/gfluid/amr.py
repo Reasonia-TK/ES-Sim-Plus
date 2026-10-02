@@ -38,6 +38,9 @@ def amr_fluid_hierarchy(project: Project, model, grid) -> AmrHierarchy | None:
 class AmrFluid2dSimulation(CartesianFluid2dSimulation):
     """合成格子 (AMR) 上の 2D/軸対称 ドリフト拡散流体 (CPU)。"""
 
+    #: 阻止コンデンサ (prompts/134) はまだ (合成格子の ψ と電極の電荷は SB-d)。付けた電極があればエラー
+    _blocking_capacitor_ok = False
+
     def _build_graph(self, project: Project, model, grid):
         hier = amr_fluid_hierarchy(project, model, grid)
         if hier is None:

@@ -194,7 +194,7 @@ def test_ws_sweep_fluid2d_two_values_full_flow_and_result_endpoint():
     fluid2d_result0 = obj0["results"]["fluid2d"]
     assert fluid2d_result0 is not None
     assert set(fluid2d_result0) == {
-        "history", "fields", "cycle", "walls", "gen_total", "elapsed_s", "timing", "settings",
+        "history", "fields", "cycle", "walls", "gen_total", "elapsed_s", "timing", "settings", "circuit",
     }
     assert fluid2d_result0["settings"]["init_density_m3"] == 1.0e14
 
@@ -233,7 +233,7 @@ def test_batch_run_module_auto_selects_fluid2d_only_project(tmp_path: Path):
     result = obj["results"]["fluid2d"]
     assert result is not None
     assert set(result) == {
-        "history", "fields", "cycle", "walls", "gen_total", "elapsed_s", "timing", "settings",
+        "history", "fields", "cycle", "walls", "gen_total", "elapsed_s", "timing", "settings", "circuit",
     }
     assert result["settings"]["n_steps"] == 20
     assert result["elapsed_s"] > 0

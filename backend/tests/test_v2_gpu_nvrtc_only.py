@@ -149,7 +149,7 @@ def test_cuda_status_mentions_hidden_devices(monkeypatch):
 
 # ---- NVRTC だけの環境 ------------------------------------------------------------------------------
 
-#: NVRTC だけの環境で走らせる GPU のテスト (P8a で置き換えた 4 か所と、PIC・DSMC・流体の基本)
+#: NVRTC だけの環境で走らせる GPU のテスト (P8a で置き換えた 4 か所と、PIC・DSMC・流体の基本、流体の阻止コンデンサ)
 _GPU_TESTS = [
     "tests/test_v2_gpu_nvrtc_only.py::test_spd_inverse_matches_numpy",
     "tests/test_v2_gpu_nvrtc_only.py::test_dense_inverse_of_singular_problem_matches_cpu",
@@ -160,6 +160,7 @@ _GPU_TESTS = [
     "tests/test_v2_gdsmc.py::test_equilibrium_box",
     "tests/test_v2_gfluid_gpu.py::test_amr_matches_cpu_direct_poisson",
     "tests/test_v2_gfluid_gpu.py::test_amr_singular_poisson_on_gpu",
+    "tests/test_circuit_fluid2d.py::test_gpu_matches_cpu_with_two_capacitors",
 ]
 
 #: 配布版に入れない CUDA のライブラリ (読まれたら、配布版では GPU の計算が失敗する)
