@@ -1,5 +1,5 @@
 // 1D の電極 (PIC 1D・流体 1D の左右): 直流電圧・γ・RF・FN (PIC 1D のみ)・複数の CSV 波形・阻止コンデンサ
-// (流体 1D のみ、prompts/134)。V = DC + ΣRF + CSV (v1 Pic1dPanel の ElectrodeEditor と同じ)。
+// (prompts/134)。V = DC + ΣRF + CSV (v1 Pic1dPanel の ElectrodeEditor と同じ)。
 
 import { useTranslation } from "react-i18next";
 import { OptionalBlock } from "../../forms/blocks";
@@ -21,20 +21,20 @@ interface Electrode {
   blocking_capacitor?: unknown;
 }
 
-export function ElectrodeEditor({ path, fn, capacitor = false }: { path: Path; fn: boolean; capacitor?: boolean }) {
+export function ElectrodeEditor({ path, fn }: { path: Path; fn: boolean }) {
   const { t } = useTranslation();
   const e = (useDocument((s) => getIn(s.project, path)) as Electrode | undefined) ?? {};
   return (
     <>
       <SchemaField path={[...path, "v_dc"]} />
-      {capacitor && e.blocking_capacitor ? <Hint>{t("capacitor.dcBlocked")}</Hint> : null}
+      {e.blocking_capacitor ? <Hint>{t("capacitor.dcBlocked")}</Hint> : null}
       <SchemaField path={[...path, "see_gamma"]} />
       <RfEditor path={[...path, "voltage_rf"]} />
       <div className="subsection-title">{t("widgets.waveforms")}</div>
       <WaveformList path={[...path, "waveforms"]} />
       <Hint>{t("widgets.electrodeFormula")}</Hint>
       <VoltagePreview dc={e.v_dc ?? 0} rf={rfComponents(e.voltage_rf)} waveforms={e.waveforms ?? []} />
-      {capacitor && <CapacitorEditor path={path} kind="1d" />}
+      <CapacitorEditor path={path} kind="1d" />
       {fn && (
         <OptionalBlock path={[...path, "fn"]} title={t("widgets.fnEmission")} defaults={() => ({ ...DEFAULT_FN_1D })}>
           <SchemaField path={[...path, "fn", "phi_ev"]} />

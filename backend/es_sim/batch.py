@@ -173,8 +173,21 @@ def _build_results_bundle(sim: PicSimulation, step_offset: int, elapsed_s: float
             "collectors": collectors,
             "eedf": eedf,
             "elapsed_s": elapsed_s,
+            # 阻止コンデンサ (自己バイアス、prompts/134)。コンデンサが無ければ None
+            "circuit": pic_circuit_result(sim),
         },
     }
+
+
+def pic_circuit_result(sim) -> dict | None:
+    """2D PIC の結果の circuit (流体 2D の build_fluid2d_result と同じ形・単位)。コンデンサが無ければ None。"""
+    circuit = getattr(sim, "circuit", None)
+    if circuit is None:
+        return None
+    return circuit.result(
+        {"capacitance": "F", "charge": "C", "current": "A"} if sim.rz
+        else {"capacitance": "F/m", "charge": "C/m", "current": "A/m"}
+    )
 
 
 def _resolve_module(project: Project, module: str) -> str:
@@ -208,7 +221,7 @@ def self_bias_metrics(bundle: dict) -> list[dict]:
     スイープのケースの一覧に出す小さな要約 ({label, v_dc, v1})。回路が無い・周期が閉じていなければ空。
     """
     out: list[dict] = []
-    for key in ("fluid1d", "fluid2d"):
+    for key in ("fluid1d", "fluid2d", "pic1d", "pic"):
         circuit = (bundle.get(key) or {}).get("circuit") if isinstance(bundle.get(key), dict) else None
         for e in (circuit or {}).get("electrodes", []):
             if e.get("v_dc"):

@@ -165,7 +165,7 @@ class GpuPicSimulation:
     def __init__(self, project: Project, gas_field=None, device: Device | str | None = None):
         if project.pic is None:
             raise ValueError("project.pic が指定されていません")
-        reject_blocking_capacitors(project, "PIC")
+        reject_blocking_capacitors(project, "v2 PIC (直交格子)")
         dev = device if isinstance(device, Device) else get_device(device or "cuda")
         if not dev.is_gpu:
             raise RuntimeError(

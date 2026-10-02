@@ -15,6 +15,10 @@
 - 安定性チェック: 開始時に ωpe·dt とセルサイズ/デバイ長を確認して警告文字列を返す
 - ホットループは numpy ベクトル化 (粒子 for ループなし)。walk 探索・隣接配列・
   重心座標係数は particles.py の実装を再利用する
+- 阻止コンデンサ (自己バイアス、prompts/134): 電極の電位を circuit.BlockingCircuit で決める。節点の電荷 f が
+  誘導する電荷 −ψ̃·f (Green の相反定理) から Poisson の前に電位が決まる (_solve_phi)。伝導電流は、境界エッジで
+  吸収した粒子の電荷と電極から出た二次電子・FN 電子の +e·w を、当たった (出た) 点の P1 重みでエッジの 2 つの端の
+  節点へ分け、電極の節点の分を積む (_cap_add)
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ import scipy.sparse.linalg as spla
 from scipy.spatial import cKDTree
 
 from . import _numba_kernels
-from .circuit import reject_blocking_capacitors
+from .circuit import BlockingCircuit, mesh_capacitor_electrodes
 from .fem import EPS0, _material_arrays, _radial_index, assemble
 from .fn import build_fn_surface, distribute_particles, fn_segment_currents
 from .mcc import GasField, MccModel
@@ -235,7 +239,6 @@ class PicSimulation:
     def __init__(self, project: Project, gas_field: GasField | None = None):
         if project.pic is None:
             raise ValueError("project.pic が指定されていません")
-        reject_blocking_capacitors(project, "PIC")
         self.project = project
         self.pic: PicSettings = project.pic
         # 非一様背景ガス場 (prompts/54)。DSMC の定常解などを MCC が参照する
@@ -397,6 +400,8 @@ class PicSimulation:
         self._cycle_bins = int(self.pic.phase_bins)
         self._cycle_enabled = self._cycle_freq is not None and self._cycle_bins > 0
         self._cycle_period = 1.0 / self._cycle_freq if self._cycle_enabled else 0.0
+        # 阻止コンデンサ (prompts/134)。下の半ステップ後退キックの最初の求解で回路の電荷 Q_N が決まる
+        self._init_circuit(k)
         if self._cycle_enabled:
             # 平均区間が RF 1周期より短いとステップ数 0 の位相ビンが生じるため警告
             avg = (
@@ -853,6 +858,75 @@ class PicSimulation:
         frac = (t % self._cycle_period) / self._cycle_period
         return min(int(frac * self._cycle_bins), self._cycle_bins - 1)
 
+    # ---- 阻止コンデンサ (自己バイアス、prompts/134) ------------------------------------------
+
+    def _init_circuit(self, k) -> None:
+        """阻止コンデンサの回路: ψ̃ (K_ff の LU)・容量行列・節点 → 電極の表。
+
+        電極 = mesh.electrode のラベルが電極のもの (circuit.mesh_capacitor_electrodes)。粒子などの節点の電荷 f が
+        電極 j に誘導する電荷は Q_e0,j = −factor ψ̃_j·f (Green の相反定理。ψ̃_j は電極 j の節点が 1 V・ほかの
+        Dirichlet 節点が 0 V の解、factor は軸対称で 2π)。容量 C_jk は ψ_k の解での電極 j の電荷 (静電場と同じ
+        残差 Σ_{電極 j の節点} Kψ_k)。
+        """
+        self.circuit: BlockingCircuit | None = None
+        elecs = mesh_capacitor_electrodes(self.project, self.mesh)
+        if not elecs:
+            return
+        n = self.n_nodes
+        m = len(elecs)
+        self._cap_nodes = [nodes for _, nodes in elecs]
+        self._cap_rows = [np.searchsorted(self.fixed, nodes) for nodes in self._cap_nodes]
+        self._cap_factor = 2.0 * np.pi if self.rz else 1.0
+        psi = np.zeros((m, n))
+        for j, rows in enumerate(self._cap_rows):
+            vd = np.zeros(self.fixed.size)
+            vd[rows] = 1.0
+            psi[j, self.fixed] = vd
+            psi[j, self.free] = self.lu.solve(-(self.k_fd @ vd))
+        self._cap_psi = psi
+        kpsi = np.asarray(k @ psi.T)
+        c_matrix = self._cap_factor * np.array([kpsi[nodes].sum(axis=0) for nodes in self._cap_nodes])
+        period = 1.0 / self._cycle_freq if self._cycle_freq is not None else None
+        self.circuit = BlockingCircuit([spec for spec, _ in elecs], c_matrix, period)
+        self._cap_node_elec = np.full(n, -1, dtype=np.int64)
+        for j, nodes in enumerate(self._cap_nodes):
+            self._cap_node_elec[nodes] = j
+        self._cap_dq = np.zeros(m)   # このステップに電極へ流れ込んだ電荷 (軸対称は C、平面は C/m)
+
+    def _cap_add(self, n1: np.ndarray, n2: np.ndarray, w1: np.ndarray, q: np.ndarray) -> None:
+        """電荷 q を節点 n1・n2 へ重み w1・1 − w1 で分け、電極の節点の分を阻止コンデンサの電極へ積む。"""
+        m = self.circuit.m
+        for nodes, w in ((n1, w1), (n2, 1.0 - w1)):
+            e = self._cap_node_elec[nodes]
+            sel = e >= 0
+            if np.any(sel):
+                self._cap_dq += np.bincount(e[sel], weights=(q * w)[sel], minlength=m)
+
+    def _cap_edge_weight(self, ea: np.ndarray, eloc: np.ndarray, hit: np.ndarray):
+        """境界エッジ (要素 ea の頂点 eloc の対辺) の 2 つの端の節点と、当たった点の 1 つ目の端の P1 重み。
+
+        当たった点の重心座標の 2 つの端の成分を和 1 に直したもの (点の電荷の P1 射影と同じ分け方)。
+        """
+        k1, k2 = (eloc + 1) % 3, (eloc + 2) % 3
+        lam = self._bary_of(hit, ea)
+        rows = np.arange(len(ea))
+        l1 = np.maximum(lam[rows, k1], 0.0)
+        l2 = np.maximum(lam[rows, k2], 0.0)
+        s = l1 + l2
+        w1 = np.where(s > 0.0, l1 / np.where(s > 0.0, s, 1.0), 0.5)
+        return self.tris[ea, k1], self.tris[ea, k2], w1
+
+    def _edge_hit(self, ea: np.ndarray, eloc: np.ndarray, xp: np.ndarray, xn: np.ndarray) -> np.ndarray:
+        """x_prev → x_new が越えた境界エッジ (重心座標 L_eloc = 0) との交点 (線形補間)。"""
+        a, b, c, det = self.coeffs
+        aa, bb, cc, dd = a[ea, eloc], b[ea, eloc], c[ea, eloc], det[ea]
+        l0 = (aa + bb * xp[:, 0] + cc * xp[:, 1]) / dd
+        l1 = (aa + bb * xn[:, 0] + cc * xn[:, 1]) / dd
+        denom = l0 - l1
+        denom = np.where(np.abs(denom) < 1e-300, 1e-300, denom)
+        frac = np.clip(l0 / denom, 0.0, 1.0)
+        return xp + frac[:, None] * (xn - xp)
+
     def _build_see_edges(self) -> None:
         """境界エッジ (隣接 = -1) ごとの SEE 属性表を構築する。
 
@@ -1116,16 +1190,7 @@ class PicSimulation:
         if np.any(wall):
             # 壁吸収: 越えた境界エッジの重心座標 L=0 を x_prev → x_new で線形補間
             w_idx = idx[wall]
-            ea, eloc = b_elem[w_idx], b_loc[w_idx]
-            a, b, c, det = self.coeffs
-            aa, bb, cc, dd = a[ea, eloc], b[ea, eloc], c[ea, eloc], det[ea]
-            xp, xn = sp.x[w_idx], x_new[w_idx]
-            l0 = (aa + bb * xp[:, 0] + cc * xp[:, 1]) / dd
-            l1 = (aa + bb * xn[:, 0] + cc * xn[:, 1]) / dd
-            denom = l0 - l1
-            denom = np.where(np.abs(denom) < 1e-300, 1e-300, denom)
-            frac = np.clip(l0 / denom, 0.0, 1.0)
-            pos[wall] = xp + frac[:, None] * (xn - xp)
+            pos[wall] = self._edge_hit(b_elem[w_idx], b_loc[w_idx], sp.x[w_idx], x_new[w_idx])
         if not np.all(wall):
             # 誘電体表面吸収: 現在位置 (侵入直前〜現在の間で良い)
             pos[~wall] = x_new[idx[~wall]]
@@ -1291,15 +1356,10 @@ class PicSimulation:
         c_idx, ea, eloc = c_idx[accept], ea[accept], eloc[accept]
 
         # 吸収位置: 越えたエッジの重心座標 L=0 を x_prev → x_new で線形補間
-        a, b, c, det = self.coeffs
-        aa, bb, cc, dd = a[ea, eloc], b[ea, eloc], c[ea, eloc], det[ea]
-        xp, xn = sp.x[c_idx], x_new[c_idx]
-        l0 = (aa + bb * xp[:, 0] + cc * xp[:, 1]) / dd
-        l1 = (aa + bb * xn[:, 0] + cc * xn[:, 1]) / dd
-        denom = l0 - l1
-        denom = np.where(np.abs(denom) < 1e-300, 1e-300, denom)
-        frac = np.clip(l0 / denom, 0.0, 1.0)
-        x_hit = xp + frac[:, None] * (xn - xp)
+        x_hit = self._edge_hit(ea, eloc, sp.x[c_idx], x_new[c_idx])
+        if self.circuit is not None:
+            # 電極から電子が出ていく分 +e·w を阻止コンデンサの電極へ (prompts/134)
+            self._cap_add(*self._cap_edge_weight(ea, eloc, x_hit), QE * sp.w[c_idx])
 
         nrm = self._edge_normal[ea, eloc]
         pos = x_hit + self._edge_delta[ea, eloc][:, None] * nrm
@@ -1491,10 +1551,13 @@ class PicSimulation:
         return v
 
     def _solve_phi(self, f_dep: np.ndarray, t: float) -> np.ndarray:
-        """ポアソン求解。前分解済み LU で右辺のみ更新して解く (再分解しない)。"""
+        """ポアソン求解。前分解済み LU で右辺のみ更新して解く (再分解しない)。
+
+        阻止コンデンサの電極は、節点の電荷 f が誘導する電荷 Q_e0 = −factor ψ̃·f から回路が電位を決めてから
+        解く (circuit.BlockingCircuit.solve_induced。Poisson は 1 回)。
+        """
         v = np.zeros(self.n_nodes)
         vd = self._dirichlet_values(t)
-        v[self.fixed] = vd
         if self.rz:
             # 軸対称: リング電荷 Q [C] の P1 射影は f_i = Q·L_i/(2π)
             # (fem.assemble は弱形式の 2π を両辺で落とした規約のため。q_surf も同様)
@@ -1503,6 +1566,12 @@ class PicSimulation:
         if self._solid_elem is not None:
             # 誘電体の蓄積表面電荷を恒常的に加算する (誘電体なしの経路は数値不変)
             f = f + (self.q_surf / (2.0 * np.pi) if self.rz else self.q_surf)
+        if self.circuit is not None:
+            v_src = np.array([vd[rows[0]] for rows in self._cap_rows])
+            v_e = self.circuit.solve_induced(-self._cap_factor * (self._cap_psi @ f), v_src)
+            for rows, value in zip(self._cap_rows, v_e):
+                vd[rows] = value
+        v[self.fixed] = vd
         rhs = f[self.free] - self.k_fd @ vd
         v[self.free] = self.lu.solve(rhs)
         if self.canon is not None:
@@ -1616,6 +1685,9 @@ class PicSimulation:
         sp.elem = np.concatenate([sp.elem, elem])
         self._bary_append(sp, bary)
         self.fn_events += n_emit
+        if self.circuit is not None:
+            # 電極から出た電子の分 +e·w を、出た点 (セグメント上の位置 t) の重みで電極へ (prompts/134)
+            self._cap_add(surf.n1[seg_idx], surf.n2[seg_idx], 1.0 - t, np.full(n_emit, QE * w_emit))
         return i_tot
 
     # ---- 粒子マージ (高速化③、prompts/77) -------------------------------------
@@ -2151,6 +2223,13 @@ class PicSimulation:
             n_abs = int(removed.sum())
             if n_abs:
                 sp.wall_absorbed += n_abs
+                if self.circuit is not None and np.any(absorbed):
+                    # 境界エッジで吸収した粒子の電荷を、当たった点の P1 重みで電極へ (prompts/134。
+                    # sp.x は更新前の位置。誘電体へ吸収した分は表面電荷なので数えない)
+                    a_idx = np.nonzero(absorbed)[0]
+                    ea, eloc = b_elem[a_idx], b_loc[a_idx]
+                    hit = self._edge_hit(ea, eloc, sp.x[a_idx], x_new[a_idx])
+                    self._cap_add(*self._cap_edge_weight(ea, eloc, hit), sp.q * sp.w[a_idx])
                 # IEDF/IADF コレクタ: 平均区間中に吸収されたイオンを記録
                 # (外周・電極輪郭・誘電体表面のすべて。電子・SEE は対象外)
                 if sp.name == "ion" and self._collectors_st and accumulating:
@@ -2253,6 +2332,10 @@ class PicSimulation:
             self._inject(ex, ey)
         # 6.5. FN 電界放出 (prompts/46)。表面電界はこのステップの場 (exy) を使う
         fn_i = self._emit_fn(exy) if self._fn_surf is not None else 0.0
+        # 6.6. 阻止コンデンサの電極の電荷 Q_N に、このステップの伝導電流を積む (prompts/134)
+        if self.circuit is not None:
+            self.circuit.conduct(self._cap_dq / dt, t, dt)
+            self._cap_dq = np.zeros(self.circuit.m)
 
         self.t = t + dt
         self.step_count += 1
@@ -2591,6 +2674,8 @@ class PicSimulation:
 
         # 診断 history は追加区間分のみ (キー構成は不変)
         self.history = {k: [] for k in self.history}
+        if self.circuit is not None:
+            self.circuit.reset_history()  # 回路の状態 (コンデンサの電荷) は引き継ぐ
         # 位相別計測 (prompts/75) も追加区間分のみ返すようリセットする
         self.timing = {k: 0.0 for k in self.timing}
         # 平均・位相・コレクタ系のアキュムレータをリセット
@@ -2685,6 +2770,8 @@ class PicSimulation:
             "n_i": n_i.tolist(),
             "particles": particles,
             "diag": diag,
+            # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
+            "circuit": None if self.circuit is None else self.circuit.frame(),
         }
 
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):

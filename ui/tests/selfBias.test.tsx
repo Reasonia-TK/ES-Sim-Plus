@@ -98,11 +98,16 @@ describe("document operations", () => {
     expect(edgeSummary(p, 1, t)).toContain("C_b");
   });
 
-  it("offers the fluid 1D capacitor as sweep parameters", () => {
-    const paths = buildSweepCandidates(project(), t).map((c) => c.path);
+  it("offers the 1D capacitors (fluid 1D and PIC 1D) as sweep parameters", () => {
+    const p = project();
+    p.pic1d = { gap_m: 0.02, left: { v_dc: 0 }, right: { v_dc: 0, blocking_capacitor: { capacitance: 2e-7 } } };
+    const paths = buildSweepCandidates(p, t).map((c) => c.path);
     expect(paths).toContain("fluid1d.left.blocking_capacitor.capacitance");
     expect(paths).toContain("fluid1d.left.blocking_capacitor.initial_bias_v");
     expect(paths).not.toContain("fluid1d.right.blocking_capacitor.capacitance");
+    expect(paths).toContain("pic1d.right.blocking_capacitor.capacitance");
+    expect(paths).toContain("pic1d.right.blocking_capacitor.initial_bias_v");
+    expect(paths).not.toContain("pic1d.left.blocking_capacitor.capacitance");
   });
 });
 
@@ -156,5 +161,27 @@ describe("self-bias results", () => {
     render(<RunSummary job={job()} />);
     expect(screen.getByText("自己バイアス V_dc (左の電極)")).toBeTruthy();
     expect(screen.getByText("-39.66 V")).toBeTruthy();
+  });
+
+  it("charts the self-bias of a PIC 2D result and draws the measured electrode potential", () => {
+    const p = newProject();
+    p.geometry.regions.push({ id: "rf", type: "conductor", polygon: [[0, 0], [0.01, 0], [0.01, 0.01]], voltage: 0, voltage_rf: { amplitude: 100, freq_hz: 13.56e6 }, blocking_capacitor: { capacitance: 5e-9 } });
+    p.pic = { n_steps: 10 };
+    const mesh = { nodes: [[0, 0], [1, 0], [0, 1]] as [number, number][], triangles: [[0, 1, 2]] as [number, number, number][] };
+    const pic = {
+      started: { dt: 1e-11, n_steps: 10, step_offset: 0, warnings: [], mesh },
+      frame: null, history: [], fields: null, cycle: null, collectors: [], eedf: [], elapsed_s: 1,
+      circuit: circuit("rf", { capacitance: "F", charge: "C", current: "A" }),
+    };
+    const pj = job({ kind: "pic" });
+    useJobs.setState({ jobs: { r1: pj }, results: { r1: { run: 1, data: pic } }, inputs: { r1: { project: p, docSerial: -1 } } });
+    act(() => useResultsView.getState().setActiveRun("r1"));
+    render(<ResultsCharts />);
+    expect(screen.getByText("自己バイアス (RF 1 周期ごと)")).toBeTruthy();
+    // RF 波形モニタ (凡例は canvas) の電極は、結果の最後の 1 周期の実際の電位
+    const es = electrodes2d(p, t, { result: pic.circuit });
+    expect(es.map((e) => e.label)).toEqual(["rf (電極の電位、最後の 1 周期)"]);
+    render(<RunSummary job={pj} />);
+    expect(screen.getByText("自己バイアス V_dc (rf)")).toBeTruthy();
   });
 });

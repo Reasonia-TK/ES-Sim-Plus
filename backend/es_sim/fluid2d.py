@@ -157,7 +157,7 @@ import scipy.sparse.linalg as spla
 
 from . import _numba_kernels
 from .boltz import BoltzCoeffs, boltz_coeffs_at, boltz_coeffs_from_table
-from .circuit import BlockingCircuit, CapacitorSpec
+from .circuit import BlockingCircuit, mesh_capacitor_electrodes
 from .fem import EPS0, _radial_index, assemble, assemble_transport_operator
 from .fluid1d import FLOOR_N, FLOOR_W, _bernoulli, frost_mobility
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
@@ -377,28 +377,12 @@ class Fluid2dSimulation:
 
     def _init_circuit(self) -> None:
         """阻止コンデンサの回路を組む (v1 の三角形メッシュ。v2 は es_sim.gfluid が差し替える。モジュール docstring)。"""
-        mesh = self.mesh
-        elecs = []   # (CapacitorSpec, ラベルの集合)
-        for bc in self.project.geometry.boundaries:
-            cap = bc.blocking_capacitor
-            if bc.type == "dirichlet" and cap is not None:
-                label = "+".join(f"edge{e}" for e in bc.edges)
-                elecs.append((CapacitorSpec(label, cap.capacitance, cap.initial_bias_v), {f"edge{e}" for e in bc.edges}))
-        for r in self.project.geometry.regions:
-            cap = r.blocking_capacitor
-            if r.type == "conductor" and cap is not None:
-                elecs.append((CapacitorSpec(r.id, cap.capacitance, cap.initial_bias_v), {r.id}))
+        elecs = mesh_capacitor_electrodes(self.project, self.mesh)
         if not elecs:
             return
         n = self.n_nodes
         m = len(elecs)
-        self._cap_nodes = [
-            np.array(sorted(node for node, label in mesh.electrode.items() if label in labels), dtype=np.int64)
-            for _, labels in elecs
-        ]
-        for (spec, _), nodes in zip(elecs, self._cap_nodes):
-            if nodes.size == 0:
-                raise ValueError(f"阻止コンデンサの電極 {spec.label} に Dirichlet 節点がありません")
+        self._cap_nodes = [nodes for _, nodes in elecs]
         # self.fixed (Dirichlet 値の並び) の中の位置
         self._cap_rows = [np.searchsorted(self.fixed, nodes) for nodes in self._cap_nodes]
         self._cap_factor = 2.0 * np.pi if self.rz else 1.0

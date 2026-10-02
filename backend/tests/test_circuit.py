@@ -261,13 +261,12 @@ def test_schema_allows_capacitor_only_on_electrodes():
 
 
 def test_engines_without_support_reject_capacitor():
-    """PIC (1D・2D) はまだ対応していないので実行の初めにエラー。流体 2D は全て (一様格子・AMR・v1) 対応。"""
+    """v2 GPU PIC (直交格子) はまだ対応していないので実行の初めにエラー。PIC 1D・v1 PIC・流体は全て対応。"""
     pic1d = Pic1dSettings(
-        gap_m=GAP, init_density_m3=1e15,
+        gap_m=GAP, init_density_m3=1e15, n_macro=100,
         left=Pic1dElectrode(blocking_capacitor=BlockingCapacitor1d(capacitance=1e-7)),
     )
-    with pytest.raises(ValueError, match="阻止コンデンサ"):
-        Pic1dSimulation(Project(geometry=_GEOMETRY, mesh=_MESH, pic1d=pic1d))
+    assert Pic1dSimulation(Project(geometry=_GEOMETRY, mesh=_MESH, pic1d=pic1d)).circuit.labels == ["left"]
 
     from es_sim.gfluid import CartesianFluid2dSimulation, make_fluid2d_simulation
     from es_sim.gfluid.amr import AmrFluid2dSimulation
@@ -278,11 +277,11 @@ def test_engines_without_support_reject_capacitor():
           "blocking_capacitor": {"capacitance": 5e-9}}],
         [{"edges": [1, 3], "type": "dirichlet"}],
     ).model_dump()
-    pic = Project.model_validate({**base, "pic": {}})
-    for mode in ("cartesian", "structured"):
-        pic.mesh.mode = mode
-        with pytest.raises(ValueError, match="PIC はまだ阻止コンデンサ"):
-            make_pic_simulation(pic)
+    pic = Project.model_validate({**base, "pic": {"dt": 1e-11}})
+    with pytest.raises(ValueError, match="v2 PIC .*はまだ阻止コンデンサ"):
+        make_pic_simulation(pic)
+    pic.mesh.mode = "structured"
+    assert make_pic_simulation(pic).circuit.labels == ["rf"]
     fluid = Project.model_validate({**base, "fluid2d": {"init_density_m3": 1e15, "gas_pressure_pa": 30.0}})
     assert CartesianFluid2dSimulation(fluid, device="cpu").circuit.labels == ["rf"]
     amr = fluid.model_copy(deep=True)

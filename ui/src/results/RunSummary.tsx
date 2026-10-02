@@ -126,7 +126,7 @@ function Summary1d({ job, kind }: { job: JobSummary; kind: "pic1d" | "fluid1d" }
           rows={[
             [t("summary.elapsedWall"), `${r.elapsed_s.toFixed(3)} s`],
             ...timing,
-            ...(fl?.circuit ? circuitResultRows(fl.circuit, null, t) : []),
+            ...(r.circuit ? circuitResultRows(r.circuit, null, t) : []),
             [t("summary.wallLeft"), pair(num(r.walls.left.electron), num(r.walls.left.ion))],
             [t("summary.wallRight"), pair(num(r.walls.right.electron), num(r.walls.right.ion))],
             fl ? [t("summary.genTotal"), `${formatNumber(fl.gen_total)} m^-2`] : null,
@@ -171,9 +171,11 @@ function PicSummary({ job, project }: { job: JobSummary; project: Project | null
             d.merged ? [t("summary.merged"), num(d.merged)] : null,
             [rz ? t("summary.surfQRz") : t("summary.surfQ"), exp3(d.surf_q)],
             d.fn_i ? [rz ? t("summary.fnRz") : t("summary.fn"), exp3(d.fn_i)] : null,
+            ...(frame?.circuit ? circuitFrameRows(frame.circuit, project, t) : []),
           ]}
         />
       )}
+      {result?.circuit && <Kv title={t("summary.title")} rows={circuitResultRows(result.circuit, project, t)} />}
       {result && (
         <Kv
           title={t("summary.timingTitle")}

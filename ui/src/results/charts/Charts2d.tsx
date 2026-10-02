@@ -349,9 +349,12 @@ export function PicCharts({ job, project, result }: { job: JobSummary; project: 
   const mesh = result ? viewMeshOf(result.started.mesh) : null;
   const pic = project?.pic as { collectors?: { label?: string }[] } | null | undefined;
   const labels = (pic?.collectors ?? []).map((c) => c?.label ?? "");
+  // 阻止コンデンサ (prompts/134): 実行中はフレームの直近の自己バイアス、完了後は結果の最後の 1 周期の電極の電位
+  const circuit = useMemo<CircuitSrc>(() => ({ result: running ? null : result?.circuit, frame: frame?.circuit }), [running, result, frame]);
   return (
     <>
-      <RfCard project={project} time={frame?.t ?? null} />
+      <RfCard project={project} time={frame?.t ?? null} circuit={circuit} />
+      {result?.circuit && <SelfBiasCard circuit={result.circuit} project={project} csvPrefix="pic" />}
       <PicHistoryCard rows={rows as Partial<PicDiag>[]} />
       {result && result.collectors.length > 0 && <CollectorCard collectors={result.collectors} labels={labels} />}
       {result && result.eedf.length > 0 && <EedfCard eedf={result.eedf} csvPrefix="" prefKey="pic.eedf" defaultMode="eepf" />}

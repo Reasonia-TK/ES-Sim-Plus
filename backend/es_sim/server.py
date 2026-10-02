@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from . import _numba_kernels  # noqa: F401 (eager import。理由は下のコメント参照)
+from .batch import pic_circuit_result
 from .boltz import DEFAULT_BOLTZ_OPTS, boltzpm_available, run_boltz_sweep
 from .fem import solve
 from .lxcat import parse_lxcat
@@ -806,6 +807,10 @@ async def _stream_run(ws: WebSocket, sim: PicSimulation) -> None:
                 }
                 for r in sim.eedf_results
             ]
+        # 阻止コンデンサ (自己バイアス、prompts/134)。有効時のみ添付する
+        circuit = pic_circuit_result(sim)
+        if circuit is not None:
+            done_msg["circuit"] = circuit
         await ws.send_json(done_msg)
     except Exception as exc:
         try:

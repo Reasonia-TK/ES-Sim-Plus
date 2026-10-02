@@ -67,6 +67,8 @@ class FnSurface:
     nrm: np.ndarray     # (S, 2) 放出方向 (真空側の単位法線)
     length: np.ndarray  # (S,) エッジ長
     delta: np.ndarray   # (S,) 境界からわずかに内側へ置くオフセット量
+    n1: np.ndarray | None = None  # (S,) 端点1 (pa) の節点番号 (阻止コンデンサの電極の電荷の行き先、prompts/134)
+    n2: np.ndarray | None = None  # (S,) 端点2 (pb) の節点番号
 
 
 def _both_on_segment(
@@ -158,6 +160,8 @@ def build_fn_surface(
         nrm=nrm,
         length=length,
         delta=1e-3 * h,
+        n1=n1[sel],
+        n2=n2[sel],
     )
 
 

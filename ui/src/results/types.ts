@@ -48,6 +48,8 @@ export interface PicFrame {
   diag: PicDiag;
   mesh?: { nodes: Point[]; triangles: [number, number, number][] };
   mesh_version?: number;
+  /** 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134) */
+  circuit?: CircuitFrame[] | null;
 }
 
 /** 時間平均の場 (e_abs は要素、ほかは節点) */
@@ -104,6 +106,8 @@ export interface PicResult {
   elapsed_s?: number;
   timing?: Record<string, number>;
   regrids?: unknown[];
+  /** 阻止コンデンサ (自己バイアス、prompts/134)。コンデンサが無ければ null */
+  circuit?: CircuitResult | null;
 }
 
 // ---- 流体 2D ----
@@ -309,6 +313,7 @@ export interface Pic1dResult {
   elapsed_s: number;
   timing: Record<string, number>;
   settings: Record<string, unknown>;
+  circuit?: CircuitResult | null;
 }
 
 export interface Fluid1dResult {

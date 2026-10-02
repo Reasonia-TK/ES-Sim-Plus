@@ -222,14 +222,12 @@ export function Fluid1dPage() {
       const src = d.pic1d as unknown as RunBlock;
       const dst = d.fluid1d as unknown as RunBlock & Record<string, unknown>;
       if (!src || !dst) return;
-      // v1 と同じ: ギャップ・電極 (FN は外す)・初期密度・Te・イオン質量・位相ビン、MCC があればガスと電子の断面積
+      // v1 と同じ: ギャップ・電極 (FN は外す。阻止コンデンサも PIC 1D のものにそろえる)・初期密度・Te・
+      // イオン質量・位相ビン、MCC があればガスと電子の断面積
       dst.gap_m = src.gap_m;
       for (const side of ["left", "right"] as const) {
         const el = JSON.parse(JSON.stringify(src[side] ?? {})) as Electrode; // draft は structuredClone できない
         delete el.fn;
-        // 阻止コンデンサは流体 1D だけの設定 (PIC 1D はまだ使えない) なので、流体 1D の側のものを残す
-        const cap = (dst[side] as Electrode | undefined)?.blocking_capacitor;
-        if (cap) el.blocking_capacitor = JSON.parse(JSON.stringify(cap));
         dst[side] = el;
       }
       dst.init_density_m3 = src.init_density_m3;
@@ -254,10 +252,10 @@ export function Fluid1dPage() {
         <SchemaField path={[...P, "n_cells"]} />
       </Section>
       <Section title={t("studyCommon.leftElectrode")}>
-        <ElectrodeEditor path={[...P, "left"]} fn={false} capacitor />
+        <ElectrodeEditor path={[...P, "left"]} fn={false} />
       </Section>
       <Section title={t("studyCommon.rightElectrode")}>
-        <ElectrodeEditor path={[...P, "right"]} fn={false} capacitor />
+        <ElectrodeEditor path={[...P, "right"]} fn={false} />
       </Section>
       <FluidPhysics base="fluid1d" />
       <Section title={t("studyCommon.run")}>

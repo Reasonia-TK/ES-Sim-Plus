@@ -26,6 +26,11 @@ floor(x/dx) だけで直接求まるため。このため particles.py/_numba_ke
      (二次電子放出、壁法線内向き半球等方サンプリング)
   6. MCC: 既存 MccModel (mcc.py) をそのまま流用する
 
+阻止コンデンサ (自己バイアス、prompts/134): 電極に blocking_capacitor があれば、電源と電極の間に直列の
+コンデンサを置き、電極の電位を circuit.BlockingCircuit で決める。粒子の電荷が電極に誘導する電荷
+Q_e0 = −ψ̃·f_dep (ψ̃ は直線) から、Poisson を解く前に電位が決まる (solve_induced。Green の相反定理の形)。
+伝導電流は、壁で吸収した粒子の q·w と、電極から出た二次電子・FN 電子の +e·w (ステップごとに Q_N へ積む)。
+
 MccModel.collide_electrons/collide_ions の x, elem 引数について (mcc.py を
 実際に読んで検証した結果):
   - x はどの分岐でも `x[sub].copy()` (電離生成粒子の位置記録) にしか使われない
@@ -49,6 +54,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.linalg import solve_banded
 
+from .circuit import BlockingCircuit, CapacitorSpec
 from .fem import EPS0
 from .fn import fn_current_density
 from .mcc import MccModel
@@ -102,13 +108,6 @@ class Pic1dSimulation:
     def __init__(self, project: Project):
         if project.pic1d is None:
             raise ValueError("project.pic1d が指定されていません")
-        for side in ("left", "right"):
-            if getattr(project.pic1d, side).blocking_capacitor is not None:
-                # 黙って直結で計算すると自己バイアスの無い別の物理になる (prompts/134。流体 1D は対応)
-                raise ValueError(
-                    "PIC 1D はまだ阻止コンデンサ (自己バイアス) に対応していません "
-                    f"({side} の電極)。コンデンサを外すか、流体 1D で実行してください"
-                )
         self.project = project
         self.s: Pic1dSettings = project.pic1d
         s = self.s
@@ -185,6 +184,26 @@ class Pic1dSimulation:
         self._cycle_bins = int(s.phase_bins)
         self._cycle_enabled = self._cycle_freq is not None and self._cycle_bins > 0
         self._cycle_period = 1.0 / self._cycle_freq if self._cycle_enabled else 0.0
+
+        # ---- 阻止コンデンサ (自己バイアス、prompts/134・モジュール docstring) ----------
+        # ψ̃_k: 電極 k が 1 V・もう一方が 0 V・空間電荷 0 の解 (直線)。誘導電荷 Q_e0 = −ψ̃·f_dep、
+        # 容量 C = ε0/L (両方なら [[1, −1], [−1, 1]] ε0/L)。最初の _solve_phi (下の半ステップ後退キック) で
+        # 回路の電荷 Q_N が決まる
+        self.circuit: BlockingCircuit | None = None
+        self._cap_sides = [side for side in ("left", "right") if getattr(s, side).blocking_capacitor is not None]
+        if self._cap_sides:
+            self._cap_psi = np.array(
+                [1.0 - self.xg / self.gap if side == "left" else self.xg / self.gap for side in self._cap_sides]
+            )
+            sign = {"left": 1.0, "right": -1.0}
+            c_matrix = np.array([[sign[a] * sign[b] * EPS0 / self.gap for b in self._cap_sides]
+                                 for a in self._cap_sides])
+            specs = [
+                CapacitorSpec(side, getattr(s, side).blocking_capacitor.capacitance,
+                              getattr(s, side).blocking_capacitor.initial_bias_v)
+                for side in self._cap_sides
+            ]
+            self.circuit = BlockingCircuit(specs, c_matrix, 1.0 / self._cycle_freq if self._cycle_freq else None)
 
         # ---- 初期プラズマ装荷 -----------------------------------------------
         # 電子・イオンを同一位置に装荷して初期の厳密な電気的中性を保つ (pic.py と
@@ -372,12 +391,32 @@ class Pic1dSimulation:
         return electrode_voltage(elec, t)
 
     def _solve_phi(self, f_dep: np.ndarray, t: float) -> np.ndarray:
-        """ポアソン求解。行列は不変 (__init__ で構築済み)、右辺のみ毎回組み立てて解く。"""
+        """ポアソン求解。行列は不変 (__init__ で構築済み)、右辺のみ毎回組み立てて解く。
+
+        阻止コンデンサの電極は、粒子の電荷が誘導する電荷 Q_e0 = −ψ̃·f_dep から回路が電位を決めてから解く
+        (circuit.BlockingCircuit.solve_induced。Poisson は 1 回)。
+        """
         rhs = np.empty(self.n_nodes)
         rhs[1:-1] = f_dep[1:-1] / self.dx  # 内点の電荷密度 ρ_i = f_dep[i]/dx
         rhs[0] = self._electrode_voltage(self.s.left, t)
         rhs[-1] = self._electrode_voltage(self.s.right, t)
+        if self.circuit is not None:
+            node = {"left": 0, "right": -1}
+            v_src = np.array([rhs[node[side]] for side in self._cap_sides])
+            v = self.circuit.solve_induced(-(self._cap_psi @ f_dep), v_src)
+            for side, value in zip(self._cap_sides, v):
+                rhs[node[side]] = value
         return solve_banded((1, 1), self._poisson_ab, rhs)
+
+    def electrode_charges(self, phi: np.ndarray, f_dep: np.ndarray) -> np.ndarray:
+        """阻止コンデンサの電極の表面の電荷 [C/m²] (電束 − 端の節点の電荷、流体 1D と同じ形。検証用)。"""
+        out = []
+        for side in self._cap_sides:
+            if side == "left":
+                out.append(EPS0 * (phi[0] - phi[1]) / self.dx - f_dep[0])
+            else:
+                out.append(EPS0 * (phi[-1] - phi[-2]) / self.dx - f_dep[-1])
+        return np.array(out)
 
     def _e_field(self, phi: np.ndarray) -> np.ndarray:
         """節点電場 E = -dφ/dx (内点中心差分、端点片側差分)。"""
@@ -802,6 +841,8 @@ class Pic1dSimulation:
         see_x: list[np.ndarray] = []
         see_v: list[np.ndarray] = []
         see_w: list[np.ndarray] = []
+        # 阻止コンデンサの電極へ流れ込む電荷 [C/m²] (吸収した粒子の q·w、出ていった二次電子・FN 電子の +e·w)
+        cap_dq = {"left": 0.0, "right": 0.0}
         for sp in self.species.values():
             if len(sp.x) == 0:
                 continue
@@ -812,8 +853,12 @@ class Pic1dSimulation:
             right_mask = x_new > self.gap
             absorbed = left_mask | right_mask
             if np.any(absorbed):
-                self.wall["left"][sp.name] += float(sp.w[left_mask].sum())
-                self.wall["right"][sp.name] += float(sp.w[right_mask].sum())
+                w_left = float(sp.w[left_mask].sum())
+                w_right = float(sp.w[right_mask].sum())
+                self.wall["left"][sp.name] += w_left
+                self.wall["right"][sp.name] += w_right
+                cap_dq["left"] += sp.q * w_left
+                cap_dq["right"] += sp.q * w_right
                 if sp.name == "ion" and self._wall_iedf_enabled and accumulating:
                     # 壁 IEDF (prompts/116): 吸収された瞬間の全運動エネルギー
                     # E=½m|v|² [eV] を壁ごとに積算する (SEE 判定より前の sp.v・sp.w
@@ -831,9 +876,9 @@ class Pic1dSimulation:
                         )
                         self._accumulate_wall_iedf(side, e_ev, sp.w[mask])
                 if sp.name == "ion":
-                    for mask, sign, gamma, wall_x in (
-                        (left_mask, 1.0, self.s.left.see_gamma, 0.0),
-                        (right_mask, -1.0, self.s.right.see_gamma, self.gap),
+                    for mask, sign, gamma, wall_x, side in (
+                        (left_mask, 1.0, self.s.left.see_gamma, 0.0, "left"),
+                        (right_mask, -1.0, self.s.right.see_gamma, self.gap, "right"),
                     ):
                         if gamma <= 0.0 or not np.any(mask):
                             continue
@@ -846,7 +891,9 @@ class Pic1dSimulation:
                         see_x.append(np.full(k, wall_x))
                         see_v.append(self._see_speed * self._sample_hemisphere(self._see_rng, k, sign))
                         see_w.append(sp.w[sel].copy())
-                        self.see_events += float(sp.w[sel].sum())
+                        w_see = float(sp.w[sel].sum())
+                        self.see_events += w_see
+                        cap_dq[side] += QE * w_see
                 keep = ~absorbed
                 sp.x = x_new[keep]
                 sp.v = sp.v[keep]
@@ -892,6 +939,12 @@ class Pic1dSimulation:
             fn_j_left, fn_j_right, fn_w_left, fn_w_right = self._emit_fn(ex)
         else:
             fn_j_left = fn_j_right = fn_w_left = fn_w_right = 0.0
+
+        # 8. 阻止コンデンサの電極の電荷 Q_N に、このステップの伝導電流を積む (prompts/134)
+        if self.circuit is not None:
+            cap_dq["left"] += QE * fn_w_left
+            cap_dq["right"] += QE * fn_w_right
+            self.circuit.conduct(np.array([cap_dq[side] / dt for side in self._cap_sides]), t, dt)
 
         self.t = t + dt
         self.step_count += 1
@@ -952,6 +1005,8 @@ class Pic1dSimulation:
             "counts": counts,
             "elapsed_s": time.perf_counter() - self._run_t0,
             "sample": {"x": sample_x.tolist(), "vx": sample_vx.tolist()},
+            # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
+            "circuit": None if self.circuit is None else self.circuit.frame(),
         }
 
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
@@ -1026,6 +1081,8 @@ class Pic1dSimulation:
 
         self.history = {k: [] for k in self.history}
         self.timing = {k: 0.0 for k in self.timing}
+        if self.circuit is not None:
+            self.circuit.reset_history()  # 回路の状態 (コンデンサの電荷) は引き継ぐ
         self._accum_start = None
         self._accum_count = 0
         self._accum_phi = None
@@ -1392,4 +1449,9 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
         "elapsed_s": elapsed_s,
         "timing": {**sim.timing, "total": timing_total},
         "settings": sim.s.model_dump(),
+        # 阻止コンデンサ (自己バイアス、prompts/134)。電極ごとの RF 1 周期ごとの V_dc・|V1|・I_dc と最後の
+        # 1 周期の電極の電位。コンデンサが無ければ None
+        "circuit": None if sim.circuit is None else sim.circuit.result(
+            {"capacitance": "F/m^2", "charge": "C/m^2", "current": "A/m^2"}
+        ),
     }

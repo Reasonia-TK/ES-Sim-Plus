@@ -128,7 +128,8 @@ class BlockingCapacitor(BaseModel):
     """電極と電源の間に直列の阻止コンデンサ (自己バイアス、prompts/134)。2D の導体・Dirichlet の辺に付ける。
 
     電極の直流電位 (自己バイアス) が放電に合わせて決まる (circuit.py)。電源の直流分 (voltage) は定常では
-    コンデンサが止める。流体 2D (v2 の一様格子・AMR、v1) が使い、PIC はまだ使えない (実行の初めにエラー)。静電場の計算
+    コンデンサが止める。流体 2D (v2 の一様格子・AMR、v1) と v1 PIC (三角形メッシュ) が使い、v2 PIC (直交格子) は
+    まだ使えない (実行の初めにエラー)。静電場の計算
     (/solve) は無視する。容量は座標系の電荷の単位に合わせ、平面 2D は奥行き 1 m あたり [F/m]、軸対称は
     全周 [F] (静電場の電極の電荷 C/m・C と同じ)。
     """
@@ -142,7 +143,7 @@ class BlockingCapacitor(BaseModel):
 
 
 class BlockingCapacitor1d(BaseModel):
-    """1D の電極の阻止コンデンサ (BlockingCapacitor と同じ、容量は面積あたり)。流体 1D が使い、PIC 1D はまだ使えない。"""
+    """1D の電極の阻止コンデンサ (BlockingCapacitor と同じ、容量は面積あたり)。流体 1D・PIC 1D が使う。"""
 
     capacitance: float = Field(..., gt=0, description="面積あたりの容量", json_schema_extra=ui("F/m^2"))
     initial_bias_v: float = Field(
@@ -702,7 +703,7 @@ class Pic1dElectrode(BaseModel):
     see_gamma: float = Field(0.0, ge=0.0, le=1.0, description="イオン入射あたりのSEE収率 γ", json_schema_extra=ui("1"))
     # FN 電界放出 (prompts/95)。None なら放出なし (従来動作と完全ビット不変)
     fn: Fn1dEmission | None = None
-    # 電源との間の阻止コンデンサ (自己バイアス、prompts/134)。流体 1D のみ (PIC 1D はまだ使えない)。
+    # 電源との間の阻止コンデンサ (自己バイアス、prompts/134)。流体 1D・PIC 1D。
     # None なら電源に直結
     blocking_capacitor: BlockingCapacitor1d | None = None
 

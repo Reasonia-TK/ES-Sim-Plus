@@ -79,6 +79,10 @@ export function buildSweepCandidates(p: Project, t: TFunction): SweepCandidate[]
         out.push({ label: tt("sweep.cand.p1FnBeta", { side: s }), path: `pic1d.${side}.fn.beta` });
         out.push({ label: tt("sweep.cand.p1FnPhi", { side: s }), path: `pic1d.${side}.fn.phi_ev` });
       }
+      if (el.blocking_capacitor) {
+        out.push({ label: tt("sweep.cand.p1Cap", { side: s }), path: `pic1d.${side}.blocking_capacitor.capacitance` });
+        out.push({ label: tt("sweep.cand.p1Bias", { side: s }), path: `pic1d.${side}.blocking_capacitor.initial_bias_v` });
+      }
     }
   }
   const f1 = p.fluid1d as Record<string, unknown> | null | undefined;
@@ -95,7 +99,7 @@ export function buildSweepCandidates(p: Project, t: TFunction): SweepCandidate[]
         out.push({ label: tt("sweep.cand.f1RfFreq", { side: s }), path: `fluid1d.${side}.voltage_rf.0.freq_hz` });
       }
       // 阻止コンデンサ (prompts/134)。2D の電極のコンデンサはジオメトリのパス (PIC で実行) になるので、
-      // 流体 2D でスイープするときはパラメータに束縛して流体 2D を選ぶ
+      // 流体 2D でスイープするときはパラメータに束縛して流体 2D を選ぶ (直交格子の PIC はまだ使えない)
       if (el.blocking_capacitor) {
         out.push({ label: tt("sweep.cand.f1Cap", { side: s }), path: `fluid1d.${side}.blocking_capacitor.capacitance` });
         out.push({ label: tt("sweep.cand.f1Bias", { side: s }), path: `fluid1d.${side}.blocking_capacitor.initial_bias_v` });

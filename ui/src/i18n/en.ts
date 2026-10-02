@@ -1222,6 +1222,8 @@ const en: Resources = {
       p1RfFreq: "PIC 1D {{side}} RF frequency",
       p1FnBeta: "PIC 1D {{side}} FN β",
       p1FnPhi: "PIC 1D {{side}} FN work function",
+      p1Cap: "PIC 1D {{side}} blocking capacitor",
+      p1Bias: "PIC 1D {{side}} initial bias",
       f1Gap: "Fluid 1D gap",
       f1Density: "Fluid 1D initial density",
       f1Pressure: "Fluid 1D gas pressure",
@@ -1237,11 +1239,11 @@ const en: Resources = {
   },
   capacitor: {
     title: "Blocking capacitor (self-bias)",
-    offHint: "A capacitor in series between the source and the electrode lets the electrode's DC potential (self-bias) follow the discharge (fluid only)",
+    offHint: "A capacitor in series between the source and the electrode lets the electrode's DC potential (self-bias) follow the discharge (not yet with the Cartesian-grid PIC)",
     hint2d:
-      "Total capacitance in axisymmetric mode, per metre of depth in planar mode. Aim for 100× the electrode capacitance or more (shown in the run summary). Literature: 0.1 µF in the real GEC cell, 5 nF in 2D simulations. The settled self-bias is the same; smaller values settle faster. The capacitor blocks the source's DC part (voltage) in steady state. Works with the fluid solvers (1D and 2D); not yet with PIC (it reports an error)",
+      "Total capacitance in axisymmetric mode, per metre of depth in planar mode. Aim for 100× the electrode capacitance or more (shown in the run summary). Literature: 0.1 µF in the real GEC cell, 5 nF in 2D simulations. The settled self-bias is the same; smaller values settle faster. The capacitor blocks the source's DC part (voltage) in steady state. Works with the fluid solvers (1D and 2D) and the triangle-mesh PIC; not yet with the Cartesian-grid (v2) PIC (it reports an error)",
     hint1d:
-      "Capacitance per area. Aim for 100× the electrode capacitance ε0/gap or more. The default 6×10⁻⁷ F/m² equals 5 nF on a 101.6 mm electrode (the GEC 2D simulation value). The capacitor blocks the source's DC voltage in steady state. Not yet available in PIC 1D",
+      "Capacitance per area. Aim for 100× the electrode capacitance ε0/gap or more. The default 6×10⁻⁷ F/m² equals 5 nF on a 101.6 mm electrode (the GEC 2D simulation value). The capacitor blocks the source's DC voltage in steady state",
     dcBlocked: "With a blocking capacitor this DC part has no effect in steady state (it only sets the initial potential)",
   },
   hints2: {

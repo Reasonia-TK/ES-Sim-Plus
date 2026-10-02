@@ -27,6 +27,12 @@
 C_b → ∞ では V_e → V_s + initial_bias_v (直結に一定のずれを足したもの) になる。定常の直流分は「1 周期の
 正味の伝導電流 0」で決まり、C_b ≫ C なら C_b によらない (C_b が決めるのは落ち着くまでの時間と RF の分圧)。
 
+PIC は ``solve_induced()`` を使う (Green の相反定理の形): 全ての電極を 0 V にしたとき空間電荷が電極 k に誘導する
+電荷 Q_e0,k = −Σ_i ψ̃_k(i) q_i (q_i は節点の電荷、ψ̃_k は ψ_k の固定節点に「電極 k なら 1、ほかは 0」を入れた
+もの) をエンジンが求めれば、V_e = (C + C_b)⁻¹ (Q_N − Q_e0 + C_b V_s) が Poisson を解く前に決まる。Poisson の
+行列が対称なら上の Q_e* − C V_e^old と厳密に同じ量で、Poisson は新しい V_e で 1 回解くだけでよく、V_e は
+Poisson の解の精度 (GPU の固定回数の反復) によらない。
+
 単位は座標系の電荷の単位: 軸対称は C・F・A、平面 2D は奥行き 1 m あたり、1D は面積あたり。
 
 RF 1 周期 (最低周波数) ごとに、電極の電位の平均 V_dc (自己バイアス)、基本波の振幅 |V1|、正味の伝導電流 I_dc を
@@ -108,6 +114,24 @@ class BlockingCircuit:
         self.v = np.linalg.solve(self._a, rhs)
         self.v_src = v_src.copy()
         return self.v.copy()
+
+    def solve_induced(self, q_induced, v_src) -> np.ndarray:
+        """空間電荷が誘導する電極の電荷 Q_e0 (全ての電極が 0 V のときの電極の電荷) から V_e を求める (PIC 用)。
+
+        最初の呼び出しで V_e = V_s + initial_bias_v になるよう Q_N = Q_e0 + C V_e + C_b initial_bias_v と置く。
+        """
+        q0 = np.asarray(q_induced, dtype=np.float64)
+        v_src = np.asarray(v_src, dtype=np.float64)
+        if self.q_node is None:
+            self.q_node = self.initial_charge(q0, v_src)
+        self.v = np.linalg.solve(self._a, self.q_node - q0 + self.c_b * v_src)
+        self.v_src = v_src.copy()
+        return self.v.copy()
+
+    def initial_charge(self, q_induced, v_src) -> np.ndarray:
+        """V_e = V_s + initial_bias_v となる電極の節点の電荷 Q_N (solve_induced の最初・GPU 版の初期値)。"""
+        v0 = np.asarray(v_src, dtype=np.float64) + self.bias0
+        return np.asarray(q_induced, dtype=np.float64) + self.c @ v0 + self.c_b * self.bias0
 
     def conduct(self, i_cond, t0: float, dt: float) -> None:
         """サブステップ [t0, t0+dt] の伝導電流 (電極へ流れ込む正の電荷の流量) を Q_N に積み、集計を進める。"""
@@ -245,6 +269,35 @@ class BlockingCircuit:
         }
 
 
+# ---- 電極の節点 (三角形メッシュ) -------------------------------------------------------------------
+
+
+def mesh_capacitor_electrodes(project, mesh) -> list[tuple[CapacitorSpec, np.ndarray]]:
+    """三角形メッシュ (v1 の流体 2D・PIC) の阻止コンデンサの電極と、その Dirichlet 節点 (mesh.electrode のラベル)。
+
+    1 つの境界条件の辺はまとめて 1 つの電極 (ラベル "edge1+edge3")。外周の円弧を弦に分けたときは元の辺の番号の
+    ラベル (Geometry.edge_label。mesh.electrode と同じ) で引く (同じ円弧の弦は 1 つ)。
+    """
+    geo = project.geometry
+    elecs: list[tuple[CapacitorSpec, set[str]]] = []
+    for bc in geo.boundaries:
+        cap = bc.blocking_capacitor
+        if bc.type == "dirichlet" and cap is not None:
+            labels = list(dict.fromkeys(geo.edge_label(e) for e in bc.edges))
+            elecs.append((CapacitorSpec("+".join(labels), cap.capacitance, cap.initial_bias_v), set(labels)))
+    for r in geo.regions:
+        cap = r.blocking_capacitor
+        if r.type == "conductor" and cap is not None:
+            elecs.append((CapacitorSpec(r.id, cap.capacitance, cap.initial_bias_v), {r.id}))
+    out = []
+    for spec, labels in elecs:
+        nodes = np.array(sorted(n for n, label in mesh.electrode.items() if label in labels), dtype=np.int64)
+        if nodes.size == 0:
+            raise ValueError(f"阻止コンデンサの電極 {spec.label} に Dirichlet 節点がありません")
+        out.append((spec, nodes))
+    return out
+
+
 # ---- 未対応のエンジン ------------------------------------------------------------------------
 
 
@@ -270,5 +323,5 @@ def reject_blocking_capacitors(project, engine: str) -> None:
     if labels:
         raise ValueError(
             f"{engine} はまだ阻止コンデンサ (自己バイアス) に対応していません (付けた電極: {', '.join(labels)})。"
-            "コンデンサを外すか、対応している計算 (流体) で実行してください"
+            "コンデンサを外すか、対応している計算 (流体、三角形メッシュの PIC) で実行してください"
         )

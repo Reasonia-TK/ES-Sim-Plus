@@ -237,7 +237,7 @@ def test_batch_run_module_auto_mixed_pic_and_pic1d_in_one_batch(tmp_path: Path):
     # server.py の _pic1d_result (build_pic1d_result) と同じキー構造 (frontend Pic1dResult と一致)
     assert set(result1d) == {
         "history", "profiles", "sheath", "cycle", "sheath_fft", "sheath_ts",
-        "eedf", "wall_iedf", "walls", "fn", "elapsed_s", "timing", "settings",
+        "eedf", "wall_iedf", "walls", "fn", "elapsed_s", "timing", "settings", "circuit",
     }
     assert result1d["settings"]["n_steps"] == 60
     assert result1d["elapsed_s"] > 0
