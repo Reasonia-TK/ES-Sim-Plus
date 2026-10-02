@@ -1,4 +1,4 @@
-"""阻止コンデンサ (自己バイアス、prompts/134) の v2 流体 2D (es_sim.gfluid、一様格子) のテスト。
+"""阻止コンデンサ (自己バイアス、prompts/134) の流体 2D (v2 の一様格子・AMR、v1 の三角形メッシュ) のテスト。
 
 1. 電極の容量: 平行平板 (平面) は ε0·H/L、軸対称の導体は静電場 (/solve) の容量と一致する。LU と GMG で同じ。
 2. 真空の分圧 (伝導電流 0): V_e = bias + V_s·C_b/(C_b + C)。
@@ -8,6 +8,8 @@
 5. C_b → ∞ で直結と一致する。細長い矩形 (上下 symmetry) の自己バイアスが流体 1D と一致する。
 6. 続き・サブステップの合間の停止 (回路の状態の巻き戻し)・結果とフレーム。
 7. GPU 版が CPU 版と丸め誤差で一致する (CUDA が無ければ skip)。
+8. AMR (合成格子) と v1 (三角形メッシュ): 電極の容量が静電場 (AMR・v1 の /solve) と一致し、電荷が保存され、
+   3 つの実装の電極の電位がそろう。AMR の GPU 版も CPU 版と一致する。
 """
 
 from __future__ import annotations
@@ -169,11 +171,12 @@ def test_total_charge_is_conserved_when_every_electrode_has_a_capacitor():
     proj.geometry.regions[0].blocking_capacitor = proj.geometry.boundaries[0].blocking_capacitor.model_copy()
     sim = CartesianFluid2dSimulation(proj, device="cpu")
     assert sim.circuit.labels == ["edge3", "edge1", "pin"]
-    elec = np.bincount(sim._cap_wall_elec, minlength=3)
+    pieces, _loc, _w, elec_of = sim._cap_ends
+    elec = np.bincount(elec_of, minlength=3)
     assert np.all(elec > 0)
     # 左の電極に接した誘電体の縁: 誘電体の小片のうち電極へ流れるもの
     g = sim.graph
-    diel_to_left = g.wall_dielectric[sim._cap_wall] & (sim._cap_wall_elec == 0)
+    diel_to_left = g.wall_dielectric[pieces] & (elec_of == 0)
     assert np.any(diel_to_left)
 
     def total():
@@ -312,5 +315,104 @@ def test_gpu_matches_cpu_with_two_capacitors():
         assert rel(getattr(cpu, k), getattr(gpu, k)) < 1e-8, k
     assert rel(cpu.circuit.q_node, gpu.circuit.q_node) < 1e-8
     assert rel(cpu.circuit.v, gpu.circuit.v) < 1e-8
+    assert len(cpu.circuit.history["v_dc"]) == 1
+    assert rel(cpu.circuit.history["v_dc"], gpu.circuit.history["v_dc"]) < 1e-8
+
+
+# ---- 8. AMR (合成格子) と v1 (三角形メッシュ) ------------------------------------------------------
+
+AMR1 = {"max_level": 1, "buffer_cells": 2}
+# AMR・v1 の比較用の導体 (格子に揃った正方形: 三角形メッシュでも同じ形になる)
+BOX = {"id": "pin", "type": "conductor", "voltage": 1.0, "see_gamma": 0.05,
+       "polygon": [[0.012, 0.004], [0.015, 0.004], [0.015, 0.007], [0.012, 0.007]]}
+
+
+def _variant(kind: str, regions, **kw) -> Project:
+    """kind: "uniform" (v2 の一様格子)・"amr" (v2 の合成格子)・"v1" (構造格子の三角形メッシュ)。"""
+    p = _project(regions, **kw)
+    if kind == "amr":
+        p.mesh.amr = AMR1
+    if kind == "v1":
+        p.mesh.mode = "structured"
+    return Project.model_validate(p.model_dump())
+
+
+def _make(kind: str, p: Project):
+    from es_sim.fluid2d import Fluid2dSimulation
+    from es_sim.gfluid.amr import AmrFluid2dSimulation
+
+    if kind == "v1":
+        return Fluid2dSimulation(p)
+    return (AmrFluid2dSimulation if kind == "amr" else CartesianFluid2dSimulation)(p, device="cpu")
+
+
+@pytest.mark.parametrize("kind", ["amr", "v1"])
+def test_amr_and_v1_capacitance_match_static_solvers(kind):
+    """ψ から求めた電極の容量が、それぞれの静電場の解法 (AMR の合成格子・v1 の FEM) の容量と一致する。"""
+    from es_sim.amr.electrostatic import solve_electrostatic_amr
+    from es_sim.fem import solve as fem_solve
+    from es_sim.meshing import generate_mesh
+
+    p = _variant(kind, [dict(BOX, blocking_capacitor=_cap(1e-10))], init_density_m3=1.0)
+    sim = _make(kind, p)
+    static = solve_electrostatic_amr(p).capacitance if kind == "amr" else fem_solve(p, generate_mesh(p)).capacitance
+    assert sim.circuit.c[0, 0] == pytest.approx(static, rel=1e-9)
+
+
+@pytest.mark.parametrize("kind", ["amr", "v1"])
+def test_amr_and_v1_conserve_charge_with_capacitors(kind):
+    """全ての電極 (左右の辺・導体) にコンデンサ: プラズマの電荷 + 表面電荷 + Σ Q_N が一定 (輸送は直接法)。"""
+    p = _variant(kind, [dict(BOX, blocking_capacitor=_cap(1e-10)), CORNER], left_cap=_cap(1e-10),
+                 right_cap=_cap(3e-10), init_density_m3=1e15, gas_pressure_pa=50.0, linear_solver="direct")
+    sim = _make(kind, p)
+    assert sim.circuit.labels == ["edge3", "edge1", "pin"]
+    assert np.all(np.bincount(sim._cap_ends[3], minlength=3) > 0)
+
+    def total():
+        a = sim.active_idx
+        plasma = QE * float(np.sum((sim.n_i[a] - sim.n_e[a]) * sim.node_vol))
+        return plasma + float(sim.q_surf.sum()) + float(np.sum(sim.circuit.q_node))
+
+    sim.step()
+    t0 = total()
+    for _ in range(150):
+        sim.step()
+    assert abs(total() - t0) < 1e-9 * sim.wall["ion"] * QE
+
+
+def test_uniform_amr_and_v1_agree():
+    """同じ形 (格子に揃った導体・誘電体) で、3 つの実装の電極の電位 (回路が決めたもの) がそろう。"""
+    vs = {}
+    for kind in ("uniform", "amr", "v1"):
+        p = _variant(kind, [dict(BOX, blocking_capacitor=_cap(1e-10)), CORNER], left_cap=_cap(1e-10),
+                     init_density_m3=1e15, gas_pressure_pa=50.0)
+        sim = _make(kind, p)
+        for _ in range(200):
+            sim.step()
+        vs[kind] = sim.circuit.v
+    scale = max(float(np.max(np.abs(v))) for v in vs.values())
+    for kind in ("amr", "v1"):
+        assert np.max(np.abs(vs[kind] - vs["uniform"])) < 0.03 * scale, (kind, vs)
+
+
+@pytest.mark.skipif(not cuda_available(), reason="CUDA が使えません")
+def test_gpu_amr_matches_cpu_amr_with_capacitors():
+    from es_sim.gfluid.amr import AmrFluid2dSimulation, GpuAmrFluid2dSimulation
+
+    p = _variant("amr", [dict(BOX, blocking_capacitor=_cap(2e-11, -5.0)), CORNER], left_cap=_cap(1e-10),
+                 init_density_m3=5e14, n_steps=300, dt=1.0 / (F0 * 200))
+    cpu = AmrFluid2dSimulation(p.model_copy(deep=True), device="cpu")
+    gpu = GpuAmrFluid2dSimulation(p.model_copy(deep=True))
+    cpu.run_batch(store_frames=False)
+    gpu.run_batch(store_frames=False)
+
+    def rel(a, b):
+        a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+        return float(np.max(np.abs(a - b)) / max(float(np.max(np.abs(a))), 1e-300))
+
+    assert rel(cpu.circuit.c, gpu.circuit.c) < 1e-10
+    for k in ("n_e", "n_i", "phi", "q_surf"):
+        assert rel(getattr(cpu, k), getattr(gpu, k)) < 1e-8, k
+    assert rel(cpu.circuit.q_node, gpu.circuit.q_node) < 1e-8
     assert len(cpu.circuit.history["v_dc"]) == 1
     assert rel(cpu.circuit.history["v_dc"], gpu.circuit.history["v_dc"]) < 1e-8

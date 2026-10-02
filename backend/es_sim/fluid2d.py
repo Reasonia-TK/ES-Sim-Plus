@@ -80,10 +80,15 @@ symmetry・see_gamma・conductor/dielectric 領域) は既存のプロジェク�
 
 電極に blocking_capacitor があれば、電源と電極の間に直列のコンデンサを置き、電極の電位を
 circuit.BlockingCircuit で決める (手順は circuit.py)。共通の部分 (伝導電流の積算・途中停止の退避・
-フレームと結果) はこのクラスに置き、ψ・電極の電荷・壁の小片の行き先は対応する派生クラスが
-_init_circuit で用意する (今は v2 の一様格子版 es_sim.gfluid だけ。対応していない実装は
-_blocking_capacitor_ok = False で、付けた電極があれば実行の初めにエラー)。伝導電流は壁損失と同じ
-係数・同じ新しい密度で、小片ごとに e·(Γ_i(1 + γ) − Γ_e) を行き先の電極へ足す (_accumulate_circuit)。
+フレームと結果) はこのクラスに置き、ψ・電極の電荷・壁の端の行き先は _init_circuit で用意する
+(v2 の es_sim.gfluid は一様格子・AMR がそれぞれ差し替える)。伝導電流は壁損失と同じ係数・同じ新しい
+密度で、壁要素の端ごとに e·(Γ_i(1 + γ) − Γ_e) を行き先の電極へ足す (_accumulate_circuit)。
+
+v1 (このクラス): 電極 = 電極の Dirichlet 節点 (mesh.electrode のラベルが電極のもの。境界条件の辺は
+まとめて 1 つ)。電極の電荷は静電場 (fem._electrode_charges) と同じ残差 Σ (Kφ − f) (f は空間電荷を
+含むので、電極の節点の電荷を引いた形になっている)。ψ は K_ff の LU で 1 回解く。壁エッジの端は、
+その節点が電極の Dirichlet 節点なら電極へ (電極の表面のエッジは両端、誘電体の壁エッジでも電極との
+接点の分は電極へ流れる扱い、_set_surface_charge_ends と同じ)。
 
 ## Poisson (電場) の解法
 
@@ -152,7 +157,7 @@ import scipy.sparse.linalg as spla
 
 from . import _numba_kernels
 from .boltz import BoltzCoeffs, boltz_coeffs_at, boltz_coeffs_from_table
-from .circuit import BlockingCircuit, reject_blocking_capacitors
+from .circuit import BlockingCircuit, CapacitorSpec
 from .fem import EPS0, _radial_index, assemble, assemble_transport_operator
 from .fluid1d import FLOOR_N, FLOOR_W, _bernoulli, frost_mobility
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
@@ -216,15 +221,9 @@ class Fluid2dSimulation:
     こちらを使う (fluid1d.Fluid1dSimulation と同じ設計)。
     """
 
-    #: 阻止コンデンサ (自己バイアス、prompts/134) に対応しているか。対応していない実装で付けた電極があれば
-    #: エラー (黙って直結で計算すると別の物理になる)
-    _blocking_capacitor_ok = False
-
     def __init__(self, project: Project, explicit: bool = False):
         if project.fluid2d is None:
             raise ValueError("project.fluid2d が指定されていません")
-        if not self._blocking_capacitor_ok:
-            reject_blocking_capacitors(project, "流体 2D")
         # periodic 境界は未対応: EAFE のエッジ抽出・壁境界の集計は「節点番号が
         # そのまま物理的な位置に対応する」ことを前提に実装しており、周期スレーブの
         # 正準化 (mesh.periodic_map) をエッジ重み・壁エッジ分類の両方に一貫して
@@ -245,11 +244,10 @@ class Fluid2dSimulation:
         # 設定しない派生クラスでも _accumulate_surface_charge が素通りするようにしておく
         self.surf_elem = self.surf_loc = self.surf_node = np.zeros(0, dtype=np.int64)
         self.surf_area = np.zeros(0)
-        # 阻止コンデンサの回路 (prompts/134)。対応する派生クラスが _init_circuit で作る。_cap_wall は電極へ電荷が
-        # 流れ込む壁要素の番号、_cap_wall_elec はその電極 (回路の電極の番号)
+        # 阻止コンデンサの回路 (prompts/134)。_init_circuit で作る。_cap_ends は電極へ電荷が流れ込む壁要素の端
+        # (壁要素の番号, その端の節点 (アクティブ節点の局所番号), 境界質量の重み, 回路の電極の番号) の 4 つの配列
         self.circuit: BlockingCircuit | None = None
-        self._cap_wall = np.zeros(0, dtype=np.int64)
-        self._cap_wall_elec = np.zeros(0, dtype=np.int64)
+        self._cap_ends: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
 
         # 輸送グラフ (節点体積・エッジ重み・壁) と Poisson の組み立ては派生クラス
         # (v2 直交格子版 es_sim.gfluid) が差し替えられるようにメソッドへ分けている
@@ -378,7 +376,61 @@ class Fluid2dSimulation:
         self._init_circuit()
 
     def _init_circuit(self) -> None:
-        """阻止コンデンサの回路を組む (対応する派生クラスが差し替える。モジュール docstring)。"""
+        """阻止コンデンサの回路を組む (v1 の三角形メッシュ。v2 は es_sim.gfluid が差し替える。モジュール docstring)。"""
+        mesh = self.mesh
+        elecs = []   # (CapacitorSpec, ラベルの集合)
+        for bc in self.project.geometry.boundaries:
+            cap = bc.blocking_capacitor
+            if bc.type == "dirichlet" and cap is not None:
+                label = "+".join(f"edge{e}" for e in bc.edges)
+                elecs.append((CapacitorSpec(label, cap.capacitance, cap.initial_bias_v), {f"edge{e}" for e in bc.edges}))
+        for r in self.project.geometry.regions:
+            cap = r.blocking_capacitor
+            if r.type == "conductor" and cap is not None:
+                elecs.append((CapacitorSpec(r.id, cap.capacitance, cap.initial_bias_v), {r.id}))
+        if not elecs:
+            return
+        n = self.n_nodes
+        m = len(elecs)
+        self._cap_nodes = [
+            np.array(sorted(node for node, label in mesh.electrode.items() if label in labels), dtype=np.int64)
+            for _, labels in elecs
+        ]
+        for (spec, _), nodes in zip(elecs, self._cap_nodes):
+            if nodes.size == 0:
+                raise ValueError(f"阻止コンデンサの電極 {spec.label} に Dirichlet 節点がありません")
+        # self.fixed (Dirichlet 値の並び) の中の位置
+        self._cap_rows = [np.searchsorted(self.fixed, nodes) for nodes in self._cap_nodes]
+        self._cap_factor = 2.0 * np.pi if self.rz else 1.0
+        # 電荷 Q_j = factor (a_j · φ − Σ_{電極の節点} f): a_j = 電極の節点の K の行の和
+        k = self._k_poisson
+        self._cap_a = np.zeros((m, n))
+        for j, nodes in enumerate(self._cap_nodes):
+            ind = np.zeros(n)
+            ind[nodes] = 1.0
+            self._cap_a[j] = k.T @ ind
+        # ψ_j: 電極 j の節点が 1 V・ほかの Dirichlet 節点が 0 V・空間電荷 0 の解
+        self._cap_psi = np.zeros((m, n))
+        for j, rows in enumerate(self._cap_rows):
+            vd = np.zeros(self.fixed.size)
+            vd[rows] = 1.0
+            psi = np.zeros(n)
+            psi[self.fixed] = vd
+            psi[self.free] = self.lu.solve(-(self.k_fd @ vd))
+            self._cap_psi[j] = psi
+        c_matrix = self._cap_factor * (self._cap_a @ self._cap_psi.T)
+        period = 1.0 / self._cycle_freq if self._cycle_freq is not None else None
+        self.circuit = BlockingCircuit([spec for spec, _ in elecs], c_matrix, period)
+        # 伝導電流: 壁エッジの端の節点が電極の Dirichlet 節点なら、その端の分を電極へ
+        node_elec = np.full(n, -1, dtype=np.int64)
+        for j, nodes in enumerate(self._cap_nodes):
+            node_elec[nodes] = j
+        parts = []
+        for locs, weights in ((self.wall_n1, self.wall_w1), (self.wall_n2, self.wall_w2)):
+            e = node_elec[self.active_idx[locs]]
+            sel = np.nonzero((e >= 0) & (weights > 0.0))[0]
+            parts.append((sel, locs[sel], weights[sel], e[sel]))
+        self._cap_ends = tuple(np.concatenate(a) for a in zip(*parts))
 
     # ---- 幾何前処理 --------------------------------------------------------------
 
@@ -454,6 +506,7 @@ class Fluid2dSimulation:
         # ---- Poisson (fem.assemble を再利用。free/fixed/splu は pic.py と同型の
         #      再実装 — モジュール docstring の設計判断参照) --------------------------
         k_poisson, self.f_static = assemble(project, mesh)
+        self._k_poisson = k_poisson.tocsr()   # 阻止コンデンサの電極の電荷 (残差 Kφ − f) に使う
         items = sorted(mesh.dirichlet.items())
         self.fixed = np.array([i for i, _ in items], dtype=np.int64)
         self.v_dc = np.array([v for _, v in items], dtype=np.float64)
@@ -656,21 +709,19 @@ class Fluid2dSimulation:
     def _accumulate_circuit(self, dt, t, c_i_wall, v_th_e_node, n_i_new, n_e_new) -> None:
         """阻止コンデンサの電極へ流れ込む伝導電流を回路に積む (モジュール docstring)。
 
-        壁要素ごとに、壁損失と同じ係数・同じ新しい密度で e·(Γ_i(1 + γ) − Γ_e) を求め (両端の節点の分を足す。
-        v2 は片側だけ)、行き先の電極ごとに合計する。反射壁 (検証用) では 0。
+        壁要素の端ごとに、壁損失と同じ係数・同じ新しい密度で e·(Γ_i(1 + γ) − Γ_e) を求め (壁要素の c_i、端の
+        節点の密度・γ・電子の熱速度、端の境界質量の重み)、行き先の電極ごとに合計する。反射壁 (検証用) では 0。
         """
         circuit = self.circuit
         if circuit is None:
             return
         rate = np.zeros(circuit.m)
-        if self._cap_wall.size and not self.debug_reflective_walls:
-            sel = self._cap_wall
-            out = np.zeros(sel.size)
-            for nodes, weights in ((self.wall_n1, self.wall_w1), (self.wall_n2, self.wall_w2)):
-                loc = nodes[sel]
-                out += weights[sel] * (c_i_wall[sel] * n_i_new[loc] * (1.0 + self.gamma_see[loc])
-                                       - 0.25 * v_th_e_node[loc] * n_e_new[loc])
-            rate = np.bincount(self._cap_wall_elec, weights=out, minlength=circuit.m)
+        ends = self._cap_ends
+        if ends is not None and ends[0].size and not self.debug_reflective_walls:
+            elem, loc, weight, elec = ends
+            out = weight * (c_i_wall[elem] * n_i_new[loc] * (1.0 + self.gamma_see[loc])
+                            - 0.25 * v_th_e_node[loc] * n_e_new[loc])
+            rate = np.bincount(elec, weights=out, minlength=circuit.m)
         circuit.conduct(QE * rate, t, dt)
 
     def _find_rf_freq(self) -> float | None:
@@ -788,12 +839,25 @@ class Fluid2dSimulation:
         """
         v = np.zeros(self.n_nodes)
         vd = self._dirichlet_values(t)
+        circuit = self.circuit
+        if circuit is not None:
+            # 阻止コンデンサの電極は前のサブステップの電位で φ* を解く (モジュール docstring)
+            v_src = np.array([vd[rows[0]] for rows in self._cap_rows])
+            v_old = circuit.potentials(v_src)
+            for rows, value in zip(self._cap_rows, v_old):
+                vd[rows] = value
         v[self.fixed] = vd
         charge = QE * (self.n_i - self.n_e) * self.node_vol_full + self.q_surf
         f_dep = charge / (2.0 * np.pi) if self.rz else charge
         f = self.f_static + f_dep
         rhs = f[self.free] - self.k_fd @ vd
         v[self.free] = self.lu.solve(rhs)
+        if circuit is not None:
+            q_star = self._cap_factor * (self._cap_a @ v - np.array([f[nodes].sum() for nodes in self._cap_nodes]))
+            v_new = circuit.solve(q_star, v_old, v_src)
+            v = v + (v_new - v_old) @ self._cap_psi
+            for nodes, value in zip(self._cap_nodes, v_new):
+                v[nodes] = value
         return v
 
     # ---- EAFE 輸送ソルバー (種ごとに共用) ----------------------------------------

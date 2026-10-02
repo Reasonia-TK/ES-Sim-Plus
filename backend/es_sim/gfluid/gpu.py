@@ -64,7 +64,7 @@ _KERNELS = (
     "fl_coeffs", "fl_edges", "fl_nodes", "fl_wall_ci", "fl_wall_diag", "fl_diag", "fl_rhs", "fl_floor",
     "fl_see", "fl_gwe", "fl_joule", "fl_scale2", "fl_energy_off", "fl_wallgen", "fl_poisson_rhs",
     "fl_fixed", "bcg_init", "bcg_p", "bcg_v", "bcg_s", "bcg_t", "bcg_x", "fl_nemax", "fl_stats", "fl_accum",
-    "fl_tri_e", "fl_surf", "fl_sum", "fl_cap_charge", "fl_cap_current", "fl_axpy",
+    "fl_tri_e", "fl_surf", "fl_sum", "fl_cap_charge", "fl_cap_current", "fl_cap_linear", "fl_axpy",
 )
 
 
@@ -353,6 +353,17 @@ class _AmrPoisson:
         self.xv[self.xc.size:] = g.vgrp[: self.K]
         self._spmv(g.phi, self.PC, self.xv)
 
+    def shift(self, dv) -> None:
+        """阻止コンデンサの電極の電位の変化 dv を合成格子の ψ (x_ψ) の重ね合わせで解に足し、φ = PC [x_c; V] を
+        作り直す (グループの電位は呼び出し側が新しい値に入れ直してある、prompts/134)。"""
+        g = self.g
+        for xpsi, d in zip(g.cap_x, dv):
+            if d != 0.0:
+                g.k["fl_axpy"](*g._g1(self.xc.size), (self.xc, xpsi, np.float64(d), np.int64(self.xc.size)))
+        self.xv[: self.xc.size] = self.xc
+        self.xv[self.xc.size:] = g.vgrp[: self.K]
+        self._spmv(g.phi, self.PC, self.xv)
+
     def _spmv(self, y, m, x) -> None:
         """y = m x (m は _Csr、y の長さは m の行数)。"""
         if m.n:
@@ -608,6 +619,30 @@ class _GpuFluid:
         def i64(a):
             return cp.asarray(np.ascontiguousarray(a, dtype=np.int64))
 
+        self.cap_part = cp.zeros(3 * NB)          # 電極ごとの和 (fl_cap_* の slot × NB + j)
+        # 伝導電流: 行き先が電極の壁の小片 (節点順に並べ替えた位置) と、その節点 (アクティブ節点の番号)
+        elem, loc, _w, elec = sim._cap_ends
+        inv = np.empty(len(wo), dtype=np.int64)
+        inv[wo] = np.arange(len(wo))
+        o = np.argsort(elec, kind="stable")
+        self.cap_piece = i64(inv[elem][o])
+        self.cap_ploc = i64(loc[o])
+        self.cap_poff = offsets(elec)
+        if isinstance(self.poisson, _AmrPoisson):
+            # AMR: 電荷は Q = factor (a·φ + b·V + c·q) (gfluid.amr の _init_circuit)。a・c は非零だけ電極ごとに並べる
+            def sparse_rows(mat):
+                idx, val = [], []
+                for row in mat:
+                    nz = np.nonzero(row)[0]
+                    idx.append(nz)
+                    val.append(row[nz])
+                off = np.concatenate([[0], np.cumsum([v.size for v in val])]).astype(np.int64)
+                return i64(np.concatenate(idx)), cp.asarray(np.concatenate(val).astype(np.float64)), cp.asarray(off)
+
+            self.cap_ia, self.cap_a, self.cap_aoff = sparse_rows(sim._cap_a)
+            self.cap_ic, self.cap_c, self.cap_coff = sparse_rows(sim._cap_c)
+            self.cap_x = [cp.asarray(np.ascontiguousarray(x, dtype=np.float64)) for x in sim._cap_x]
+            return
         # 電束 Σ G (V − φ): 結合のうち電極のもの
         rows, cols, data, ej = sim._cap_coo
         o = np.argsort(ej, kind="stable")
@@ -632,19 +667,20 @@ class _GpuFluid:
         self.cap_foff = offsets(fe)
         # ψ (全節点、解のバッファに x += ΔV ψ で足す)
         self.cap_psi = [cp.asarray(np.ascontiguousarray(sim._cap_psi[j], dtype=np.float64)) for j in range(m)]
-        # 伝導電流: 行き先が電極の壁の小片 (節点順に並べ替えた位置) と、その節点 (アクティブ節点の番号)
-        inv = np.empty(len(wo), dtype=np.int64)
-        inv[wo] = np.arange(len(wo))
-        o = np.argsort(sim._cap_wall_elec, kind="stable")
-        self.cap_piece = i64(inv[sim._cap_wall][o])
-        self.cap_ploc = i64(sim._glob_to_loc[g.wall_node[sim._cap_wall]][o])
-        self.cap_poff = offsets(sim._cap_wall_elec)
-        self.cap_part = cp.zeros(3 * NB)          # fl_cap_charge / fl_cap_current の電極ごとの和 (slot × NB + j)
 
     def _cap_charges(self) -> np.ndarray:
         """今の φ (デバイス) での電極の表面の電荷 (CPU 版の _cap_charges と同じ量)。"""
         sim = self.sim
         m = sim.circuit.m
+        if isinstance(self.poisson, _AmrPoisson):
+            # AMR: q_all は右辺を作ったときの ext[:nn] (グループの電位は vgrp の先頭 K 個)
+            ps = self.poisson
+            self.k["fl_cap_linear"]((m,), (NT,), (
+                self.phi, ps.ext, self.cap_ia, self.cap_a, self.cap_aoff, self.cap_ic, self.cap_c, self.cap_coff,
+                self.cap_part))
+            s = self.cap_part.get().reshape(3, NB)[:, :m]
+            v_k = self.vgrp[: ps.K].get()
+            return sim._cap_factor * (s[0] + sim._cap_b @ v_k + s[1])
         self.k["fl_cap_charge"]((m,), (NT,), (
             self.phi, self.vgrp, self.cap_rows, self.cap_cols, self.cap_data, self.cap_flux_off,
             self.ni, self.ne, self.cap_widx, self.cap_wval, self.cap_woff, self.qsurf, self.cap_fnodes,

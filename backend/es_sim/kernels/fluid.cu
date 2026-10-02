@@ -646,6 +646,21 @@ extern "C" __global__ void fl_cap_current(const double* area, const double* ci, 
     fl_store(s, sh, part, 0, 0);
 }
 
+// AMR: linear functional of the electrode charge. slot 0: sum a phi over the a-entries of electrode j;
+// slot 1: sum c q over the c-entries (q = node charges q_all)
+extern "C" __global__ void fl_cap_linear(const double* phi, const double* q, const long long* ia, const double* a,
+                                         const long long* aoff, const long long* ic, const double* c,
+                                         const long long* coff, double* part)
+{
+    __shared__ double sh[FL_NT];
+    int j = blockIdx.x;
+    double s0 = 0.0, s1 = 0.0;
+    for (long long k = aoff[j] + threadIdx.x; k < aoff[j + 1]; k += FL_NT) s0 += a[k] * phi[ia[k]];
+    for (long long k = coff[j] + threadIdx.x; k < coff[j + 1]; k += FL_NT) s1 += c[k] * q[ic[k]];
+    fl_store(s0, sh, part, 0, 0);
+    fl_store(s1, sh, part, 1, 0);
+}
+
 // y += a x
 extern "C" __global__ void fl_axpy(double* y, const double* x, double a, long long n)
 {

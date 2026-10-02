@@ -161,6 +161,7 @@ _GPU_TESTS = [
     "tests/test_v2_gfluid_gpu.py::test_amr_matches_cpu_direct_poisson",
     "tests/test_v2_gfluid_gpu.py::test_amr_singular_poisson_on_gpu",
     "tests/test_circuit_fluid2d.py::test_gpu_matches_cpu_with_two_capacitors",
+    "tests/test_circuit_fluid2d.py::test_gpu_amr_matches_cpu_amr_with_capacitors",
 ]
 
 #: 配布版に入れない CUDA のライブラリ (読まれたら、配布版では GPU の計算が失敗する)

@@ -1239,7 +1239,7 @@ const en: Resources = {
     title: "Blocking capacitor (self-bias)",
     offHint: "A capacitor in series between the source and the electrode lets the electrode's DC potential (self-bias) follow the discharge (fluid only)",
     hint2d:
-      "Total capacitance in axisymmetric mode, per metre of depth in planar mode. Aim for 100× the electrode capacitance or more (shown in the run summary). Literature: 0.1 µF in the real GEC cell, 5 nF in 2D simulations. The settled self-bias is the same; smaller values settle faster. The capacitor blocks the source's DC part (voltage) in steady state. Works with the fluid solvers (1D and v2 fluid 2D); not yet with PIC, AMR fluid 2D or triangle-mesh fluid 2D (they report an error)",
+      "Total capacitance in axisymmetric mode, per metre of depth in planar mode. Aim for 100× the electrode capacitance or more (shown in the run summary). Literature: 0.1 µF in the real GEC cell, 5 nF in 2D simulations. The settled self-bias is the same; smaller values settle faster. The capacitor blocks the source's DC part (voltage) in steady state. Works with the fluid solvers (1D and 2D); not yet with PIC (it reports an error)",
     hint1d:
       "Capacitance per area. Aim for 100× the electrode capacitance ε0/gap or more. The default 6×10⁻⁷ F/m² equals 5 nF on a 101.6 mm electrode (the GEC 2D simulation value). The capacitor blocks the source's DC voltage in steady state. Not yet available in PIC 1D",
     dcBlocked: "With a blocking capacitor this DC part has no effect in steady state (it only sets the initial potential)",

@@ -21,7 +21,8 @@ v1 ``fluid2d.Fluid2dSimulation`` と**同じ物理・同じ時間積分・同じ
   ごとに ψ (その電極 1 V・ほか 0 V・空間電荷 0) を最初に 1 回解き、容量行列もそこから求める。毎サブステップ、
   前の電極の電位で φ* を解き、電極の電荷 (結合の電束 ΣG(V − φ) − 電極の固定節点の電荷) から回路
   (circuit.BlockingCircuit) が新しい電位を決め、φ = φ* + ΣΔV ψ に直す。伝導電流は壁の小片ごとに行き先の
-  電極へ足す (導体の表面・外周の Dirichlet の辺・電極に接した誘電体の縁)。AMR 版はまだ対応していない (SB-d)。
+  電極へ足す (導体の表面・外周の Dirichlet の辺・電極に接した誘電体の縁)。AMR 版は合成格子の電荷の式で
+  _init_circuit・_solve_phi を差し替える (gfluid.amr)。
 - v1 と同じく periodic 境界は未対応。
 """
 
@@ -80,8 +81,6 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
 
     #: Poisson を CPU の疎行列 LU で解いてよいか (GPU 版は常に GPU の GMG を使う)
     _allow_lu = True
-    #: 阻止コンデンサ (自己バイアス、prompts/134) に対応する (一様格子の CPU・GPU。AMR 版は外す)
-    _blocking_capacitor_ok = True
 
     def __init__(self, project: Project, explicit: bool = False, device: Device | str | None = None):
         self._device = device if isinstance(device, Device) else get_device(device)
@@ -287,11 +286,14 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
         c_matrix = np.array([self._cap_charges(self._cap_psi[k], units[k], zero) for k in range(m)]).T
         period = 1.0 / self._cycle_freq if self._cycle_freq is not None else None
         self.circuit = BlockingCircuit([spec for spec, _ in elecs], c_matrix, period)
-        # 伝導電流: 壁の小片ごとの行き先の電極
+        self._init_cap_ends(group_elec)
+
+    def _init_cap_ends(self, group_elec: np.ndarray) -> None:
+        """伝導電流の行き先: 壁の小片 (1 つの端) ごとの電極 (_wall_sink_groups のグループの電極)。"""
         sink = self._wall_sink_groups()
         elec = np.where(sink >= 0, group_elec[np.maximum(sink, 0)], -1)
-        self._cap_wall = np.nonzero(elec >= 0)[0]
-        self._cap_wall_elec = elec[self._cap_wall]
+        pieces = np.nonzero(elec >= 0)[0]
+        self._cap_ends = (pieces, self.wall_n1[pieces], self.wall_w1[pieces], elec[pieces])
 
     def _cap_set(self, v: np.ndarray, values) -> np.ndarray:
         """グループの電位 v のうち、阻止コンデンサの電極のグループを values (電極ごと) にしたもの。"""
@@ -342,10 +344,14 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
             nx_, ny_ = g.wall_normal[side, 0], g.wall_normal[side, 1]
             names = np.where(ny_ < -0.5, "bottom", np.where(ny_ > 0.5, "top", np.where(nx_ < -0.5, "left", "right")))
             sink[side] = [self.model.side_group.get(str(s), -1) for s in names]
-        fixed = self._op.fixed_group.ravel()
+        fixed = self._node_fixed_group()
         diel = g.wall_dielectric & (fixed[g.wall_node] >= 0)
         sink[diel] = fixed[g.wall_node[diel]]
         return sink
+
+    def _node_fixed_group(self) -> np.ndarray:
+        """節点ごとの Poisson の固定のグループ (−1 は未知。AMR 版は合成格子の節点で差し替える)。"""
+        return self._op.fixed_group.ravel()
 
     def _wall_en(self, phi: np.ndarray) -> np.ndarray:
         """壁小片ごとの E·n = (φ(A) − φ(W)) / L (gfluid.geometry のモジュール docstring)。"""
