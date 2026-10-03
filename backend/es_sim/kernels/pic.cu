@@ -10,7 +10,14 @@
 //  * Every per-step quantity that changes with time (t, step, V(t), nu_max,
 //    accumulation flags, phase bin) is read from device memory ("prm").
 //  * New particles (ionization products, secondary electrons) are appended
-//    with atomicAdd on cnt[]; overflow of the capacity is flagged.
+//    with atomicAdd on cnt[]. Capacity (es_sim/gpic/simulation.py): the arrays
+//    hold C_LIM slots; an append at or beyond the soft capacity C_SOFT (= C_LIM
+//    minus a reserve for one step of appends) requests a halt: from the next
+//    step on, begin_step sets P_HALT, every kernel that changes the state does
+//    nothing and the step does not advance, until the host grows the arrays at
+//    its next check and runs those steps again (no particle is lost). Only an
+//    append beyond C_LIM is lost (C_OVERFLOW, fatal). The stored count may then
+//    exceed C_LIM, so kernels clamp it (es_count / es_snap).
 //
 // Grid: nodes (ny+1) x (nx+1), row-major, x fastest. Cell (i,j) spans
 // [x0+i*dx, x0+(i+1)*dx] x [y0+j*dy, ...]. Node fields are gathered with
@@ -35,6 +42,7 @@
 #define P_SUB        13  // ion sub-cycle factor
 #define P_T0         14  // time origin (t = t0 + step*dt)
 #define P_STEP0      15  // step index origin
+#define P_HALT       16  // 1 while the steps are halted for a capacity check (set by begin_step)
 
 // ---- layout of the integer counters "cnt" (unsigned long long[]) -------------
 #define C_NE       0   // live electrons (incl. not yet compacted dead ones)
@@ -46,16 +54,41 @@
 #define C_COLL_E   6
 #define C_ION_EV   7
 #define C_SEE_EV   8
-#define C_OVERFLOW 9
+#define C_OVERFLOW 9   // appends lost beyond C_LIM
 #define C_VMAX_E   10  // max v^2 bits (atomicMax on non-negative double bits)
 #define C_VMAX_I   11
 #define C_PHIMIN   12  // order-preserving bits of min(phi)
 #define C_PHIMAX   13
+// 14, 15: C_WALL_E / C_WALL_I at the last compaction
+#define C_HALT_REQ 16  // an append reached the soft capacity: halt from the next step on
+#define C_HALT     17  // 1 while halted (set by begin_step, cleared by the host)
+#define C_HALT_STEP 18 // index of the first halted step (= number of completed steps)
+#define C_LIM_E    19  // array capacity (slots) of the electrons / ions
+#define C_LIM_I    20
+#define C_SOFT_E   21  // soft capacity: an append at or beyond it requests the halt
+#define C_SOFT_I   22
 
 __device__ __forceinline__ unsigned long long es_ord(double v)
 {
     const unsigned long long b = (unsigned long long)__double_as_longlong(v);
     return (b & 0x8000000000000000ull) ? ~b : (b | 0x8000000000000000ull);
+}
+
+// Number of stored particles of a species, clamped to the array capacity (an append beyond the
+// capacity still increments the counter, see the header).
+__device__ __forceinline__ long long es_count(const unsigned long long* cnt, int species)
+{
+    const unsigned long long n = cnt[species == 0 ? C_NE : C_NI];
+    const unsigned long long lim = cnt[species == 0 ? C_LIM_E : C_LIM_I];
+    return (long long)(n < lim ? n : lim);
+}
+
+// Same for the count snapshot taken by begin_step (particles present before the appends).
+__device__ __forceinline__ long long es_snap(const unsigned long long* cnt, int species)
+{
+    const unsigned long long n = cnt[species == 0 ? C_SNAP_E : C_SNAP_I];
+    const unsigned long long lim = cnt[species == 0 ? C_LIM_E : C_LIM_I];
+    return (long long)(n < lim ? n : lim);
 }
 
 // ---------------------------------------------------------------------------
@@ -124,15 +157,25 @@ __device__ __forceinline__ void es_locate(double px, double py, int* nd, double*
 
 // ---------------------------------------------------------------------------
 // Per-step bookkeeping: time, flags, phase bin, zeroed diagnostics.
+// Capacity halt (header): a halt requested during the previous step becomes active here.
+// While halted, P_ACCUM and P_ION_STEP are 0 (the accumulation and ion kernels skip), the
+// electron kernels check P_HALT and end_step does not advance the step, so the halted steps
+// change nothing that the next step reads (the field solve still runs on the frozen particles).
 // ---------------------------------------------------------------------------
 extern "C" __global__ void begin_step(double* __restrict__ prm, unsigned long long* __restrict__ cnt,
                                       double* __restrict__ dsl, const int n_dsl)
 {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     const double step = prm[P_STEP];
+    if (cnt[C_HALT_REQ] != 0ull && cnt[C_HALT] == 0ull) {
+        cnt[C_HALT] = 1ull;
+        cnt[C_HALT_STEP] = (unsigned long long)step;
+    }
+    const bool halt = cnt[C_HALT] != 0ull;
+    prm[P_HALT] = halt ? 1.0 : 0.0;
     const double t = prm[P_T0] + (step - prm[P_STEP0]) * prm[P_DT];
     prm[P_T] = t;
-    prm[P_ACCUM] = (step + 1.0 >= prm[P_ACC_START]) ? 1.0 : 0.0;
+    prm[P_ACCUM] = (!halt && step + 1.0 >= prm[P_ACC_START]) ? 1.0 : 0.0;
     double bin = -1.0;
     if (prm[P_PERIOD] > 0.0) {
         double ph = t / prm[P_PERIOD];
@@ -146,7 +189,7 @@ extern "C" __global__ void begin_step(double* __restrict__ prm, unsigned long lo
     prm[P_BIN] = bin;
     const long long sub = (long long)prm[P_SUB];
     const long long si = (long long)step;
-    prm[P_ION_STEP] = (sub <= 1 || (si % sub) == 0) ? 1.0 : 0.0;
+    prm[P_ION_STEP] = (!halt && (sub <= 1 || (si % sub) == 0)) ? 1.0 : 0.0;
     cnt[C_SNAP_E] = cnt[C_NE];
     cnt[C_SNAP_I] = cnt[C_NI];
     cnt[C_VMAX_E] = 0ull;
@@ -162,7 +205,7 @@ extern "C" __global__ void begin_step(double* __restrict__ prm, unsigned long lo
 
 extern "C" __global__ void end_step(double* __restrict__ prm)
 {
-    if (blockIdx.x == 0 && threadIdx.x == 0) prm[P_STEP] += 1.0;
+    if (blockIdx.x == 0 && threadIdx.x == 0 && prm[P_HALT] == 0.0) prm[P_STEP] += 1.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -382,8 +425,8 @@ extern "C" __global__ void push(double* __restrict__ x, double* __restrict__ y,
                                 const double* __restrict__ prm, double* __restrict__ ke_out ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
-    const bool active = (species == 0) || (prm[P_ION_STEP] != 0.0);
+    const long long n = es_count(cnt, species);
+    const bool active = prm[P_HALT] == 0.0 && ((species == 0) || (prm[P_ION_STEP] != 0.0));
     double ke = 0.0;
     if (active && p < n && w[p] != 0.0) {
         double wx, wy;
@@ -517,7 +560,7 @@ extern "C" __global__ void boundary(
     double* __restrict__ qsurf, const double qw_scale, const double two_pi_inv,
     const int see_on, const double see_speed, const double see_delta,
     double* __restrict__ ex_, double* __restrict__ ey_, double* __restrict__ evx, double* __restrict__ evy,
-    double* __restrict__ evz, double* __restrict__ ew, const long long cap_e,
+    double* __restrict__ evz, double* __restrict__ ew,
     const int n_coll, const double* __restrict__ coll, const double mass,
     double* __restrict__ rec_e, double* __restrict__ rec_a, double* __restrict__ rec_w,
     unsigned long long* __restrict__ rec_n, double* __restrict__ coll_w, const long long rec_cap,
@@ -525,8 +568,9 @@ extern "C" __global__ void boundary(
     const int* __restrict__ side_elec, const int* __restrict__ cond_elec, double* __restrict__ cap_dq ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
+    const long long n = es_count(cnt, species);
     if (p >= n) return;
+    if (prm[P_HALT] != 0.0) return;
     if (species == 1 && prm[P_ION_STEP] == 0.0) return;
     const double wp = w[p];
     if (wp == 0.0) return;
@@ -712,7 +756,8 @@ extern "C" __global__ void boundary(
         rng.init((unsigned long long)p, (unsigned long long)prm[P_STEP], 4u, seed);
         if (rng.uniform() < gam) {
             const unsigned long long k = atomicAdd(cnt + C_NE, 1ull);
-            if ((long long)k < cap_e) {
+            if (k >= cnt[C_SOFT_E]) cnt[C_HALT_REQ] = 1ull;
+            if (k < cnt[C_LIM_E]) {
                 ex_[k] = hx + see_delta * nxn;
                 ey_[k] = hy + see_delta * nyn;
                 evx[k] = see_speed * nxn;
@@ -741,8 +786,9 @@ extern "C" __global__ void boundary(
 // CIC deposit of particles (dead ones have w = 0 and contribute nothing).
 // mode 0: value = w; mode 1: value = w * 0.5*m*v^2 (kinetic energy).
 // out2 (optional, stride = N nodes) receives the same deposit at bin*N when
-// bin >= 0 (phase-resolved accumulation). gate: 0 = always, 1 = only when the
-// step is accumulating, 2 = only on ion steps.
+// bin >= 0 (phase-resolved accumulation). gate: 0 = always (the charge of the
+// field solve), 1 = only when the step is accumulating, 2 = unless the steps
+// are halted (refinement tags, deposited outside the step).
 // ---------------------------------------------------------------------------
 extern "C" __global__ void deposit(const double* __restrict__ x, const double* __restrict__ y,
                                    const double* __restrict__ vx, const double* __restrict__ vy,
@@ -757,7 +803,8 @@ extern "C" __global__ void deposit(const double* __restrict__ x, const double* _
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (gate == 1 && prm[P_ACCUM] == 0.0) return;
-    const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
+    if (gate == 2 && prm[P_HALT] != 0.0) return;
+    const long long n = es_count(cnt, species);
     if (p >= n) return;
     const double wp = w[p];
     if (wp == 0.0) return;
@@ -795,7 +842,7 @@ extern "C" __global__ void deposit_cell(const double* __restrict__ x, const doub
                                         const int nx, const int ny ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
+    const long long n = es_count(cnt, species);
     if (p >= n || w[p] == 0.0) return;
     double wx, wy;
 #ifdef ES_AMR
@@ -821,7 +868,7 @@ extern "C" __global__ void vmax2(const double* __restrict__ vx, const double* __
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (species == 1 && prm[P_ION_STEP] == 0.0) return;
-    const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
+    const long long n = es_count(cnt, species);
     double v = 0.0;
     if (p < n && w[p] != 0.0) v = vx[p] * vx[p] + vy[p] * vy[p] + vz[p] * vz[p];
     // warp max then one atomic per warp
@@ -868,9 +915,9 @@ extern "C" __global__ void numax_lookup(double* __restrict__ prm, const unsigned
 // ---------------------------------------------------------------------------
 extern "C" __global__ void mcc_electron(
     double* __restrict__ ex_, double* __restrict__ ey_, double* __restrict__ vx, double* __restrict__ vy,
-    double* __restrict__ vz, double* __restrict__ ew, const long long cap_e,
+    double* __restrict__ vz, double* __restrict__ ew,
     double* __restrict__ ix, double* __restrict__ iy, double* __restrict__ ivx, double* __restrict__ ivy,
-    double* __restrict__ ivz, double* __restrict__ iw, const long long cap_i,
+    double* __restrict__ ivz, double* __restrict__ iw,
     unsigned long long* __restrict__ cnt, const int n_proc, const int* __restrict__ kind,
     const double* __restrict__ thr, const double* __restrict__ mratio, const double* __restrict__ tab_e,
     const double* __restrict__ tab_s, const int* __restrict__ tab_len, const int tab_w,
@@ -881,8 +928,8 @@ extern "C" __global__ void mcc_electron(
     const int nx, const int ny, const int pxp, const int pyp ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long long n = (long long)cnt[C_SNAP_E];
-    if (p >= n) return;
+    const long long n = es_snap(cnt, 0);
+    if (p >= n || prm[P_HALT] != 0.0) return;
     const double wp = ew[p];
     if (wp == 0.0) return;
     const double numax = prm[P_NUMAX_E];
@@ -940,7 +987,9 @@ extern "C" __global__ void mcc_electron(
     const double xp = ex_[p], yp = ey_[p];
     const unsigned long long ke = atomicAdd(cnt + C_NE, 1ull);
     const unsigned long long ki = atomicAdd(cnt + C_NI, 1ull);
-    if ((long long)ke < cap_e && (long long)ki < cap_i) {
+    if (ke >= cnt[C_SOFT_E] || ki >= cnt[C_SOFT_I]) cnt[C_HALT_REQ] = 1ull;
+    const unsigned long long cap_e = cnt[C_LIM_E], cap_i = cnt[C_LIM_I];
+    if (ke < cap_e && ki < cap_i) {
         ex_[ke] = xp; ey_[ke] = yp; vx[ke] = s2 * dx; vy[ke] = s2 * dy; vz[ke] = s2 * dz; ew[ke] = wp;
         ix[ki] = xp; iy[ki] = yp; ivx[ki] = vth_gas * g0; ivy[ki] = vth_gas * g1; ivz[ki] = vth_gas * g2; iw[ki] = wp;
         atomicAdd(cnt + C_ION_EV, 1ull);
@@ -952,9 +1001,9 @@ extern "C" __global__ void mcc_electron(
                              ES_GRID_ARGS);
         }
     } else {
-        // capacity exceeded: keep counts consistent by marking the slots as dead
-        if ((long long)ke < cap_e) ew[ke] = 0.0;
-        if ((long long)ki < cap_i) iw[ki] = 0.0;
+        // capacity exceeded (fatal, see the header): mark the slot that exists as dead
+        if (ke < cap_e) ew[ke] = 0.0;
+        if (ki < cap_i) iw[ki] = 0.0;
         atomicAdd(cnt + C_OVERFLOW, 1ull);
     }
 }
@@ -973,8 +1022,8 @@ extern "C" __global__ void mcc_ion(double* __restrict__ vx, double* __restrict__
                                    const double* __restrict__ prm, const unsigned long long seed)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (prm[P_ION_STEP] == 0.0) return;
-    const long long n = (long long)cnt[C_SNAP_I];
+    if (prm[P_ION_STEP] == 0.0 || prm[P_HALT] != 0.0) return;
+    const long long n = es_snap(cnt, 1);
     if (p >= n || w[p] == 0.0) return;
     const double numax = prm[P_NUMAX_I];
     if (numax <= 0.0) return;
@@ -1038,8 +1087,8 @@ extern "C" __global__ void history_row(double* __restrict__ hist, const int n_ro
     r[2] = dsl[1];
     r[3] = fe_scale * dsl[2];
     // live counts = stored - absorbed since the last compaction (cnt[14], cnt[15])
-    r[4] = (double)(cnt[C_NE] - (cnt[C_WALL_E] - cnt[14]));
-    r[5] = (double)(cnt[C_NI] - (cnt[C_WALL_I] - cnt[15]));
+    r[4] = (double)((unsigned long long)es_count(cnt, 0) - (cnt[C_WALL_E] - cnt[14]));
+    r[5] = (double)((unsigned long long)es_count(cnt, 1) - (cnt[C_WALL_I] - cnt[15]));
     r[6] = (double)cnt[C_WALL_E];
     r[7] = (double)cnt[C_WALL_I];
     r[8] = es_unord(cnt[C_PHIMIN]);
@@ -1171,7 +1220,7 @@ extern "C" __global__ void eedf_hist(const double* __restrict__ x, const double*
     for (int k = threadIdx.x; k < n_reg * stride; k += blockDim.x) sh[k] = 0.0;
     __syncthreads();
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long long n = (long long)cnt[C_NE];
+    const long long n = es_count(cnt, 0);
     if (p < n && w[p] != 0.0) {
         const double wp = w[p];
         const double e = 0.5 * 9.1093837015e-31 * (vx[p] * vx[p] + vy[p] * vy[p] + vz[p] * vz[p]) / 1.602176634e-19;
@@ -1296,7 +1345,7 @@ extern "C" __global__ void kick_half(const double* __restrict__ x, const double*
                                      const double* __restrict__ ey, const double qm_half_dt ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
+    const long long n = es_count(cnt, species);
     if (p >= n || w[p] == 0.0) return;
     int nd[4];
     long long cell;
@@ -1312,7 +1361,10 @@ extern "C" __global__ void kick_half(const double* __restrict__ x, const double*
 // ---------------------------------------------------------------------------
 // Order-preserving compaction of live particles (w > 0), in three kernels:
 // block-local exclusive scan of the live flags, a single-block scan of the
-// block totals, and the scatter into the destination arrays.
+// block totals, and the scatter into the destination arrays. While the steps
+// are halted (C_HALT) the compaction keeps every stored particle (an identity
+// copy): compacting at the halted step would change the particle order
+// relative to the run that does not halt.
 // ---------------------------------------------------------------------------
 #define ES_SCAN_BLOCK 1024
 
@@ -1324,8 +1376,9 @@ extern "C" __global__ void compact_scan(const double* __restrict__ w, const unsi
     __shared__ int sh[ES_SCAN_BLOCK];
     const long long base = (long long)blockIdx.x * ES_SCAN_BLOCK;
     const long long p = base + threadIdx.x;
-    const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
-    const int f = (p < n && p < cap && w[p] != 0.0) ? 1 : 0;
+    const long long n = es_count(cnt, species);
+    const bool keep_all = cnt[C_HALT] != 0ull;
+    const int f = (p < n && p < cap && (keep_all || w[p] != 0.0)) ? 1 : 0;
     flag[p] = (unsigned char)f;
     sh[threadIdx.x] = f;
     __syncthreads();
@@ -1350,6 +1403,7 @@ extern "C" __global__ void compact_scan_blocks(long long* __restrict__ block_sum
         block_sum[b] = acc;
         acc += v;
     }
+    if (cnt[C_HALT] != 0ull) return;  // identity copy: count and wall baseline unchanged
     cnt[species == 0 ? C_NE : C_NI] = (unsigned long long)acc;
     // wall counter at this compaction (live count = stored - absorbed since then)
     cnt[species == 0 ? 14 : 15] = cnt[species == 0 ? C_WALL_E : C_WALL_I];

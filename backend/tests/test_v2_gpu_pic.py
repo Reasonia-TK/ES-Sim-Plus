@@ -9,6 +9,8 @@ v1 の test_pic.py / test_mcc.py / test_pic_rz.py と同じ観点を v2 でも�
 5. 軸対称: quiet start で φ ≈ 0、リング粒子の密度規格化 (2π)、遠心運動 r(t) = √(r0² + (vθ t)²)
 6. SEE: γ = 1 の電極では吸収イオン数 = 放出電子数
 7. v1 PIC との比較: 同条件の CCP ストリップで時間平均密度が一致 (統計誤差の範囲)
+8. 粒子の容量: 容量をぎりぎりにしても止まってはやり直して粒子を失わない (容量が足りる計算と 1 ステップずつ
+   一致)、予備を越えたらエラー、配列の拡張はステップのストリームの順序に乗る
 
 GPU (CUDA) が無い環境では skip する (v2 PIC は現状 GPU 専用)。
 """
@@ -321,3 +323,184 @@ def test_matches_v1_pic_on_ccp_strip():
     i1 = x_profile(v1.mesh.nodes, v1.fields["n_i"])
     i2 = x_profile(v2.mesh.nodes, v2.fields["n_i"])
     assert np.mean(i2[center]) == pytest.approx(np.mean(i1[center]), rel=0.15)
+
+
+# ---- 8. 粒子の容量 (容量の停止とやり直し、拡張とストリームの順序) ------------------------------------
+
+
+def _tight_capacity(monkeypatch, room: int = 1000, reserve: int = 4096) -> None:
+    """容量をぎりぎりにする: 初めの余裕は 256 個、検査のたびに容量を「粒子数 + room」までしか広げない
+    (先回りの拡張なし)。予備 (1 ステップの追加の分) は reserve 個。"""
+    from es_sim.gpic import simulation as gsim
+
+    for name, value in (("CAP_INIT", 1.0), ("CAP_HEADROOM_MIN", 256), ("CAP_GROW", 1.0), ("CAP_GROW_MIN", room),
+                        ("CAP_AHEAD", 0), ("CAP_RESERVE_MIN", reserve), ("CAP_RESERVE_FRAC", 0.0)):
+        monkeypatch.setattr(gsim, name, value)
+
+
+def _see_stream(n_steps: int = 120):
+    """γ = 1 の電極 (左) へ全イオン (2 万個) を流す箱: 毎ステップ約 200 個の二次電子を追加する。
+
+    場はほぼ 0、電子は MCC なし、二次電子の乱数はイオンの番号で決まるので、ステップごとの粒子数は
+    追加の順序 (atomicAdd) によらず決まる (容量の違う計算どうしを 1 ステップずつ比べられる)。
+    """
+    p = Project.model_validate(
+        {
+            "geometry": {
+                "domain": {"polygon": [[0, 0], [0.01, 0], [0.01, 0.01], [0, 0.01]]},
+                "boundaries": [{"edges": [3], "type": "dirichlet", "voltage": 0.0, "see_gamma": 1.0}],
+            },
+            "mesh": {"size": 1e-3, "mode": "cartesian"},
+            "pic": {
+                "initial_plasma": {"density": 1e3, "te_ev": 0.0, "ti_ev": 0.0, "ion_mass_amu": 40.0, "seed": 4},
+                "n_macro": 20000,
+                "dt": 1e-9,
+                "n_steps": n_steps,
+                "frame_every": 10000,
+                "reflect_edges": [0, 1, 2],
+            },
+        }
+    )
+    sim = _sim(p)
+    ions = sim.get_particles("ion")
+    sim.set_particles("ion", vx=np.full(len(ions["x"]), -1e5))
+    return sim
+
+
+_COUNT_KEYS = ("n_e", "n_i", "wall_e", "wall_i", "see_events")
+
+
+def test_capacity_halt_reruns_steps_exactly(monkeypatch):
+    """容量がぎりぎり: 軟らかい容量を越える追加があると次のステップから止まり、ホストが次の検査で配列を広げて
+    同じステップからやり直す。粒子数の推移は容量が足りている計算と 1 ステップずつ一致し、粒子は失われない
+    (旧実装は 32 ステップごとの検査の間に容量を越えると「粒子配列の容量を超えました」で止まった)。"""
+    ref = _see_stream()
+    h_ref, _ = ref.run_batch(store_frames=False)
+    assert not ref.capacity_log
+    _tight_capacity(monkeypatch)
+    sim = _see_stream()
+    h, _ = sim.run_batch(store_frames=False)
+    assert len([e for e in sim.capacity_log if e["halted_steps"] > 0]) >= 3
+    assert sim.step_count == 120 and len(h["t"]) == 120
+    np.testing.assert_allclose(np.diff(h["t"]), sim.dt, rtol=1e-9)
+    for key in _COUNT_KEYS:
+        assert h[key] == h_ref[key], key
+    assert h["see_events"][-1] == h["wall_i"][-1] == 20000
+
+
+def test_capacity_step_api_grows_without_halting(monkeypatch):
+    """同期 API の step() は毎ステップ検査するので、容量を越えたらその場で広げ、ステップは止まらない。"""
+    ref = _see_stream()
+    h_ref, _ = ref.run_batch(store_frames=False)
+    _tight_capacity(monkeypatch)
+    sim = _see_stream()
+    for _ in range(120):
+        sim.step()
+    sim._flush_history()
+    assert sim.capacity_log and all(e["halted_steps"] == 0 for e in sim.capacity_log)
+    for key in _COUNT_KEYS:
+        assert sim.history[key] == h_ref[key], key
+
+
+def test_capacity_overflow_beyond_reserve_raises(monkeypatch):
+    """1 ステップの追加が予備を越えたときだけ粒子が失われ、次の検査でエラーにする。"""
+    _tight_capacity(monkeypatch, reserve=64)
+    sim = _see_stream()
+    with pytest.raises(RuntimeError, match="予備の容量"):
+        sim.run_batch(store_frames=False)
+
+
+_SPIN = r"""
+extern "C" __global__ void spin(const long long cycles)
+{
+    const long long t0 = clock64();
+    while (clock64() - t0 < cycles) { }
+}
+"""
+
+
+def test_grow_is_ordered_with_the_step_stream():
+    """配列の拡張 (確保・コピー) はステップのストリームに積む: 既定のストリームが詰まっていても、拡張の直後に
+    ステップのストリームで読む粒子は元のまま。旧実装は既定のストリームでコピーしており、非ブロッキングの
+    ステップのストリームとは順序がなく、Windows (WDDM) では稀にコピー前の配列をステップが読んだ (イオンの
+    電荷が抜けた数ステップで電子が加速され、電離の暴走で容量を越えた)。"""
+    sim = _sim(_oscillation_project(10, n_macro=20000))
+    cp = sim.cp
+    el = sim.species["electron"]
+    n = int(sim._cnt[0].get())
+    # 読み出し先と既定のストリームのメモリプールの空きは先に確保しておく (塞いだ後に cudaMalloc が走ると
+    # デバイス全体が同期し、旧実装でも順序が保たれてしまう)
+    with sim._stream:
+        before = {f: el.arrays[f][:n].get() for f in ("x", "vx", "w")}
+        after = {f: cp.empty(n) for f in before}
+    spare = cp.empty(64 << 20, dtype=np.uint8)
+    del spare
+    cp.cuda.Device().synchronize()
+    cp.RawKernel(_SPIN, "spin")((1,), (1,), (np.int64(200_000_000),))   # 既定のストリームを ~0.1 s 塞ぐ
+    sim._grow(el, 4 * el.cap)
+    with sim._stream:
+        for f in before:
+            cp.copyto(after[f], el.arrays[f][:n])
+    cp.cuda.Device().synchronize()
+    for f, v in before.items():
+        assert np.array_equal(after[f].get(), v), f
+
+
+@pytest.mark.parametrize("grid", ["uniform", "amr"])
+def test_capacity_halts_keep_ionizing_ccp_consistent(monkeypatch, grid):
+    """電離が続く CCP ストリップで容量をぎりぎりにしても、止まってはやり直しを繰り返して最後まで進む: 粒子数の
+    恒等式 (初期 + 生成 − 壁への吸収) が厳密に成り立ち、時間平均・位相分解・EEDF の回数は平均区間のステップ数の
+    まま (止まったステップは数えない)。AMR は動的再格子化のタグの積算も通る。"""
+    from es_sim.pic1d_presets import edupic_ar_processes
+
+    e_procs, i_procs = edupic_ar_processes()
+    L, H = 0.025, 0.002
+    n_steps, avg, n0 = 1600, 400, 20000
+
+    def project() -> Project:
+        d = {
+            "geometry": {
+                "domain": {"polygon": [[0, 0], [L, 0], [L, H], [0, H]]},
+                "boundaries": [
+                    {"edges": [3], "type": "dirichlet", "voltage": 0.0,
+                     "voltage_rf": {"amplitude": 150.0, "freq_hz": 13.56e6, "phase_deg": 0.0}},
+                    {"edges": [1], "type": "dirichlet", "voltage": 0.0},
+                ],
+            },
+            "mesh": {"size": L / 100, "mode": "cartesian"},
+            "pic": {
+                "initial_plasma": {"density": 5e14, "te_ev": 2.0, "ti_ev": 0.026, "ion_mass_amu": 39.948, "seed": 1},
+                "n_macro": n0,
+                "dt": 1.0 / (13.56e6 * 400),
+                "n_steps": n_steps,
+                "avg_steps": avg,
+                "frame_every": 100000,
+                "phase_bins": 8,
+                "reflect_edges": [0, 2],
+                "eedf_regions": [{"label": "c", "p1": [0.010, 0.0], "p2": [0.015, H], "bins": 50}],
+                "mcc": {"gas": {"name": "Ar", "pressure_pa": 10.0, "temperature_k": 300.0},
+                        "electron_processes": [q.model_dump() for q in e_procs],
+                        "ion_processes": [q.model_dump() for q in i_procs], "seed": 3},
+            },
+        }
+        if grid == "amr":
+            d["mesh"]["amr"] = {"max_level": 1, "refine_boundaries": False, "blocking_factor": 4,
+                                "regions": [{"p1": [0.010, 0.0], "p2": [0.015, H], "level": 1}],
+                                "pic_regrid_every": 100, "pic_h_over_debye": 1.5}
+        return Project.model_validate(d)
+
+    ref = _sim(project())
+    h_ref, _ = ref.run_batch(store_frames=False)
+    _tight_capacity(monkeypatch, room=64)
+    sim = _sim(project())
+    assert (sim.amr is not None) == (grid == "amr")
+    h, _ = sim.run_batch(store_frames=False)
+    assert any(e["halted_steps"] > 0 for e in sim.capacity_log)
+    assert sim.step_count == n_steps and len(h["t"]) == n_steps
+    np.testing.assert_allclose(np.diff(h["t"]), sim.dt, rtol=1e-9)
+    assert h["n_e"][-1] == n0 + h["ion_events"][-1] + h["see_events"][-1] - h["wall_e"][-1]
+    assert h["n_i"][-1] == n0 + h["ion_events"][-1] - h["wall_i"][-1]
+    assert sim.fields["avg_steps"] == avg
+    assert int(sim._cyc_count.get().sum()) == avg
+    assert sim.eedf_results[0]["n_samples"] == avg
+    assert h["n_e"][-1] == pytest.approx(h_ref["n_e"][-1], rel=0.1)

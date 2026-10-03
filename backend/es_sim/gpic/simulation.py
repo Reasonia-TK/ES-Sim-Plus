@@ -14,6 +14,12 @@ server の /ws/pic からそのまま駆動できる (mesh.mode="cartesian" の�
   CPU 版より遅くなるため)。
 - 粒子は容量固定の SoA 配列。吸収粒子は w = 0 にして次の圧縮 (COMPACT_EVERY ステップ
   ごと、順序保存) で詰める。電離・二次電子の生成粒子は atomicAdd で末尾に追加する。
+- 容量 (下の「粒子の容量」): 配列は軟らかい容量 + 予備。軟らかい容量を越える追加があると次のステップから
+  デバイスがステップを止め、ホストが次の検査で配列を広げて止まったステップをやり直す (粒子を失わず、
+  1 ステップごとの同期も要らない)。検査のたびに直近の追加の速さから先回りして広げる。
+- デバイスの配列への書き込み (確保・拡張・粒子の書き換え・パラメータ) は全てステップと同じストリームに
+  積む (既定のストリームに積むと非ブロッキングのストリームのグラフと順序が保証されず、拡張した配列を
+  コピーし終わる前にステップが読むことがあった)。
 - 吸収粒子の後処理 (衝突点・法線の厳密計算、誘電体の表面電荷、SEE、IEDF コレクタ) も
   GPU 上で行う。
 - 場: 未知数 ≤ 4096 の小さな問題は密な逆行列で厳密に、それ以上は GMG-PCG を固定反復
@@ -60,6 +66,23 @@ Q_e0 = Σ W·q (Green の相反定理。一様格子は W = −2π ψ̃、AMR �
 周期の集計 (V_dc・|V1|・I_dc) はホストの circuit.BlockingCircuit が履歴を読むとき (_flush_history) に行う。
 AMR の再格子化では W と容量行列を作り直す (Q_N はそのまま)。
 
+## 粒子の容量
+
+種ごとに軟らかい容量 cap と配列の長さ alloc = cap + 予備 (CAP_RESERVE_MIN 個か cap の CAP_RESERVE_FRAC 倍の
+大きい方) を持ち、どちらもデバイスのカウンタ (C_SOFT_*・C_LIM_*) に置く。
+
+1. 追加 (電離・二次電子) が cap 以上の位置に入ったら停止を要求する (C_HALT_REQ)。そのステップは最後まで進め、
+   次のステップの begin_step から停止する: 状態を変えるカーネル (押し出し・境界・MCC・平均) は何もせず、
+   ステップ番号も進まない (場の求解は止まった粒子のまま回る)。
+2. ホストは同期する所 (COMPACT_EVERY ごとの圧縮、フレーム、履歴の転送など) で必ずカウンタを読む
+   (_capacity_check)。停止していれば、止まっていたステップの分だけホストのステップ数・時刻・平均の回数を
+   巻き戻し、配列を広げて停止を解き、同じステップからやり直す。結果は初めから容量が足りていた場合と同じ
+   (粒子の並びを変えないよう、圧縮の予定はそのまま)。
+3. 圧縮のたびに、直近の追加の速さ (電離・二次電子の数の差分 / ステップ) で CAP_AHEAD 回分の圧縮間隔の追加が
+   入るように先回りして広げる (旧来の n > CAP_HIGH·cap の規則も残す)。
+4. 予備まで使い切った (1 ステップの追加が予備を越えた) ときだけ粒子が失われ (C_OVERFLOW)、エラーにする。
+   カウンタは配列の長さを越えて増え得るので、カーネルは粒子数を配列の長さで切る。
+
 未対応 (指定するとエラー): 粒子注入 (injection)、FN 電界放出、粒子マージ、
 DSMC ガス場連成 (use_dsmc_gas)。
 """
@@ -100,9 +123,20 @@ MIN_FRAME_INTERVAL_S = 0.25
 CYCLE_MAX_VALUES = 4_000_000
 #: 吸収粒子の圧縮・容量検査の間隔 [ステップ]
 COMPACT_EVERY = 32
-#: 容量の余裕 (圧縮時に n > CAP_HIGH·cap なら cap を CAP_GROW·n に拡張)
+#: 初めの軟らかい容量 max(CAP_INIT·n_macro, n_macro + CAP_HEADROOM_MIN)
+CAP_INIT = 2.0
+CAP_HEADROOM_MIN = 65536
+#: 容量の余裕 (圧縮時に n > CAP_HIGH·cap なら cap を CAP_GROW·n + CAP_GROW_MIN に拡張)
 CAP_HIGH = 0.75
 CAP_GROW = 1.6
+CAP_GROW_MIN = 1024
+#: 予備の容量 (1 ステップの追加の分): 配列の長さ = cap + max(CAP_RESERVE_MIN, CAP_RESERVE_FRAC·cap)
+CAP_RESERVE_MIN = 65536
+CAP_RESERVE_FRAC = 0.125
+#: 先回りの拡張: 直近の追加の速さで CAP_AHEAD 回分の圧縮間隔の追加が入る余裕を保つ。速さの記憶は
+#: CAP_RATE_HALFLIFE ステップで半分に減る
+CAP_AHEAD = 4
+CAP_RATE_HALFLIFE = 256
 #: GPU 上の history リングバッファの行数
 HISTORY_ROWS = 2048
 #: PCG の反復数の初期値・上限と、残差監視の間隔 [ステップ]
@@ -131,17 +165,29 @@ _TIMING_KEYS = ("solve", "gather_push", "walk", "deposit", "mcc", "other", "fram
 P_T, P_STEP, P_DT, P_ACCUM, P_BIN, P_ION_STEP = 0, 1, 2, 3, 4, 5
 P_NUMAX_E, P_PCAND_E, P_NUMAX_I, P_PCAND_I = 6, 7, 8, 9
 P_ACC_START, P_PERIOD, P_NBINS, P_SUB, P_T0, P_STEP0 = 10, 11, 12, 13, 14, 15
+P_HALT = 16
+_N_PRM = 24
 # cnt (uint64) の位置 — kernels/pic.cu の C_* と一致させること
-C_NE, C_NI, C_OVERFLOW = 0, 1, 9
-_N_CNT = 16
+C_NE, C_NI, C_ION_EV, C_SEE_EV, C_OVERFLOW = 0, 1, 7, 8, 9
+C_HALT_REQ, C_HALT, C_HALT_STEP, C_LIM_E, C_LIM_I, C_SOFT_E, C_SOFT_I = 16, 17, 18, 19, 20, 21, 22
+_N_CNT = 24
+
+
+def _reserve(cap: int) -> int:
+    """軟らかい容量 cap の上に置く予備の粒子数 (1 ステップの追加の分、モジュール docstring の「粒子の容量」)。"""
+    return max(CAP_RESERVE_MIN, int(CAP_RESERVE_FRAC * cap))
 
 
 class _Species:
-    """GPU 上の粒子 (SoA、容量固定)。v[2] は xy なら vz、軸対称なら vθ。数はデバイスの cnt[index]。"""
+    """GPU 上の粒子 (SoA、容量固定)。v[2] は xy なら vz、軸対称なら vθ。数はデバイスの cnt[index]。
+
+    cap は軟らかい容量、alloc は配列の長さ (cap + 予備、モジュール docstring の「粒子の容量」)。
+    確保・コピーは呼び出し側がステップのストリームの中で行う。
+    """
 
     FIELDS = ("x", "y", "vx", "vy", "vz", "w")
 
-    def __init__(self, name: str, index: int, q: float, m: float, mobile: bool, cp, cap: int):
+    def __init__(self, name: str, index: int, q: float, m: float, mobile: bool, cp, cap: int, alloc: int):
         self.name = name
         self.index = index
         self.q = q
@@ -149,18 +195,20 @@ class _Species:
         self.mobile = mobile
         self._cp = cp
         self.cap = 0
+        self.alloc = 0
         self.arrays: dict[str, object] = {}
-        self._alloc(cap)
+        self._alloc(cap, alloc)
 
-    def _alloc(self, cap: int) -> None:
+    def _alloc(self, cap: int, alloc: int) -> None:
         cp = self._cp
         old = self.arrays
-        self.arrays = {k: cp.zeros(cap) for k in self.FIELDS}
+        self.arrays = {k: cp.zeros(alloc) for k in self.FIELDS}
         if old:
-            n = min(self.cap, cap)
+            n = min(self.alloc, alloc)
             for k in self.FIELDS:
                 self.arrays[k][:n] = old[k][:n]
         self.cap = cap
+        self.alloc = alloc
 
     def __getattr__(self, item):
         arrays = self.__dict__.get("arrays")
@@ -277,15 +325,24 @@ class GpuPicSimulation:
         self._last_frame_wall = -math.inf
         self._reset_accumulators()
 
+        # ---- 粒子の容量の検査 (モジュール docstring の「粒子の容量」) -----------------------------
+        self._checked_step = -1          # カウンタを読んで停止を解いたステップ (同じステップの再検査を省く)
+        self._chk_step = 0               # 前の検査のデバイスのステップ数と電離・二次電子の累計
+        self._chk_ev = (0, 0)
+        self._cap_rate = {"electron": 0.0, "ion": 0.0}   # 追加の速さ [粒子/ステップ]
+        self.capacity_log: list[dict] = []               # 停止からのやり直し (step・止まったステップ数・容量)
+
         # ---- 動的再格子化 (prompts/123) ------------------------------------------------------
         self.mesh_version = 0            # 再格子化のたびに増える (フレーム・done に新しい格子を添える)
         self._frame_mesh_version = 0
         self.regrid_log: list[dict] = []
         self._regrid_every = self.amr.hier.spec.pic_regrid_every if self.amr is not None else 0
         self._tag_count = 0
+        self._tag_steps: list[int] = []  # 前の検査の後にタグを積算したステップ (停止で巻き戻したら数え直す)
         if self._regrid_every:
-            self._tag_w = self.cp.zeros(self._shape)
-            self._tag_ke = self.cp.zeros(self._shape)
+            with self._stream:
+                self._tag_w = self.cp.zeros(self._shape)
+                self._tag_ke = self.cp.zeros(self._shape)
         self._self_force_warning()
 
         # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ) -----------------------
@@ -545,8 +602,8 @@ class GpuPicSimulation:
         self._cycle_period = 1.0 / self._cycle_freq if self._cycle_enabled else 0.0
 
         # ---- パラメータ・カウンタ ----
-        self._prm = cp.zeros(16)
-        prm = np.zeros(16)
+        self._prm = cp.zeros(_N_PRM)
+        prm = np.zeros(_N_PRM)
         prm[P_DT] = self.dt
         prm[P_ACC_START] = 1e300
         prm[P_PERIOD] = self._cycle_period if self._cycle_enabled else 0.0
@@ -559,12 +616,14 @@ class GpuPicSimulation:
 
         # ---- 粒子 ----
         n0 = int(pic.n_macro) if ip is not None else 0
-        cap = max(2 * n0, n0 + 65536)
+        cap = int(max(CAP_INIT * n0, n0 + CAP_HEADROOM_MIN))
+        alloc = cap + _reserve(cap)
         self.species = {
-            "electron": _Species("electron", 0, -QE, ME, True, cp, cap),
-            "ion": _Species("ion", 1, QE, self.m_ion, not (ip is not None and ip.immobile_ions), cp, cap),
+            "electron": _Species("electron", 0, -QE, ME, True, cp, cap, alloc),
+            "ion": _Species("ion", 1, QE, self.m_ion, not (ip is not None and ip.immobile_ions), cp, cap, alloc),
         }
-        self._scan_buffers(cap)
+        self._scan_buffers(alloc)
+        self._upload_limits()
         self._w0 = None
         if ip is not None:
             self._load_initial_plasma(ip)
@@ -619,13 +678,21 @@ class GpuPicSimulation:
         self._dmesh = dm
         self.mesh = _DisplayMeshView(nodes=dm.nodes, triangles=dm.triangles, tri_region=dm.tri_region)
 
-    def _scan_buffers(self, cap: int) -> None:
+    def _scan_buffers(self, alloc: int) -> None:
+        """圧縮の作業配列 (ステップのストリームの中で呼ぶ)。"""
         cp = self.cp
-        nb = (cap + 1023) // 1024
+        nb = (alloc + 1023) // 1024
         self._scan_off = cp.zeros(nb * 1024, dtype=np.int32)
         self._scan_flag = cp.zeros(nb * 1024, dtype=np.uint8)
         self._scan_bsum = cp.zeros(nb, dtype=np.int64)
-        self._tmp = {k: cp.zeros(cap) for k in _Species.FIELDS}
+        self._tmp = {k: cp.zeros(alloc) for k in _Species.FIELDS}
+
+    def _upload_limits(self) -> None:
+        """配列の長さと軟らかい容量をデバイスのカウンタ (C_LIM_*・C_SOFT_*) へ。"""
+        el, io = self.species["electron"], self.species["ion"]
+        with self._stream:
+            self._cnt[C_LIM_E:C_SOFT_I + 1] = self.cp.asarray(
+                np.array([el.alloc, io.alloc, el.cap, io.cap], dtype=np.uint64))
 
     def _load_initial_plasma(self, ip) -> None:
         cp = self.cp
@@ -669,22 +736,27 @@ class GpuPicSimulation:
         sp = self.species[name]
         n = len(host["x"])
         if n > CAP_HIGH * sp.cap:
-            self._grow(sp, int(CAP_GROW * n) + 1024)
-        for k in _Species.FIELDS:
-            a = sp.arrays[k]
-            a[:n] = cp.asarray(np.asarray(host[k], dtype=np.float64))
-            a[n:] = 0.0
-        cnt = self._cnt.get()
-        cnt[sp.index] = n
-        cnt[14 + sp.index] = cnt[4 + sp.index]   # 吸収カウンタの基準 (生存数 = 格納数 − 基準以後の吸収)
-        self._cnt[...] = cp.asarray(cnt)
+            self._grow(sp, int(CAP_GROW * n) + CAP_GROW_MIN)
+        with self._stream:
+            for k in _Species.FIELDS:
+                a = sp.arrays[k]
+                a[:n] = cp.asarray(np.asarray(host[k], dtype=np.float64))
+                a[n:] = 0.0
+            cnt = self._cnt.get()
+            cnt[sp.index] = n
+            cnt[14 + sp.index] = cnt[4 + sp.index]   # 吸収カウンタの基準 (生存数 = 格納数 − 基準以後の吸収)
+            self._cnt[...] = cp.asarray(cnt)
         self._graph = None
 
     def _grow(self, sp: _Species, cap: int) -> None:
-        sp._alloc(cap)
-        cap_max = max(s.cap for s in self.species.values()) if hasattr(self, "species") else cap
-        if self._scan_off.size < ((cap_max + 1023) // 1024) * 1024 or self._tmp["x"].size < cap_max:
-            self._scan_buffers(cap_max)
+        """種 sp の軟らかい容量を cap に (配列の長さは予備を足す)。中身はステップのストリームの上でコピーする。"""
+        alloc = cap + _reserve(cap)
+        with self._stream:
+            sp._alloc(cap, alloc)
+            alloc_max = max(s.alloc for s in self.species.values())
+            if self._scan_off.size < ((alloc_max + 1023) // 1024) * 1024 or self._tmp["x"].size < alloc_max:
+                self._scan_buffers(alloc_max)
+        self._upload_limits()
         self._graph = None
 
     def _setup_mcc_tables(self) -> None:
@@ -784,7 +856,7 @@ class GpuPicSimulation:
                           self._g_wf_off, *self._g_wf, self._prm))
         self._rho.fill(0.0)
         for sp in self.species.values():
-            k["deposit"](self._grid1(sp.cap), (_BLOCK,),
+            k["deposit"](self._grid1(sp.alloc), (_BLOCK,),
                          (sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.int32(0),
                           np.float64(sp.q / self._two_pi), self._rho, self._rho, np.int32(0), np.int64(n),
                           np.int32(0), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py),
@@ -833,7 +905,7 @@ class GpuPicSimulation:
             return
         dt_s = self.dt * (self._sub if sp.index == 1 else 1)
         use_b = sp.name in self._R
-        self._k["push"](self._grid1(sp.cap), (_BLOCK,),
+        self._k["push"](self._grid1(sp.alloc), (_BLOCK,),
                         (sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), self._ex, self._ey,
                          *self._grid_args, np.float64(sp.q / sp.m), np.float64(dt_s), np.int32(1 if self.rz else 0),
                          np.int32(self.ridx if self.rz else 0), np.int32(1 if use_b else 0),
@@ -846,7 +918,7 @@ class GpuPicSimulation:
         d = self.model.domain
         el = self.species["electron"]
         dt_s = self.dt * (self._sub if sp.index == 1 else 1)
-        self._k["boundary"](self._grid1(sp.cap), (_BLOCK,), (
+        self._k["boundary"](self._grid1(sp.alloc), (_BLOCK,), (
             sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.float64(dt_s),
             np.int32(1 if self.rz else 0), np.int32(self.ridx if self.rz else 0),
             np.float64(d.x0), np.float64(d.y0), np.float64(d.x1), np.float64(d.y1), self._side_kind,
@@ -856,7 +928,7 @@ class GpuPicSimulation:
             self._s_circ, self._side_gamma, self._cond_gamma, self._diel_gamma,
             self._q_surf, np.float64(sp.q), np.float64(1.0 / self._two_pi),
             np.int32(self._see_on), np.float64(self._see_speed), np.float64(self._see_delta),
-            el.x, el.y, el.vx, el.vy, el.vz, el.w, np.int64(el.cap),
+            el.x, el.y, el.vx, el.vy, el.vz, el.w,
             np.int32(self._n_coll), self._coll, np.float64(sp.m),
             self._rec_e, self._rec_a, self._rec_w, self._rec_n, self._coll_w, np.int64(COLLECTOR_MAX_SAMPLES),
             self._prm, self._see_seed, self._side_elec, self._cond_elec, self._cap_dq, *self._gx,
@@ -870,14 +942,14 @@ class GpuPicSimulation:
         el, io = self.species["electron"], self.species["ion"]
         g = self.grid
         if self._me_n:
-            k["vmax2"](self._grid1(el.cap), (_BLOCK,), (el.vx, el.vy, el.vz, el.w, self._cnt, np.int32(0), self._prm))
+            k["vmax2"](self._grid1(el.alloc), (_BLOCK,), (el.vx, el.vy, el.vz, el.w, self._cnt, np.int32(0), self._prm))
             k["numax_lookup"]((1,), (1,), (self._prm, self._cnt, np.int32(0), np.float64(ME), np.float64(mc.mu),
                                            np.float64(mc.vth_gas), np.int32(0), self._me_pref,
                                            np.int32(self._me_ngrid), np.float64(self._me_ecap), np.float64(self.dt)))
             use_cyc = self._cyc_ion is not None
-            k["mcc_electron"](self._grid1(el.cap), (_BLOCK,), (
-                el.x, el.y, el.vx, el.vy, el.vz, el.w, np.int64(el.cap),
-                io.x, io.y, io.vx, io.vy, io.vz, io.w, np.int64(io.cap),
+            k["mcc_electron"](self._grid1(el.alloc), (_BLOCK,), (
+                el.x, el.y, el.vx, el.vy, el.vz, el.w,
+                io.x, io.y, io.vx, io.vy, io.vz, io.w,
                 self._cnt, np.int32(self._me_n), self._me_kind, self._me_thr, self._me_mr, self._me_tab_e,
                 self._me_tab_s, self._me_len, np.int32(self._me_w), np.float64(mc.n_gas),
                 np.int32(1 if self.pic.mcc.ionization_split == "half" else 0), np.float64(mc.vth_gas),
@@ -887,12 +959,12 @@ class GpuPicSimulation:
             ))
         if self._mi_n and io.mobile:
             dt_i = self.dt * self._sub
-            k["vmax2"](self._grid1(io.cap), (_BLOCK,), (io.vx, io.vy, io.vz, io.w, self._cnt, np.int32(1), self._prm))
+            k["vmax2"](self._grid1(io.alloc), (_BLOCK,), (io.vx, io.vy, io.vz, io.w, self._cnt, np.int32(1), self._prm))
             k["numax_lookup"]((1,), (1,), (self._prm, self._cnt, np.int32(1), np.float64(mc.m_ion),
                                            np.float64(mc.mu), np.float64(mc.vth_gas),
                                            np.int32(1 if mc.ion_energy_frame == "com" else 0), self._mi_pref,
                                            np.int32(self._mi_ngrid), np.float64(self._mi_ecap), np.float64(dt_i)))
-            k["mcc_ion"](self._grid1(io.cap), (_BLOCK,), (
+            k["mcc_ion"](self._grid1(io.alloc), (_BLOCK,), (
                 io.vx, io.vy, io.vz, io.w, self._cnt, np.int32(self._mi_n), self._mi_kind, self._mi_tab_e,
                 self._mi_tab_s, self._mi_len, np.int32(self._mi_w), np.float64(mc.n_gas), np.float64(mc.m_ion),
                 np.float64(mc.mu), np.float64(mc.vth_gas), np.int32(1 if mc.ion_energy_frame == "com" else 0),
@@ -909,21 +981,21 @@ class GpuPicSimulation:
         for name, sp in self.species.items():
             key = "n_e" if sp.index == 0 else "n_i"
             out2 = self._cyc[key] if use_cyc else self._acc_n[name]
-            k["deposit"](self._grid1(sp.cap), (_BLOCK,),
+            k["deposit"](self._grid1(sp.alloc), (_BLOCK,),
                          (sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.int32(0),
                           np.float64(1.0), self._acc_n[name], out2, np.int32(1 if use_cyc else 0), np.int64(n),
                           np.int32(1), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py),
                           *self._gx))
         el = self.species["electron"]
         out2 = self._cyc["ke"] if use_cyc else self._acc_ke
-        k["deposit"](self._grid1(el.cap), (_BLOCK,),
+        k["deposit"](self._grid1(el.alloc), (_BLOCK,),
                      (el.x, el.y, el.vx, el.vy, el.vz, el.w, self._cnt, np.int32(0), np.int32(1),
                       np.float64(0.5 * ME), self._acc_ke, out2, np.int32(1 if use_cyc else 0), np.int64(n),
                       np.int32(1), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py),
                       *self._gx))
         if self._n_eedf:
             shm = self._n_eedf * (self._eedf_bins + 3) * 8
-            k["eedf_hist"](self._grid1(el.cap), (_BLOCK,),
+            k["eedf_hist"](self._grid1(el.alloc), (_BLOCK,),
                            (el.x, el.y, el.vx, el.vy, el.vz, el.w, self._cnt, self._eedf_reg, np.int32(self._n_eedf),
                             np.int32(self._eedf_bins), self._eedf_hist, self._eedf_sums, self._prm), shared_mem=shm)
 
@@ -950,7 +1022,7 @@ class GpuPicSimulation:
 
     def _run_one_step(self) -> None:
         if self._use_graph:
-            key = (tuple(sp.cap for sp in self.species.values()), self._pcg_iters, id(self._acc_phi))
+            key = (tuple(sp.alloc for sp in self.species.values()), self._pcg_iters, id(self._acc_phi))
             if self._graph is None or self._graph_key != key:
                 with self._stream:
                     self._stream.begin_capture()
@@ -978,7 +1050,7 @@ class GpuPicSimulation:
                 continue
             dt_s = self.dt * (self._sub if sp.index == 1 else 1)
             if self.amr is not None:
-                self._k["kick_half"](self._grid1(sp.cap), (_BLOCK,),
+                self._k["kick_half"](self._grid1(sp.alloc), (_BLOCK,),
                                      (sp.x, sp.y, sp.vx, sp.vy, sp.w, self._cnt, np.int32(sp.index), self._ex,
                                       self._ey, np.float64(sp.q / sp.m * 0.5 * dt_s), *self._gx))
                 continue
@@ -1167,15 +1239,19 @@ class GpuPicSimulation:
                 break
 
     def _launch_tag_deposit(self) -> None:
-        """再格子化のタグ用に電子の重みと運動エネルギーを節点へ積算する (グラフ外、同期なし)。"""
+        """再格子化のタグ用に電子の重みと運動エネルギーを節点へ積算する (グラフ外、同期なし)。
+
+        容量の停止中は積算しない (gate 2)。その回は巻き戻しで _tag_count から引く (_rewind)。
+        """
         el = self.species["electron"]
         n = self.n_nodes
         for out, mode, scale in ((self._tag_w, 0, 1.0), (self._tag_ke, 1, 0.5 * ME)):
-            self._k["deposit"](self._grid1(el.cap), (_BLOCK,),
+            self._k["deposit"](self._grid1(el.alloc), (_BLOCK,),
                                (el.x, el.y, el.vx, el.vy, el.vz, el.w, self._cnt, np.int32(0), np.int32(mode),
-                                np.float64(scale), out, out, np.int32(0), np.int64(n), np.int32(0), self._prm,
+                                np.float64(scale), out, out, np.int32(0), np.int64(n), np.int32(2), self._prm,
                                 *self._grid_args, np.int32(self._px), np.int32(self._py), *self._gx))
         self._tag_count += 1
+        self._tag_steps.append(self.step_count)
 
     def _regrid(self) -> bool:
         """区間平均の λ_D で AMR 階層を作り直し、場の状態を新しい格子へ移す (ここで同期)。
@@ -1198,9 +1274,11 @@ class GpuPicSimulation:
         if self._tag_count == 0:
             return False
         kappa = debye_kappa(lay, self._tag_w.get(), self._tag_ke.get(), self._tag_count)
-        self._tag_w.fill(0.0)
-        self._tag_ke.fill(0.0)
+        with self._stream:
+            self._tag_w.fill(0.0)
+            self._tag_ke.fill(0.0)
         self._tag_count = 0
+        self._tag_steps = []
         # 候補の階層で判定し直すことを繰り返し、新しい領域の中も一度で必要なレベルまで細分化する
         cand = lay.hier
         for _ in range(spec.max_level + 1):
@@ -1250,40 +1328,105 @@ class GpuPicSimulation:
             nb = max(1, CYCLE_MAX_VALUES // self.n_nodes)
             self.warnings.append(f"再格子化で節点数が増えたため位相ビン数を {self._cycle_bins} → {nb} に減らしました")
             self._cycle_bins = nb
-            self._prm[P_NBINS] = float(nb)
+            with self._stream:
+                self._prm[P_NBINS] = float(nb)
         self._graph = None
         self.mesh_version += 1
         self.regrid_log.append({"step": self.step_count, "n_nodes": new.n_nodes, "levels": new.hier.n_levels,
                                 "leaf_cells": new.hier.n_leaf_cells(), "setup_s": time.perf_counter() - t0})
         return True
 
-    def _compact(self) -> None:
-        """吸収粒子 (w = 0) を詰める (順序保存)。容量不足・溢れも検査する (ここで同期)。"""
+    # ======================================================================================
+    # 粒子の容量 (モジュール docstring の「粒子の容量」)
+    # ======================================================================================
+
+    def _capacity_check(self, compact: bool) -> bool:
+        """カウンタを読む同期点 (compact なら先に吸収粒子 (w = 0) を順序保存で詰める)。
+
+        予備まで使い切って粒子が失われていたらエラー。デバイスが停止していたら、止まっていたステップの分だけ
+        ホストを巻き戻す (停止中の圧縮はカーネルが詰めずに写すだけにするので、粒子の並びは停止しなかった場合と
+        同じ)。圧縮のとき・停止の要求があったときは、追加の速さから先回りして配列を広げ、停止を解く。
+        戻り値: ステップを巻き戻したか (呼び出し側は巻き戻したステップから続ける)。
+        """
         k = self._k
         with self._stream:
-            for sp in self.species.values():
-                nb = (sp.cap + 1023) // 1024
-                k["compact_scan"]((nb,), (1024,), (sp.w, self._cnt, np.int32(sp.index), self._scan_off,
-                                                    self._scan_flag, self._scan_bsum, np.int64(sp.cap)))
-                k["compact_scan_blocks"]((1,), (1,), (self._scan_bsum, np.int64(nb), self._cnt, np.int32(sp.index)))
-                t = self._tmp
-                k["compact_scatter"](self._grid1(sp.cap), (_BLOCK,),
-                                     (self._scan_flag, np.int64(sp.cap), self._scan_off, self._scan_bsum,
-                                      sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w,
-                                      t["x"], t["y"], t["vx"], t["vy"], t["vz"], t["w"]))
-                for f in _Species.FIELDS:
-                    self._k_copy(self._grid1(sp.cap), (_BLOCK,), (sp.arrays[f], t[f], np.int64(sp.cap)))
-        self._stream.synchronize()
-        cnt = self._cnt.get()
-        if int(cnt[C_OVERFLOW]):
+            if compact:
+                for sp in self.species.values():
+                    nb = (sp.alloc + 1023) // 1024
+                    k["compact_scan"]((nb,), (1024,), (sp.w, self._cnt, np.int32(sp.index), self._scan_off,
+                                                        self._scan_flag, self._scan_bsum, np.int64(sp.alloc)))
+                    k["compact_scan_blocks"]((1,), (1,), (self._scan_bsum, np.int64(nb), self._cnt,
+                                                          np.int32(sp.index)))
+                    t = self._tmp
+                    k["compact_scatter"](self._grid1(sp.alloc), (_BLOCK,),
+                                         (self._scan_flag, np.int64(sp.alloc), self._scan_off, self._scan_bsum,
+                                          sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w,
+                                          t["x"], t["y"], t["vx"], t["vy"], t["vz"], t["w"]))
+                    for f in _Species.FIELDS:
+                        self._k_copy(self._grid1(sp.alloc), (_BLOCK,), (sp.arrays[f], t[f], np.int64(sp.alloc)))
+            cnt = self._cnt.get()   # ステップのストリームで読む (ここで同期)
+        lost = int(cnt[C_OVERFLOW])
+        if lost:
+            reserve = min(sp.alloc - sp.cap for sp in self.species.values())
             raise RuntimeError(
-                f"粒子配列の容量を超えました (溢れ {int(cnt[C_OVERFLOW])} 個)。電離が急増しています — "
-                "粒子数 (n_macro) や dt を見直してください"
+                f"粒子配列の容量を超えました: 1 ステップの電離・二次電子の生成が予備の容量 ({reserve} 個) を越え、"
+                f"{lost} 個が失われました。電離が急増しています — dt や粒子数 (n_macro) を見直してください"
             )
-        for sp in self.species.values():
-            n = int(cnt[sp.index])
-            if n > CAP_HIGH * sp.cap:
-                self._grow(sp, int(CAP_GROW * n) + 1024)
+        halted = bool(cnt[C_HALT])
+        dev_step = int(cnt[C_HALT_STEP]) if halted else self.step_count
+        skipped = self.step_count - dev_step
+        if halted:
+            self._rewind(skipped)
+        self._tag_steps = []
+        # 追加の速さ [粒子/ステップ] (電離は電子とイオン、二次電子は電子)
+        ev = (int(cnt[C_ION_EV]), int(cnt[C_SEE_EV]))
+        steps = dev_step - self._chk_step
+        if steps > 0:
+            d_ion, d_see = ev[0] - self._chk_ev[0], ev[1] - self._chk_ev[1]
+            decay = 0.5 ** (steps / CAP_RATE_HALFLIFE)
+            for name, added in (("electron", d_ion + d_see), ("ion", d_ion)):
+                self._cap_rate[name] = max(added / steps, self._cap_rate[name] * decay)
+            self._chk_step, self._chk_ev = dev_step, ev
+        requested = halted or bool(cnt[C_HALT_REQ])
+        changed = requested
+        if compact or requested:
+            for sp in self.species.values():
+                n = int(cnt[sp.index])
+                ahead = CAP_AHEAD * COMPACT_EVERY * self._cap_rate[sp.name]
+                if n > CAP_HIGH * sp.cap or n + ahead > sp.cap:
+                    self._grow(sp, int(max(CAP_GROW * n, n + 2.0 * ahead)) + CAP_GROW_MIN)
+                    changed = True
+        if requested:
+            with self._stream:
+                self._cnt[C_HALT_REQ:C_HALT + 1] = 0
+            self.capacity_log.append({"step": dev_step, "halted_steps": skipped,
+                                      "cap": {name: sp.cap for name, sp in self.species.items()}})
+        if changed:
+            self._stream.synchronize()   # 呼び出し側は戻った後に既定のストリームで読む
+        self._checked_step = self.step_count
+        return halted
+
+    def _sync_point(self) -> bool:
+        """ホストが結果を読む前の同期と容量の検査 (同じステップの 2 回目は同期だけ)。戻り値: 巻き戻したか。"""
+        if self._checked_step == self.step_count:
+            self._stream.synchronize()
+            return False
+        return self._capacity_check(compact=False)
+
+    def _rewind(self, skipped: int) -> None:
+        """停止していた skipped ステップ (デバイスでは状態もステップ番号も変わっていない) の分だけ、ホストの
+        ステップ数・時刻・履歴の未転送の行数・平均の回数・再格子化のタグの回数を戻す。"""
+        hi = self.step_count
+        lo = hi - skipped
+        self.step_count = lo
+        self.t -= skipped * self.dt
+        self._hist_pending -= skipped
+        if self._accum_start is not None:
+            acc = max(0, hi - max(lo + 1, self._accum_start) + 1)
+            self._accum_count -= acc
+            if self._n_eedf:
+                self._eedf_samples -= acc
+        self._tag_count -= sum(1 for s in self._tag_steps if s > lo)
 
     # ======================================================================================
     # 時間平均・位相分解・コレクタ・EEDF
@@ -1294,19 +1437,20 @@ class GpuPicSimulation:
         shp = self._shape
         self._accum_start: int | None = None
         self._accum_count = 0
-        self._acc_phi = cp.zeros(shp)
-        self._acc_n = {"electron": cp.zeros(shp), "ion": cp.zeros(shp)}
-        self._acc_ke = cp.zeros(shp)
-        self._acc_ion = cp.zeros(shp)
+        with self._stream:
+            self._acc_phi = cp.zeros(shp)
+            self._acc_n = {"electron": cp.zeros(shp), "ion": cp.zeros(shp)}
+            self._acc_ke = cp.zeros(shp)
+            self._acc_ion = cp.zeros(shp)
+            self._cyc_count = cp.zeros(max(self._cycle_bins, 1), dtype=np.uint64)
+            self._rec_n.fill(0)
+            self._coll_w.fill(0.0)
+            self._eedf_hist.fill(0.0)
+            self._eedf_sums.fill(0.0)
         self._cyc = None
         self._cyc_ion = None
-        self._cyc_count = cp.zeros(max(self._cycle_bins, 1), dtype=np.uint64)
         self._cycle_particles = None
         self._snap_t_start = math.inf
-        self._rec_n.fill(0)
-        self._coll_w.fill(0.0)
-        self._eedf_hist.fill(0.0)
-        self._eedf_sums.fill(0.0)
         self._eedf_samples = 0
         self._graph = None
 
@@ -1314,13 +1458,14 @@ class GpuPicSimulation:
         cp = self.cp
         self._accum_start = int(start_step)
         self._accum_count = 0
-        if self._cycle_enabled:
-            b = self._cycle_bins
-            shp = self._shape
-            self._cyc = {key: cp.zeros((b, *shp)) for key in ("phi", "n_e", "n_i", "ke")}
-            self._cyc_ion = cp.zeros((b, *shp))
-            self._cyc_count = cp.zeros(b, dtype=np.uint64)
-        self._prm[P_ACC_START] = float(start_step)
+        with self._stream:
+            if self._cycle_enabled:
+                b = self._cycle_bins
+                shp = self._shape
+                self._cyc = {key: cp.zeros((b, *shp)) for key in ("phi", "n_e", "n_i", "ke")}
+                self._cyc_ion = cp.zeros((b, *shp))
+                self._cyc_count = cp.zeros(b, dtype=np.uint64)
+            self._prm[P_ACC_START] = float(start_step)
         self._graph = None
 
     def _phase_bin(self, t: float) -> int:
@@ -1332,21 +1477,21 @@ class GpuPicSimulation:
         if not any(self._eedf_auto):
             return
         cp = self.cp
-        self._stream.synchronize()
         el = self.species["electron"]
-        n = int(self._cnt[0].get())
-        x, y = el.x[:n], el.y[:n]
-        e = 0.5 * ME * (el.vx[:n] ** 2 + el.vy[:n] ** 2 + el.vz[:n] ** 2) / QE
-        alive = el.w[:n] != 0.0
-        reg = self._eedf_reg.get()
-        for r, auto in enumerate(self._eedf_auto):
-            if not auto:
-                continue
-            x0, x1, y0, y1 = reg[5 * r: 5 * r + 4]
-            sel = alive & (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
-            em = float(cp.max(cp.where(sel, e, 0.0))) if n else 0.0
-            reg[5 * r + 4] = em * 1.2 if em > 0.0 else 30.0
-        self._eedf_reg[...] = cp.asarray(reg)
+        with self._stream:
+            n = min(int(self._cnt[0].get()), el.alloc)
+            x, y = el.x[:n], el.y[:n]
+            e = 0.5 * ME * (el.vx[:n] ** 2 + el.vy[:n] ** 2 + el.vz[:n] ** 2) / QE
+            alive = el.w[:n] != 0.0
+            reg = self._eedf_reg.get()
+            for r, auto in enumerate(self._eedf_auto):
+                if not auto:
+                    continue
+                x0, x1, y0, y1 = reg[5 * r: 5 * r + 4]
+                sel = alive & (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
+                em = float(cp.max(cp.where(sel, e, 0.0))) if n else 0.0
+                reg[5 * r + 4] = em * 1.2 if em > 0.0 else 30.0
+            self._eedf_reg[...] = cp.asarray(reg)
 
     def _node_density(self, acc, count: int) -> np.ndarray:
         return self._disp((acc * self._inv_vol_phys / max(count, 1)).get().ravel())
@@ -1442,7 +1587,7 @@ class GpuPicSimulation:
             self._cycle_particles[name][b] = self._subsample_positions(self.species[name], 1000)
 
     def _subsample_positions(self, sp: _Species, limit: int) -> np.ndarray:
-        n = int(self._cnt[sp.index].get())
+        n = min(int(self._cnt[sp.index].get()), sp.alloc)
         if n == 0:
             return np.zeros((0, 2))
         stride = max(1, int(math.ceil(n / limit)))
@@ -1457,7 +1602,7 @@ class GpuPicSimulation:
         """種 name の生存粒子をホスト配列で返す (x, y, vx, vy, vz, w)。v は半ステップ時刻の値。"""
         self._stream.synchronize()
         sp = self.species[name]
-        n = int(self._cnt[sp.index].get())
+        n = min(int(self._cnt[sp.index].get()), sp.alloc)
         w = sp.w[:n].get()
         alive = w != 0.0
         return {f: (w if f == "w" else sp.arrays[f][:n].get())[alive] for f in _Species.FIELDS}
@@ -1485,12 +1630,13 @@ class GpuPicSimulation:
 
     def _flush_history(self) -> None:
         """GPU のリングバッファに溜まった history 行をホストへ移す (ここで同期)。"""
+        # 計算は非ブロッキングのストリームに積んでいるので、読む前に完了を待つ (待たないと
+        # 直近のステップの行がまだ書かれておらず 0 や前周の値を読んでしまう)。容量の停止で止まっていた
+        # ステップの行は読まない (_sync_point が巻き戻す)
+        self._sync_point()
         m = self._hist_pending
         if m == 0:
             return
-        # 計算は非ブロッキングのストリームに積んでいるので、読む前に完了を待つ (待たないと
-        # 直近のステップの行がまだ書かれておらず 0 や前周の値を読んでしまう)
-        self._stream.synchronize()
         rows = self._hist.get()
         start = (self.step_count - m) % HISTORY_ROWS
         idx = (start + np.arange(m)) % HISTORY_ROWS
@@ -1522,12 +1668,15 @@ class GpuPicSimulation:
             self._pcg_iters -= 1
 
     def step(self):
-        """1 ステップ進める (テスト・デバッグ用の同期 API)。戻り値は電位 (デバイス配列)。"""
+        """1 ステップ進める (テスト・デバッグ用の同期 API)。戻り値は電位 (デバイス配列)。
+
+        毎ステップ容量を検査するので、軟らかい容量を越えたらその場で広げ、ステップは止まらない。
+        """
         self._run_one_step()
         self.step_count += 1
         self.t += self.dt
         self._hist_pending += 1
-        self._stream.synchronize()
+        self._sync_point()
         if self._hist_pending >= HISTORY_ROWS or self.circuit is not None:
             self._flush_history()
         return self._phi
@@ -1541,7 +1690,7 @@ class GpuPicSimulation:
         dens = {}
         for name, sp in self.species.items():
             cells = cp.zeros(self._n_cells)
-            self._k["deposit_cell"](self._grid1(sp.cap), (_BLOCK,),
+            self._k["deposit_cell"](self._grid1(sp.alloc), (_BLOCK,),
                                     (sp.x, sp.y, sp.w, self._cnt, np.int32(sp.index), cells, *self._grid_args,
                                      *self._gx))
             c = cells.get()
@@ -1572,7 +1721,11 @@ class GpuPicSimulation:
         return {"nodes": self.mesh.nodes.tolist(), "triangles": self.mesh.triangles.tolist()}
 
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
-        """n_steps 回実行して (診断履歴, フレーム列) を返す (v1 PicSimulation.run_batch と同じ契約)。"""
+        """n_steps 回実行して (診断履歴, フレーム列) を返す (v1 PicSimulation.run_batch と同じ契約)。
+
+        ホストが同期する所では必ず先に容量を検査し (_sync_point・_capacity_check)、デバイスが容量の停止で
+        止まっていたら、巻き戻したステップから続ける (モジュール docstring の「粒子の容量」)。
+        """
         t_run = time.perf_counter()
         if self._accum_start is None:
             avg = self.pic.avg_steps if self.pic.avg_steps is not None else max(1, self.pic.n_steps // 4)
@@ -1582,53 +1735,69 @@ class GpuPicSimulation:
             self._cycle_particles = {"electron": [None] * self._cycle_bins, "ion": [None] * self._cycle_bins}
             self._snap_t_start = self.t + self.pic.n_steps * self.dt - self._cycle_period
         frames: list[dict] = []
-        n_total = self.pic.n_steps
+        end = self.step_count + self.pic.n_steps
         t_frames = 0.0
-        for step_i in range(n_total):
-            if should_stop is not None and should_stop():
+        stopped = False
+        while True:
+            while self.step_count < end:
+                if should_stop is not None and should_stop():
+                    stopped = True
+                    break
+                if self.step_count + 1 == self._accum_start:
+                    if self._sync_point():
+                        continue
+                    self._prepare_eedf_auto()
+                self._run_one_step()
+                self.step_count += 1
+                self.t += self.dt
+                self._hist_pending += 1
+                if self._accum_start is not None and self.step_count >= self._accum_start:
+                    self._accum_count += 1
+                    if self._n_eedf:
+                        self._eedf_samples += 1
+                last = self.step_count == end
+                # 動的再格子化 (prompts/123): 時間平均区間の前だけ。タグ用の電子の密度・温度を
+                # TAG_EVERY ステップごとに積算し、regrid_every ステップごとに階層を作り直す
+                if (self._regrid_every and self._accum_start is not None
+                        and self.step_count + 1 < self._accum_start and not last):
+                    if self.step_count % TAG_EVERY == 0:
+                        with self._stream:
+                            self._launch_tag_deposit()
+                    if self.step_count % self._regrid_every == 0:
+                        if self._sync_point():
+                            continue
+                        self._regrid()
+                if self.step_count % COMPACT_EVERY == 0 and self._capacity_check(compact=True):
+                    continue
+                if self.step_count % MONITOR_EVERY == 0:
+                    if self._sync_point():
+                        continue
+                    self._check_solver()
+                if self._hist_pending >= HISTORY_ROWS:
+                    if self._sync_point():
+                        continue
+                    self._flush_history()
+                if self._cycle_enabled and self.t - self.dt >= self._snap_t_start - 1e-30:
+                    if self._sync_point():
+                        continue
+                    self._snapshot_particles(self.t - self.dt)
+                do_frame = (self.step_count % self.pic.frame_every == 0 or last) and (callback is not None or store_frames)
+                if do_frame:
+                    now = time.perf_counter()
+                    if now - self._last_frame_wall >= MIN_FRAME_INTERVAL_S or last:
+                        if self._sync_point():
+                            continue
+                        self._last_frame_wall = now
+                        self._check_finite()
+                        frame = self._make_frame()
+                        if store_frames:
+                            frames.append(frame)
+                        if callback is not None:
+                            callback(frame)
+                        t_frames += time.perf_counter() - now
+            # 最後のステップの後にも検査する (止まっていたら巻き戻して残りを実行)
+            if not self._sync_point() or stopped:
                 break
-            if self.step_count + 1 == self._accum_start:
-                self._prepare_eedf_auto()
-            self._run_one_step()
-            self.step_count += 1
-            self.t += self.dt
-            self._hist_pending += 1
-            if self._accum_start is not None and self.step_count >= self._accum_start:
-                self._accum_count += 1
-                if self._n_eedf:
-                    self._eedf_samples += 1
-            last = step_i == n_total - 1
-            # 動的再格子化 (prompts/123): 時間平均区間の前だけ。タグ用の電子の密度・温度を
-            # TAG_EVERY ステップごとに積算し、regrid_every ステップごとに階層を作り直す
-            if (self._regrid_every and self._accum_start is not None
-                    and self.step_count + 1 < self._accum_start and not last):
-                if self.step_count % TAG_EVERY == 0:
-                    with self._stream:
-                        self._launch_tag_deposit()
-                if self.step_count % self._regrid_every == 0:
-                    self._regrid()
-            if self.step_count % COMPACT_EVERY == 0:
-                self._compact()
-            if self.step_count % MONITOR_EVERY == 0:
-                self._check_solver()
-            if self._hist_pending >= HISTORY_ROWS:
-                self._flush_history()
-            if self._cycle_enabled and self.t - self.dt >= self._snap_t_start - 1e-30:
-                self._stream.synchronize()
-                self._snapshot_particles(self.t - self.dt)
-            do_frame = (self.step_count % self.pic.frame_every == 0 or last) and (callback is not None or store_frames)
-            if do_frame:
-                now = time.perf_counter()
-                if now - self._last_frame_wall >= MIN_FRAME_INTERVAL_S or last:
-                    self._last_frame_wall = now
-                    self._check_finite()
-                    frame = self._make_frame()
-                    if store_frames:
-                        frames.append(frame)
-                    if callback is not None:
-                        callback(frame)
-                    t_frames += time.perf_counter() - now
-        self._stream.synchronize()
         self._flush_history()
         self._check_finite()
         self.fields = self.averaged_fields()
@@ -1665,15 +1834,17 @@ class GpuPicSimulation:
             self._cycle_bins = int(phase_bins)
             self._cycle_enabled = self._cycle_freq is not None and self._cycle_bins > 0
             self._cycle_period = 1.0 / self._cycle_freq if self._cycle_enabled else 0.0
-            self._prm[P_PERIOD] = self._cycle_period if self._cycle_enabled else 0.0
-            self._prm[P_NBINS] = float(max(self._cycle_bins, 1))
+            with self._stream:
+                self._prm[P_PERIOD] = self._cycle_period if self._cycle_enabled else 0.0
+                self._prm[P_NBINS] = float(max(self._cycle_bins, 1))
         self._flush_history()
         self.history = {key: [] for key in self.history}
         if self.circuit is not None:
             self.circuit.reset_history()  # 回路の状態 (コンデンサの電荷) はデバイスにあり、引き継ぐ
         self.timing = {key: 0.0 for key in self.timing}
         self._reset_accumulators()
-        self._prm[P_ACC_START] = 1e300
+        with self._stream:
+            self._prm[P_ACC_START] = 1e300
         self.fields = None
         self.cycle = None
         self.collector_results = None
