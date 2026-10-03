@@ -10,11 +10,13 @@
 8. 高温壁との熱交換: 温度が壁温の間に単調に分布
 9. 平滑化: 総量保存・正値
 10. /dsmc・/ws/dsmc が mesh.mode="cartesian" で GPU 版を使う
+11. domain の頂点の並び (始点・向き) に依らない: 辺の番号を付け替えた同じ設定で境界の表と実行結果が一致
 GPU (CUDA) が無い環境ではスキップ。
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 
@@ -257,3 +259,73 @@ def test_server_dsmc_endpoints_use_gpu_engine_for_cartesian():
                 break
     assert [m["type"] for m in msgs][0] == "started" and msgs[-1]["type"] == "done", msgs[-1]
     assert any(m["type"] == "progress" for m in msgs)
+
+
+#: 正準順 [x0,y0],[x1,y0],[x1,y1],[x0,y1] の頂点を並べ替えた順 (始点を回したもの・時計回りにしたもの)
+_ORDERS = [(1, 2, 3, 0), (2, 3, 0, 1), (3, 0, 1, 2), (0, 3, 2, 1), (2, 1, 0, 3)]
+
+#: coord → (正準順の domain, 境界, リザーバの流入口の内向き法線)。辺の番号は正準順 (0 下・1 右・2 上・3 左)
+_ORDER_CASES = {
+    "xy": ([[0, 0], [L, 0], [L, H], [0, H]],
+           [{"edges": [3], "type": "inlet", "pressure_pa": 20.0, "temperature_k": 400.0},
+            {"edges": [1], "type": "outlet"}, {"edges": [0, 2], "type": "symmetry"},
+            {"edges": [2], "type": "wall", "temperature_k": 600.0},
+            {"type": "inlet", "p1": [L / 4, H], "p2": [L / 2, H], "flow_sccm": 5.0}],
+           (1.0, 0.0)),
+    # 下辺 (r = 0) は対称軸: 壁の指定によらず鏡面に強制される
+    "rz": ([[0, 0], [L, 0], [L, H], [0, H]],
+           [{"edges": [3], "type": "inlet", "pressure_pa": 20.0, "temperature_k": 400.0},
+            {"edges": [1], "type": "outlet"}, {"edges": [2, 0], "type": "wall", "temperature_k": 600.0},
+            {"type": "inlet", "p1": [L / 4, H], "p2": [L / 2, H], "flow_sccm": 5.0}],
+           (1.0, 0.0)),
+    # 左辺 (r = 0) が対称軸、下辺が径方向の流入口
+    "rz_x0": ([[0, 0], [H, 0], [H, L], [0, L]],
+              [{"edges": [0], "type": "inlet", "pressure_pa": 20.0, "temperature_k": 400.0},
+               {"edges": [2], "type": "outlet"}, {"edges": [1, 3], "type": "wall", "temperature_k": 600.0},
+               {"type": "inlet", "p1": [H, L / 4], "p2": [H, L / 2], "flow_sccm": 5.0}],
+              (0.0, 1.0)),
+}
+
+
+def _reordered(domain: list, dsmc: dict, order) -> tuple[list, dict]:
+    """domain の頂点を order の順に並べ、境界の辺の番号を同じ辺を指すよう付け替える。
+
+    辺 k は頂点 k → k+1 の線分。正準順の辺 c (頂点 c と c+1) は、並べ替えたあと同じ 2 頂点を
+    結ぶ辺になる (座標を見ない組合せだけの付け替え)。
+    """
+    new_of = {}
+    for k in range(4):
+        a, b = order[k], order[(k + 1) % 4]
+        new_of[a if b == (a + 1) % 4 else b] = k
+    d = copy.deepcopy(dsmc)
+    for bc in d["boundaries"]:
+        bc["edges"] = [new_of[e] for e in bc.get("edges", [])]
+    return [domain[k] for k in order], d
+
+
+def _boundary_tables(sim):
+    """外周の区間表と流入口 (実行前の写し。流入口の端数 frac は実行で変わる)。"""
+    return list(sim._side_off_h), list(sim._iv_h), [dict(ed) for ed in sim._res_edges]
+
+
+@pytest.mark.parametrize("coord", list(_ORDER_CASES))
+def test_boundaries_do_not_depend_on_the_domain_vertex_order(coord):
+    """domain の頂点の並び (始点・向き) を変え、境界の辺の番号を同じ辺に付け替えた設定は、正準順と同じ
+    境界の表 (外周の区間表・流入口) を作り、短い実行の結果もビット単位で一致する (辺の番号は domain の
+    頂点から幾何で決めた上下左右 DomainRect.edge_sides で解釈する。以前は正準順の上下左右に固定していた)。"""
+    domain, boundaries, inlet_nrm = _ORDER_CASES[coord]
+    cfg = {"gas": {"d_ref_m": 1e-15},     # 無衝突: 衝突対の取り合い (atomic) が無いので実行がビット単位で再現する
+           "boundaries": boundaries, "init_pressure_pa": 5.0, "init_temperature_k": 300.0,
+           "wall_temperature_k": 300.0, "n_particles": 4000, "n_steps": 60, "avg_steps": 30, "seed": 21}
+    ref = _sim(_project(cfg, coord=coord, domain=domain))
+    ref_tables = _boundary_tables(ref)
+    assert ref._res_edges[0]["nrm"] == inlet_nrm          # 正準順の解釈 (リザーバの流入口の辺) の確認
+    ref_res = ref.run()
+    for order in _ORDERS:
+        poly, dsmc = _reordered(domain, cfg, order)
+        sim = _sim(_project(dsmc, coord=coord, domain=poly))
+        assert _boundary_tables(sim) == ref_tables, order
+        res = sim.run()
+        for name in ("n", "t", "u", "p"):
+            assert np.array_equal(getattr(res, name), getattr(ref_res, name)), (order, name)
+        assert (res.n_particles, res.inflow, res.outflow) == (ref_res.n_particles, ref_res.inflow, ref_res.outflow)

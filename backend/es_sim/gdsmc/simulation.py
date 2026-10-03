@@ -44,7 +44,6 @@ from ..schema import DsmcSettings, Project
 _B_WALL, _B_SYM, _B_RES, _B_VAC = 0, 1, 2, 3
 _BLOCK = 256
 _SIDES = ("left", "right", "bottom", "top")
-_SIDE_EDGE = {"bottom": 0, "right": 1, "top": 2, "left": 3}   # 矩形 domain の外周エッジ番号
 #: 進捗コールバック・walk 診断の間隔 [ステップ] (v1 と同じ)
 PROGRESS_EVERY = 100
 #: 動的再格子化 (prompts/127) のためにセルの密度・温度を積算する間隔 [ステップ]
@@ -233,6 +232,8 @@ class GpuDsmcSimulation:
         v1 と同じ規約: 指定の無い部分と導体・誘電体の輪郭は壁温の拡散反射壁、後の指定が先の
         指定を上書き、流量指定の流入口は入射分子を拡散反射し指定流量だけを注入、軸対称の
         対称軸 (r=0) は鏡面に強制。線分指定 (p1-p2) は外周の辺上の部分区間 (prompts/55)。
+        辺の番号 e は domain.polygon の頂点 e → e+1 の辺 (v1 と同じく頂点数で折り返す)。どの辺かは
+        頂点の座標から決めた DomainRect.edge_sides で引く (頂点の始点・向きに依らない)。
         """
         s = self.s
         d = self.model.domain
@@ -250,7 +251,7 @@ class GpuDsmcSimulation:
                 code = {"wall": _B_WALL, "symmetry": _B_SYM}[bc.type]
             pieces = []   # (side, c0, c1)
             for e in bc.edges:
-                side = {v: k for k, v in _SIDE_EDGE.items()}[e % 4]
+                side = d.edge_sides[e % 4]
                 pieces.append((side, *span[side]))
             if bc.p1 is not None and bc.p2 is not None:
                 (ax, ay), (bx, by) = bc.p1, bc.p2
