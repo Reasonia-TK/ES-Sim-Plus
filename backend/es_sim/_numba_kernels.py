@@ -25,9 +25,9 @@ numpy ベクトル化実装より高速化する。numba は **optional 依存**
     (速度の内積) 配列を返すだけにとどめ、総和は呼び出し側で numpy の
     np.sum に委ねる (numpy 版と同じ pairwise 和アルゴリズムになるため
     ビット単位一致を保てる)。
-  - 軸対称 (rz / rz_x0) は遠心力・軸鏡映・角運動量保存まで含めて push と
-    walk を融合する。一様磁場 (B) ありの push は分岐が多いため numpy 実装を
-    維持する。
+  - 軸対称 (rz / rz_x0) は回転法の push (E の蹴り → 局所座標の3D直線移動 →
+    子午面への回転、角運動量厳密保存) と walk を融合する。一様磁場 (B) ありの
+    push は分岐が多いため numpy 実装を維持する。
 """
 
 from __future__ import annotations
@@ -54,8 +54,6 @@ except ImportError:
 # 値がずれると walk の挙動が食い違うため、変更時は両方合わせること)
 _MAX_WALK_ITERS = 64
 _TOL = 1e-9
-# pic.py の軸上ゼロ割ガードと同じ値。変更時は両方を合わせること。
-_R_TINY = 1e-30
 # MCC候補選択のprange起動コストを回収できる候補数。2万粒子級では直列版が
 # 速く、10万粒子級では並列版が有効になるため、その間を保守的な閾値とする。
 _MCC_PARALLEL_MIN_CANDIDATES = 32_768
@@ -453,7 +451,6 @@ if HAVE_NUMBA:
         qm,
         dt_sp,
         ridx,
-        r_tiny,
         x,
         v,
         tol,
@@ -468,7 +465,7 @@ if HAVE_NUMBA:
         out_l,
         p,
     ):
-        """軸対称push・軸鏡映・角運動量補正・walkを1粒子分処理する。"""
+        """軸対称push (回転法)・walkを1粒子分処理する。"""
         e = elem0[p]
         v0 = v[p, 0]
         v1 = v[p, 1]
@@ -476,38 +473,40 @@ if HAVE_NUMBA:
         x0 = x[p, 0]
         x1 = x[p, 1]
 
-        # numpy経路と同じく q/m·E を作ってから dt を乗じる。
+        # numpy経路と同じく q/m·E を作ってから dt を乗じる (E だけの蹴り)。
         a0 = qm * exy[e, 0]
         a1 = qm * exy[e, 1]
-        r_cur = np.maximum(x[p, ridx], r_tiny)
-        ang_l = x[p, ridx] * v2
-        centrifugal = v2 ** 2 / r_cur
-        if ridx == 0:
-            a0 += centrifugal
-        else:
-            a1 += centrifugal
         vn0 = v0 + dt_sp * a0
         vn1 = v1 + dt_sp * a1
 
-        # 時刻中心化KEは、移動後の角運動量補正より前のvθで評価する。
+        # 時刻中心化KEは、回転より前の (蹴った直後の) 速度で評価する。
         out_vdot[p] = (v0 * vn0 + v1 * vn1) + v2 * v2
         xp = x0 + dt_sp * vn0
         yp = x1 + dt_sp * vn1
 
-        # 軸は吸収境界ではないため、walkより前に径座標と速度を鏡映する。
+        # 回転法: 局所座標の3D直線移動 (径 xr、周 yt) の後の半径へ移し、(vr, vθ) を
+        # 同じ角だけ回す。r ≥ 0 のままなので軸は吸収境界にならず、別の鏡映は要らない。
         if ridx == 0:
-            if xp < 0.0:
-                xp = -xp
-                vn0 = -vn0
-                ang_l = -ang_l
-            r_new = np.maximum(xp, r_tiny)
+            xr = xp
+            vr = vn0
         else:
-            if yp < 0.0:
-                yp = -yp
-                vn1 = -vn1
-                ang_l = -ang_l
-            r_new = np.maximum(yp, r_tiny)
-        vn2 = ang_l / r_new if ang_l != 0.0 else 0.0
+            xr = yp
+            vr = vn1
+        yt = dt_sp * v2
+        r_new = np.sqrt(xr * xr + yt * yt)
+        cos_a = 1.0
+        sin_a = 0.0
+        if r_new > 0.0:
+            cos_a = xr / r_new
+            sin_a = yt / r_new
+        vr_rot = cos_a * vr + sin_a * v2
+        vn2 = -sin_a * vr + cos_a * v2
+        if ridx == 0:
+            xp = r_new
+            vn0 = vr_rot
+        else:
+            yp = r_new
+            vn1 = vr_rot
 
         out_vnew[p, 0] = vn0
         out_vnew[p, 1] = vn1
@@ -571,28 +570,28 @@ if HAVE_NUMBA:
 
     @njit(cache=True, nogil=True, parallel=True)
     def _gather_push_walk_rz_x_kernel(
-        exy, packed, adjacency, elem0, qm, dt_sp, r_tiny, x, v, tol,
+        exy, packed, adjacency, elem0, qm, dt_sp, x, v, tol,
         max_iters, out_vnew, out_xnew, out_vdot, out_elem, out_absorbed,
         out_b_elem, out_b_loc, out_l,
     ):
         """ridx=0 (rz_x0) を定数化した軸対称融合カーネル。"""
         for p in prange(elem0.shape[0]):
             _gather_push_walk_rz_one(
-                exy, packed, adjacency, elem0, qm, dt_sp, 0, r_tiny, x, v,
+                exy, packed, adjacency, elem0, qm, dt_sp, 0, x, v,
                 tol, max_iters, out_vnew, out_xnew, out_vdot, out_elem,
                 out_absorbed, out_b_elem, out_b_loc, out_l, p,
             )
 
     @njit(cache=True, nogil=True, parallel=True)
     def _gather_push_walk_rz_y_kernel(
-        exy, packed, adjacency, elem0, qm, dt_sp, r_tiny, x, v, tol,
+        exy, packed, adjacency, elem0, qm, dt_sp, x, v, tol,
         max_iters, out_vnew, out_xnew, out_vdot, out_elem, out_absorbed,
         out_b_elem, out_b_loc, out_l,
     ):
         """ridx=1 (rz) を定数化した軸対称融合カーネル。"""
         for p in prange(elem0.shape[0]):
             _gather_push_walk_rz_one(
-                exy, packed, adjacency, elem0, qm, dt_sp, 1, r_tiny, x, v,
+                exy, packed, adjacency, elem0, qm, dt_sp, 1, x, v,
                 tol, max_iters, out_vnew, out_xnew, out_vdot, out_elem,
                 out_absorbed, out_b_elem, out_b_loc, out_l, p,
             )
@@ -1398,9 +1397,10 @@ def gather_push_walk_rz(
     v: np.ndarray,
     out: tuple[np.ndarray, ...] | None = None,
 ):
-    """軸対称gather+push+軸鏡映+角運動量補正+walkを1回で処理する。
+    """軸対称gather+push (回転法)+walkを1回で処理する。
 
-    ridx=1 は rz (x=z, y=r)、ridx=0 は rz_x0 (x=r, y=z)。返却値と
+    push は E だけの蹴り → 局所座標の3D直線移動 → 子午面への回転 (pic.py の numpy 経路と
+    同じ演算順)。ridx=1 は rz (x=z, y=r)、ridx=0 は rz_x0 (x=r, y=z)。返却値と
     再利用バッファの契約は gather_push_walk と同じ。ただし境界要素番号と
     局所辺番号は absorbed=True の行だけで定義される。
     """
@@ -1439,7 +1439,6 @@ def gather_push_walk_rz(
         np.ascontiguousarray(elem),
         q / m,
         dt_sp,
-        _R_TINY,
         np.ascontiguousarray(x),
         np.ascontiguousarray(v),
         _TOL,

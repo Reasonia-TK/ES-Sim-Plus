@@ -5,15 +5,19 @@
    無限長一様帯電円柱の解析解 φ(r) = ρ(R²−r²)/(4ε0) と一致 (係数 2π の検証)
 3. 自由粒子の遠心力・角運動量保存: 無場で vθ を持つ粒子の r(t) が
    解析解 r(t) = √(r0² + (vθ0 t)²) と一致
+3b. 軸のすぐ近くの粒子 (回転法の押し出し): 1 ステップの変位が |v|·dt 以下で、無場では 3D の直線運動を
+   丸め誤差でなぞる。vθ = 0 で軸を通り抜ける粒子は従来の軸の鏡映と同じ (numba・numpy の両経路)
 4. 軸方向プラズマ振動: 冷たい電子の微小 z ドリフトで KE が 2×fpe で振動
 """
 
 import math
 
 import numpy as np
+import pytest
 
+from es_sim import _numba_kernels
 from es_sim.fem import EPS0
-from es_sim.particles import ME, QE
+from es_sim.particles import ME, QE, _locate_initial
 from es_sim.pic import PicSimulation
 from es_sim.schema import Project
 
@@ -32,15 +36,23 @@ def _zero_cross_freq(sig: np.ndarray, dt: float) -> float:
     return (len(tz) - 1) / ((tz[-1] - tz[0]) * dt)
 
 
-def _cylinder_project(lz: float, rr: float, mesh: float, pic: dict) -> Project:
-    """rz (x=z, y=r, 軸 y=0) の円柱。軸以外の3辺を接地する。"""
+def _cylinder_project(lz: float, rr: float, mesh: float, pic: dict, coord: str = "rz") -> Project:
+    """rz (x=z, y=r, 軸 y=0) の円柱。軸以外の3辺を接地する。
+
+    coord="rz_x0" は同じ円柱を x=r, y=z (軸 x=0) に置き換えたもの。
+    """
+    if coord == "rz":
+        # エッジ0 (y=0) は対称軸 = 自然境界。1: z=lz、2: r=rr、3: z=0
+        polygon, grounded = [[0, 0], [lz, 0], [lz, rr], [0, rr]], [1, 2, 3]
+    else:
+        # エッジ3 (x=0) は対称軸 = 自然境界。0: z=0、1: r=rr、2: z=lz
+        polygon, grounded = [[0, 0], [rr, 0], [rr, lz], [0, lz]], [0, 1, 2]
     return Project.model_validate(
         {
-            "coord": "rz",
+            "coord": coord,
             "geometry": {
-                "domain": {"polygon": [[0, 0], [lz, 0], [lz, rr], [0, rr]]},
-                # エッジ0 (y=0) は対称軸 = 自然境界。1: z=lz、2: r=rr、3: z=0
-                "boundaries": [{"edges": [1, 2, 3], "type": "dirichlet", "voltage": 0.0}],
+                "domain": {"polygon": polygon},
+                "boundaries": [{"edges": grounded, "type": "dirichlet", "voltage": 0.0}],
             },
             "mesh": {"size": mesh},
             "pic": pic,
@@ -153,6 +165,66 @@ def test_rz_free_particle_centrifugal():
     # 運動エネルギー保存 (無場なので |v| 一定)
     v2 = float(np.sum(el.v[0] ** 2))
     assert abs(v2 - vth0**2) / vth0**2 < 0.01
+
+
+# ---- 3b. 軸のすぐ近くの粒子 (回転法) ---------------------------------------------
+
+
+@pytest.mark.parametrize("coord", ["rz", "rz_x0"])
+@pytest.mark.parametrize("vtheta", [1.0e6, 0.0])
+@pytest.mark.parametrize("jit", [True, False], ids=["numba", "numpy"])
+def test_rz_near_axis_particle_stays_bounded(monkeypatch, jit, vtheta, coord):
+    """軸から 0.1 µm の電子が軸のそばを通る: 1 ステップの子午面の変位は |v|·dt 以下で、無場では 3D の直線運動
+    r(t) = √((r0 + vr t)² + (vθ t)²)、z(t) = z0 + vz t を丸め誤差でなぞる (|v| と L = r·vθ も一定)。
+
+    vθ = 0 は軸を通り抜ける粒子で、従来の軸の鏡映 (r → |r0 + vr t|、vr → −vr) と同じになる。
+    旧方式 (遠心力 vθ²/r を今の位置で評価) では、最初のステップに L²/r³ の蹴り (Δvr ≈ 10⁹ m/s) で
+    約 0.1 m 飛んで領域から消えた。
+    """
+    if not jit:
+        monkeypatch.setattr(_numba_kernels, "HAVE_NUMBA", False)
+    elif not _numba_kernels.HAVE_NUMBA:
+        pytest.skip("numba がない環境")
+    r0, z0 = 1e-7, 0.01
+    vz, vr = 2.0e5, -3.0e5
+    dt, n_steps = 1e-10, 60
+    project = _cylinder_project(
+        0.02, 0.01, 1e-3, {"n_macro": 100, "dt": dt, "n_steps": n_steps, "frame_every": 1000}, coord
+    )
+    sim = PicSimulation(project)
+    ri = sim.ridx  # 径方向の成分 (rz: 1、rz_x0: 0)
+    zi = 1 - ri
+
+    el = sim.species["electron"]
+    el.x = np.zeros((1, 2))
+    el.x[0, ri], el.x[0, zi] = r0, z0
+    el.v = np.zeros((1, 3))
+    el.v[0, ri], el.v[0, zi], el.v[0, 2] = vr, vz, vtheta
+    el.w = np.array([1e-6])  # 自己場で |v| が目に見えて変わらないほど小さい重み
+    el.elem = _locate_initial(sim.coeffs, el.x)
+    el.bary = None
+    el.nidx = None
+
+    speed = math.sqrt(vz**2 + vr**2 + vtheta**2)
+    for _ in range(n_steps):
+        x_prev = el.x[0].copy()
+        sim.step()
+        assert len(el.x) == 1  # 吸収されない (領域の外へ飛ばない)
+        assert float(np.linalg.norm(el.x[0] - x_prev)) <= speed * dt * (1.0 + 1e-9)
+        assert el.x[0, ri] >= 0.0
+
+    t = n_steps * dt
+    xr, yt = r0 + vr * t, vtheta * t  # 3D の直線運動の (径, 周) 成分
+    r_exact = math.hypot(xr, yt)
+    assert xr < 0.0  # 軸の反対側まで動く設定 (vθ = 0 なら軸を通り抜ける)
+    assert el.x[0, ri] == pytest.approx(r_exact, rel=1e-9)
+    assert el.x[0, zi] == pytest.approx(z0 + vz * t, rel=1e-12)
+    assert float(np.linalg.norm(el.v[0])) == pytest.approx(speed, rel=1e-9)
+    assert el.v[0, zi] == pytest.approx(vz, rel=1e-9)
+    # 3D の速度 (vr, vθ) を今の位置の局所座標で見た成分
+    assert el.v[0, ri] == pytest.approx((xr * vr + yt * vtheta) / r_exact, rel=1e-9)
+    assert el.v[0, 2] == pytest.approx((xr * vtheta - yt * vr) / r_exact, rel=1e-9, abs=1e-9)
+    assert el.x[0, ri] * el.v[0, 2] == pytest.approx(r0 * vtheta, rel=1e-9, abs=1e-12)
 
 
 # ---- 4. 軸方向プラズマ振動 -------------------------------------------------------

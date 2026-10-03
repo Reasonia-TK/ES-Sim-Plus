@@ -413,7 +413,7 @@ def test_fused_gather_push_walk_matches_separate_kernels():
 @requires_numba
 @pytest.mark.parametrize("ridx", [0, 1])
 def test_fused_rz_gather_push_walk_matches_numpy(ridx):
-    """軸対称融合カーネルがrz/rz_x0の従来演算順とビット単位で一致する。"""
+    """軸対称融合カーネル (回転法) がrz/rz_x0のnumpy経路の演算順とビット単位で一致する。"""
     mesh = _demo_mesh()
     coeffs = P._barycentric_coeffs(mesh.nodes, mesh.triangles)
     adjacency = P._adjacency(mesh.triangles)
@@ -422,32 +422,43 @@ def test_fused_rz_gather_push_walk_matches_numpy(ridx):
     rng = np.random.default_rng(470 + ridx)
     n = 30_000
     x = rng.uniform([0.0, 0.0], [0.02, 0.01], size=(n, 2))
+    # 軸のごく近く・軸上の粒子と vθ = 0 の粒子も混ぜる (r = 0 で回転しない分岐も踏ませる)
+    x[:200, ridx] *= 1e-6
+    x[200:210, ridx] = 0.0
     elem = P._locate_initial(coeffs, x)
     v = rng.normal(0.0, 4.0e5, size=(n, 3))
     v[:, 2] *= 0.125
+    v[200:220, 2] = 0.0
+    v[200:205, ridx] = 0.0
     exy = rng.normal(0.0, 1.0e3, size=(len(mesh.triangles), 2))
+    exy[elem[200:205], ridx] = 0.0
     q = -P.QE
     m = P.ME
     dt_sp = 2.0e-10
 
-    # PicSimulation.step の従来numpy軸対称経路と演算順を揃えた参照値。
+    # PicSimulation.step の numpy 軸対称経路 (回転法) と演算順を揃えた参照値。
     e_at = exy[elem]
     v_ref = v.copy()
-    a_rz = (q / m) * e_at
-    r_cur = np.maximum(x[:, ridx], 1e-30)
-    ang_l = x[:, ridx] * v[:, 2]
-    a_rz[:, ridx] += v[:, 2] ** 2 / r_cur
-    v_ref[:, :2] += dt_sp * a_rz
+    v_ref[:, :2] += dt_sp * ((q / m) * e_at)
     vdot_ref = (
         v[:, 0] * v_ref[:, 0] + v[:, 1] * v_ref[:, 1]
     ) + v[:, 2] * v_ref[:, 2]
     x_ref = x + dt_sp * v_ref[:, :2]
-    cross = x_ref[:, ridx] < 0.0
-    x_ref[cross, ridx] = -x_ref[cross, ridx]
-    v_ref[cross, ridx] = -v_ref[cross, ridx]
-    ang_l[cross] = -ang_l[cross]
-    r_new = np.maximum(x_ref[:, ridx], 1e-30)
-    v_ref[:, 2] = np.where(ang_l != 0.0, ang_l / r_new, 0.0)
+    xr = x_ref[:, ridx]
+    yt = dt_sp * v_ref[:, 2]
+    cross = xr < 0.0  # 3D の直線移動が軸を越える粒子 (回転角が 90° を超える)
+    r_new = np.sqrt(xr * xr + yt * yt)
+    moved = r_new > 0.0
+    r_div = np.where(moved, r_new, 1.0)
+    cos_a = np.where(moved, xr / r_div, 1.0)
+    sin_a = np.where(moved, yt / r_div, 0.0)
+    vr = v_ref[:, ridx]
+    vt = v_ref[:, 2]
+    vr_rot = cos_a * vr + sin_a * vt
+    vt_rot = -sin_a * vr + cos_a * vt
+    v_ref[:, ridx] = vr_rot
+    v_ref[:, 2] = vt_rot
+    x_ref[:, ridx] = r_new
 
     l_ref = np.empty((n, 3))
     e_ref, a_ref, be_ref, bl_ref = nk.walk_step(
@@ -468,6 +479,8 @@ def test_fused_rz_gather_push_walk_matches_numpy(ridx):
     assert np.array_equal(bl_ref[a_ref], bl_fused[a_fused])
     assert np.array_equal(l_ref[~a_ref], l_fused[~a_fused])
     assert 0 < int(cross.sum()) < n
+    assert 0 < int((~moved).sum()) < n
+    assert np.all(x_fused[:, ridx] >= 0.0)
     assert 0 < int(a_ref.sum()) < n
 
 

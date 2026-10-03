@@ -260,9 +260,15 @@ def test_charge_identity_pic2d(coord):
     assert max(worst) < 1e-11
 
 
-def test_charge_conservation_pic2d():
-    """全ての電極にコンデンサ: Σ Q_N + 粒子 + 誘電体の表面電荷が丸め誤差で一定 (吸収・二次電子・誘電体あり)。"""
-    sim = PicSimulation(_project_2d(**_caps("xy")))
+@pytest.mark.parametrize("coord", ["xy", "rz"])
+def test_charge_conservation_pic2d(coord):
+    """全ての電極にコンデンサ: Σ Q_N + 粒子 + 誘電体の表面電荷が丸め誤差で一定 (吸収・二次電子・誘電体あり)。
+
+    電極でも誘電体でもない辺は対称 (反射) なので、壁へ行った電荷は全て Q_N か表面電荷に入る。軸対称では軸
+    (y = 0) と外周 (y = H) が対称の辺: 押し出しが回転法になる前は、軸のすぐ近くの粒子が遠心力の項 vθ²/r で
+    1 ステップに領域の何倍も飛び、外周で反射しきれずに対称の辺で消えて保存が破れていた。
+    """
+    sim = PicSimulation(_project_2d(**_caps(coord), coord=coord))
 
     def total():
         q = sum(sp.q * float(sp.w.sum()) for sp in sim.species.values())
@@ -273,9 +279,12 @@ def test_charge_conservation_pic2d():
     for _ in range(800):
         sim.step()
     w0 = float(sim.species["ion"].w.mean())
-    absorbed = (sim.species["electron"].wall_absorbed + sim.species["ion"].wall_absorbed) * w0 * 1.602176634e-19
-    assert sim.see_events > 0 and float(sim.q_surf.sum()) != 0.0 and absorbed > 1e-9
+    n_abs = sim.species["electron"].wall_absorbed + sim.species["ion"].wall_absorbed
+    absorbed = n_abs * w0 * 1.602176634e-19  # 平面は C/m、軸対称は C (リングの重みは小さい)
+    assert sim.see_events > 0 and float(sim.q_surf.sum()) != 0.0 and n_abs > 500
     assert abs(total() - q0) < 1e-12 * absorbed
+    for sp in sim.species.values():  # どの粒子も領域の中 (walk の許容誤差の分だけ余裕を見る)
+        assert np.all((sp.x >= -1e-9) & (sp.x <= [W + 1e-9, H + 1e-9]))
 
 
 def test_large_capacitance_matches_direct_coupling_pic2d():

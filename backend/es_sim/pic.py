@@ -101,9 +101,6 @@ SORT_MIN_ELEMS = 4000
 # walk 並列実行用の共有ワーカースレッド (遅延生成、プロセスで1本)
 _WALK_POOL: ThreadPoolExecutor | None = None
 
-# 軸上 (r=0) のゼロ割ガード (particles.py の trace と同じ値)
-_R_TINY = 1e-30
-
 # FN 電界放出の1ステップあたりの放出マクロ電子数の上限 (prompts/53)。
 # 強電界 + 小さい macro_weight では I·dt/(e·w) が天文学的な数になり得るため、
 # 超過時はマクロ重みを引き上げて粒子数をこの上限に抑える (総電荷は保存)
@@ -813,7 +810,8 @@ class PicSimulation:
         self._walk_diag_n = {"e": 0, "i": 0}        # 上のサンプル数 (frame 間隔)
 
         # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ) --------------
-        # E は vx, vy のみに作用する (vz は不変)
+        # E は vx, vy のみに作用する (vz は不変)。軸対称も同じ (回転法の速度は粒子の位置の
+        # 局所直交座標の成分なので遠心力の項は入らない。v2 の GPU PIC と同じ)
         phi0 = self._solve_phi(self._deposit(), 0.0)
         ex, ey = self._e_field(phi0)
         for sp in self.species.values():
@@ -821,14 +819,7 @@ class PicSimulation:
                 # サブサイクル時のイオンは実効時間刻み _sub·dt で後退させる
                 dt_sp = self.dt * self._sub if (sp.name == "ion" and self._sub > 1) else self.dt
                 e_at = np.stack([ex[sp.elem], ey[sp.elem]], axis=1)
-                if self.rz:
-                    # 軸対称: 遠心力項も含めて半ステップ後退させる
-                    a0 = (sp.q / sp.m) * e_at
-                    r0 = np.maximum(sp.x[:, self.ridx], _R_TINY)
-                    a0[:, self.ridx] += sp.v[:, 2] ** 2 / r0
-                    sp.v[:, :2] -= 0.5 * dt_sp * a0
-                else:
-                    sp.v[:, :2] -= 0.5 * dt_sp * (sp.q / sp.m) * e_at
+                sp.v[:, :2] -= 0.5 * dt_sp * (sp.q / sp.m) * e_at
 
     # ---- 内部処理 -----------------------------------------------------------
 
@@ -1612,14 +1603,8 @@ class PicSimulation:
         e_at = np.stack([ex[elem], ey[elem]], axis=1)
         # イオン注入 + サブサイクル時は実効刻み _sub·dt で後退させる
         dt_inj = self.dt * self._sub if (inj.species == "ion" and self._sub > 1) else self.dt
-        if self.rz:
-            # 軸対称: 遠心力項 (maxwell 注入では vθ ≠ 0) も含めて半ステップ後退
-            a0 = (sp.q / sp.m) * e_at
-            r0 = np.maximum(self._inj_pos[:, self.ridx], _R_TINY)
-            a0[:, self.ridx] += v[:, 2] ** 2 / r0
-            v[:, :2] -= 0.5 * dt_inj * a0
-        else:
-            v[:, :2] -= 0.5 * dt_inj * (sp.q / sp.m) * e_at
+        # 軸対称も E だけで後退させる (回転法なので遠心力の項は入らない。初期の後退キックと同じ)
+        v[:, :2] -= 0.5 * dt_inj * (sp.q / sp.m) * e_at
         n = len(elem)
         sp.x = np.concatenate([sp.x, self._inj_pos])
         sp.v = np.concatenate([sp.v, v])
@@ -2090,7 +2075,7 @@ class PicSimulation:
             dt_sp = dt * self._sub if (sp.name == "ion" and self._sub > 1) else dt
             if fuse_push_walk:
                 # gather・push・walkを1つのnjitループに融合する。軸対称では
-                # 軸鏡映と角運動量補正も含め、各粒子内の演算順を従来経路と揃える。
+                # 回転法の移動と回転も含め、各粒子内の演算順をnumpy経路と揃える。
                 if self.rz:
                     fused_kernel = _numba_kernels.gather_push_walk_rz
                     fused_args = (self.ridx,)
@@ -2131,16 +2116,11 @@ class PicSimulation:
                 continue
             e_at = exy[sp.elem]
             v_new = sp.v.copy()
-            ang_l = None
             if self.rz:
-                # 軸対称プッシュ (prompts/47): 遠心力項 vθ²/r を現在位置で評価して
-                # 径方向加速度に加える (trace と同じ半陰的規約)。v[:, 2] は vθ
-                ridx = self.ridx
-                a_rz = (sp.q / sp.m) * e_at
-                r_cur = np.maximum(sp.x[:, ridx], _R_TINY)
-                ang_l = sp.x[:, ridx] * sp.v[:, 2]  # 角運動量 L = r·vθ (保存量)
-                a_rz[:, ridx] += sp.v[:, 2] ** 2 / r_cur
-                v_new[:, :2] += dt_sp * a_rz
+                # 軸対称プッシュ (回転法、v2 の kernels/pic.cu の push と同じ): 速度は粒子の位置の
+                # 局所直交座標 (軸・径・周) の成分で、v[:, 2] は vθ。ここでは E だけで蹴り、移動の後に
+                # 子午面へ回転する (下)。遠心力の項 vθ²/r は使わない (軸の近くで L²/r³ が発散するため)
+                v_new[:, :2] += dt_sp * ((sp.q / sp.m) * e_at)
             elif self._b is not None:
                 # 一様磁場 (prompts/51):
                 # Boris 法 (半キック E → 回転 B → 半キック E)
@@ -2162,16 +2142,26 @@ class PicSimulation:
             if sp.name == "ion":
                 self._last_ke_i = ke[sp.name]
             if self.rz:
-                # 軸交差 (r < 0): 径座標・径速度・vθ (= L の符号) を鏡映してから
-                # walk する (軸 r=0 は境界メッシュエッジだが吸収させない)
-                cross = x_new[:, self.ridx] < 0.0
-                if np.any(cross):
-                    x_new[cross, self.ridx] = -x_new[cross, self.ridx]
-                    v_new[cross, self.ridx] = -v_new[cross, self.ridx]
-                    ang_l[cross] = -ang_l[cross]
-                # 角運動量保存: 移動後の位置で vθ = L/r を更新する
-                r_new = np.maximum(x_new[:, self.ridx], _R_TINY)
-                v_new[:, 2] = np.where(ang_l != 0.0, ang_l / r_new, 0.0)
+                # 回転法: 局所座標で 3D の直線移動 (径 r + vr·dt、周 vθ·dt) をして新しい半径へ移し、
+                # (vr, vθ) を同じ角だけ回して新しい位置の局所座標に直す。角運動量 r·vθ と |v| は厳密に
+                # 保存し、子午面の変位は |v|·dt を超えない。軸を越える移動 (r + vr·dt < 0) も r ≥ 0 の
+                # まま扱え (軸 r=0 は境界メッシュエッジだが吸収させない)、vθ = 0 では従来の軸の鏡映
+                # (r → −r、vr → −vr) と一致する。融合カーネル (_numba_kernels) と演算順をそろえる
+                ridx = self.ridx
+                xr = x_new[:, ridx]
+                yt = dt_sp * v_new[:, 2]
+                r_new = np.sqrt(xr * xr + yt * yt)
+                moved = r_new > 0.0
+                r_div = np.where(moved, r_new, 1.0)
+                cos_a = np.where(moved, xr / r_div, 1.0)
+                sin_a = np.where(moved, yt / r_div, 0.0)
+                vr = v_new[:, ridx]
+                vt = v_new[:, 2]
+                vr_rot = cos_a * vr + sin_a * vt
+                vt_rot = -sin_a * vr + cos_a * vt
+                v_new[:, ridx] = vr_rot
+                v_new[:, 2] = vt_rot
+                x_new[:, ridx] = r_new
             pushed.append((sp, v_new, x_new, np.empty((len(x_new), 3))))
             compact_weight_buffers.append(None)
         t_push1 = time.perf_counter()
