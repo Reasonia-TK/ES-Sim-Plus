@@ -7,7 +7,7 @@
 5. 対称な放電 (両側の γ が同じ、1 周波) では自己バイアスが小さく、0 へ向かう。
 6. 電気的非対称効果 (EAE、13.56 + 27.12 MHz): θ = 0° で負、90° で正。
 7. 続き実行はビット一致し、コンデンサの状態を引き継ぐ。結果とフレームに circuit が載る。
-8. スキーマの制約と、まだ対応していないエンジンのエラー。
+8. スキーマの制約と、全てのエンジンが回路を組むこと。
 """
 
 from __future__ import annotations
@@ -19,7 +19,8 @@ import numpy as np
 import pydantic
 import pytest
 
-from es_sim.circuit import BlockingCircuit, CapacitorSpec, blocking_capacitor_labels
+from es_sim.circuit import BlockingCircuit, CapacitorSpec
+from es_sim.device import cuda_available
 from es_sim.fem import EPS0
 from es_sim.fluid1d import Fluid1dSimulation, build_fluid1d_result
 from es_sim.pic1d import Pic1dSimulation, electrode_voltage
@@ -232,7 +233,7 @@ def test_result_and_frame_carry_circuit_1d():
     assert build_fluid1d_result(plain, elapsed_s=0.0)["circuit"] is None
 
 
-# ---- 8. スキーマ・未対応のエンジン ----------------------------------------------------------------
+# ---- 8. スキーマ・全てのエンジン ----------------------------------------------------------------
 
 
 def _project_2d(regions, boundaries):
@@ -257,11 +258,12 @@ def test_schema_allows_capacitor_only_on_electrodes():
           "blocking_capacitor": cap}],
         [{"edges": [1, 3], "type": "dirichlet", "blocking_capacitor": cap}],
     )
-    assert blocking_capacitor_labels(p) == ["edge1", "edge3", "rf"]
+    assert p.geometry.regions[0].blocking_capacitor.capacitance == 5e-9
+    assert p.geometry.boundaries[0].blocking_capacitor.capacitance == 5e-9
 
 
-def test_engines_without_support_reject_capacitor():
-    """v2 GPU PIC (直交格子) はまだ対応していないので実行の初めにエラー。PIC 1D・v1 PIC・流体は全て対応。"""
+def test_every_engine_builds_the_circuit():
+    """阻止コンデンサは全てのエンジン (流体 1D・2D、PIC 1D、v1 PIC、v2 GPU PIC) が回路を組む (GPU は使えるときだけ)。"""
     pic1d = Pic1dSettings(
         gap_m=GAP, init_density_m3=1e15, n_macro=100,
         left=Pic1dElectrode(blocking_capacitor=BlockingCapacitor1d(capacitance=1e-7)),
@@ -278,8 +280,8 @@ def test_engines_without_support_reject_capacitor():
         [{"edges": [1, 3], "type": "dirichlet"}],
     ).model_dump()
     pic = Project.model_validate({**base, "pic": {"dt": 1e-11}})
-    with pytest.raises(ValueError, match="v2 PIC .*はまだ阻止コンデンサ"):
-        make_pic_simulation(pic)
+    if cuda_available():
+        assert make_pic_simulation(pic).circuit.labels == ["rf"]
     pic.mesh.mode = "structured"
     assert make_pic_simulation(pic).circuit.labels == ["rf"]
     fluid = Project.model_validate({**base, "fluid2d": {"init_density_m3": 1e15, "gas_pressure_pa": 30.0}})

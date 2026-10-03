@@ -521,7 +521,8 @@ extern "C" __global__ void boundary(
     const int n_coll, const double* __restrict__ coll, const double mass,
     double* __restrict__ rec_e, double* __restrict__ rec_a, double* __restrict__ rec_w,
     unsigned long long* __restrict__ rec_n, double* __restrict__ coll_w, const long long rec_cap,
-    const double* __restrict__ prm, const unsigned long long seed ES_GRID_PARAMS)
+    const double* __restrict__ prm, const unsigned long long seed,
+    const int* __restrict__ side_elec, const int* __restrict__ cond_elec, double* __restrict__ cap_dq ES_GRID_PARAMS)
 {
     const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     const long long n = (long long)cnt[species == 0 ? C_NE : C_NI];
@@ -598,6 +599,7 @@ extern "C" __global__ void boundary(
     }
     double hx = px, hy = py, nxn = 0.0, nyn = 0.0, gam = 0.0;
     int diel = -1;
+    int elec = -1;  // blocking-capacitor electrode that receives the charge (prompts/134), -1 = none
     if (st <= 4) {
         double f;
         if (st == 1 || st == 2) {
@@ -615,6 +617,7 @@ extern "C" __global__ void boundary(
         hx = ox + f * (px - ox);
         hy = oy + f * (py - oy);
         gam = side_gamma[st - 1];
+        elec = side_elec[st - 1];
     } else {
         const double dxs = px - ox, dys = py - oy;
         double best = 2.0;
@@ -671,14 +674,15 @@ extern "C" __global__ void boundary(
         if (nxn * dxs + nyn * dys > 0.0) { nxn = -nxn; nyn = -nyn; }
         hx = ox + best * dxs;
         hy = oy + best * dys;
-        if (bkind == 1) gam = cond_gamma[bidx];
+        if (bkind == 1) { gam = cond_gamma[bidx]; elec = cond_elec[bidx]; }
         else if (bkind == 2) { gam = diel_gamma[bidx]; diel = bidx; }
     }
 
-    // (a) dielectric surface charge (RHS units: /2pi in RZ)
+    // (a) dielectric surface charge (RHS units: /2pi in RZ), or the charge of a blocking-capacitor electrode
     if (diel >= 0)
         es_dep_point(qsurf, hx, hy, qw_scale * wp * two_pi_inv, X0, Y0, inv_dx, inv_dy, nx, ny, pxp, pyp
                      ES_GRID_ARGS);
+    if (elec >= 0) atomicAdd(cap_dq + elec, qw_scale * wp);
 
     // (b) IEDF/IADF collectors (ions, averaging window)
     if (species == 1 && n_coll > 0 && prm[P_ACCUM] != 0.0) {
@@ -719,6 +723,7 @@ extern "C" __global__ void boundary(
                 if (diel >= 0)  // the surface loses an electron: +e*w
                     es_dep_point(qsurf, hx, hy, 1.602176634e-19 * wp * two_pi_inv, X0, Y0, inv_dx, inv_dy,
                                  nx, ny, pxp, pyp ES_GRID_ARGS);
+                if (elec >= 0) atomicAdd(cap_dq + elec, 1.602176634e-19 * wp);  // the electrode too
             } else {
                 atomicAdd(cnt + C_OVERFLOW, 1ull);
             }
@@ -1052,6 +1057,99 @@ extern "C" __global__ void sum_into(const double* __restrict__ a, const long lon
     for (long long k = (long long)blockIdx.x * blockDim.x + threadIdx.x; k < n; k += (long long)gridDim.x * blockDim.x)
         v += a[k];
     es_block_sum_atomic(v, out);
+}
+
+// ---------------------------------------------------------------------------
+// Blocking capacitors (self-bias, prompts/134). The circuit state lives on the
+// device so that the step stays one CUDA graph without host round trips:
+//   st[0:m] Q_N (node charge), st[m:2m] V_e, st[2m:3m] V_s (source),
+//   st[3m:4m] dQ of this step, st[4m:5m] induced charge Q_e0, st[5m] = 1 once Q_N is set.
+// Q_e0,j = sum_i W[j,i] (q_static + rho + q_surf)_i is the charge that the node charges
+// induce on electrode j with all electrodes at 0 V (Green reciprocity: W = -2pi psi~_j on
+// the uniform grid, the adjoint charge functional on the AMR composite grid), so
+// V_e = (C + C_b)^-1 (Q_N - Q_e0 + C_b V_s) is known before the right-hand side is
+// built and Poisson is solved once with it (exact even with fixed PCG iterations).
+// ---------------------------------------------------------------------------
+#define CAP_MAX 16
+
+// Partial sums of the induced charge: grid (nb, m) blocks of 256 threads, part[j * nb + b]
+// (summed in a fixed order by cap_solve, so the result is deterministic).
+extern "C" __global__ void cap_induced(const double* __restrict__ W, const double* __restrict__ qs,
+                                       const double* __restrict__ rho, const double* __restrict__ qsurf,
+                                       const long long n, double* __restrict__ part)
+{
+    __shared__ double sh[256];
+    const int j = blockIdx.y;
+    const double* w = W + (long long)j * n;
+    double s = 0.0;
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += (long long)gridDim.x * blockDim.x)
+        s += w[i] * (qs[i] + rho[i] + qsurf[i]);
+    sh[threadIdx.x] = s;
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) sh[threadIdx.x] += sh[threadIdx.x + o];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) part[j * gridDim.x + blockIdx.x] = sh[0];
+}
+
+// New electrode potentials, written into the group potentials vg (after eval_groups).
+// par: (C + C_b)^-1 (m*m), C (m*m), C_b (m), initial bias (m).
+// grp: m+1 offsets (absolute indices into grp) followed by the group numbers of each electrode.
+extern "C" __global__ void cap_solve(double* __restrict__ st, double* __restrict__ vg,
+                                     const double* __restrict__ par, const int* __restrict__ grp,
+                                     const double* __restrict__ part, const int nb, const int m)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const double* ainv = par;
+    const double* c = par + m * m;
+    const double* cb = par + 2 * m * m;
+    const double* bias = cb + m;
+    double* q = st;
+    double* v = st + m;
+    double* vs = st + 2 * m;
+    double* qind = st + 4 * m;
+    for (int j = 0; j < m; ++j) {
+        double s = 0.0;
+        for (int b = 0; b < nb; ++b) s += part[j * nb + b];
+        qind[j] = s;
+        vs[j] = vg[grp[grp[j]]];
+    }
+    if (st[5 * m] == 0.0) {  // first solve: V_e = V_s + bias (circuit.BlockingCircuit.initial_charge)
+        for (int j = 0; j < m; ++j) {
+            double s = qind[j] + cb[j] * bias[j];
+            for (int k = 0; k < m; ++k) s += c[j * m + k] * (vs[k] + bias[k]);
+            q[j] = s;
+        }
+        st[5 * m] = 1.0;
+    }
+    double r[CAP_MAX];
+    for (int j = 0; j < m; ++j) r[j] = q[j] - qind[j] + cb[j] * vs[j];
+    for (int j = 0; j < m; ++j) {
+        double s = 0.0;
+        for (int k = 0; k < m; ++k) s += ainv[j * m + k] * r[k];
+        v[j] = s;
+        for (int g = grp[j]; g < grp[j + 1]; ++g) vg[grp[g]] = s;
+    }
+}
+
+// End of the step: Q_N += dQ (absorbed and emitted charge counted by the boundary kernel),
+// history row (V_e, dQ/dt) in the device ring buffer, dQ = 0.
+extern "C" __global__ void cap_step(double* __restrict__ st, double* __restrict__ hist, const int n_rows,
+                                    const double* __restrict__ prm, const int m)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const long long step = (long long)prm[P_STEP];
+    double* row = hist + (step % n_rows) * 2 * m;
+    const double dt = prm[P_DT];
+    for (int j = 0; j < m; ++j) {
+        const double dq = st[3 * m + j];
+        st[j] += dq;
+        row[j] = st[m + j];
+        row[m + j] = dq / dt;
+        st[3 * m + j] = 0.0;
+    }
 }
 
 // ---------------------------------------------------------------------------

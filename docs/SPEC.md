@@ -214,9 +214,9 @@ SI(長さm、電位V、電荷C)。UI上は mm 表示の切り替えを持つ(内
 - **阻止コンデンサ (自己バイアス、prompts/134)**: 導体・Dirichlet 辺・1D の電極に `blocking_capacitor`
   (容量・初期バイアス) を付けると、電源と電極の間に直列のコンデンサを置き、電極の直流電位が放電に合わせて
   決まる (Vahedi & DiPeso 1997 の電位と回路の同時解、`circuit.py`)。容量の単位は座標系の電荷の単位
-  (平面 2D は奥行き 1 m あたり F/m、軸対称は F、1D は面積あたり F/m²)。流体・PIC 1D・v1 PIC が使い、
-  v2 PIC (直交格子) はまだ使えない (付けて実行するとエラー)。PIC は電極の電荷を Green の相反定理 (誘導電荷
-  −ψ̃·q) で求め、Poisson の前に電極の電位を決める。静電場の計算 (/solve) は無視する
+  (平面 2D は奥行き 1 m あたり F/m、軸対称は F、1D は面積あたり F/m²)。流体・PIC (1D・2D、v1・v2・AMR) の全てが
+  使う。PIC は電極の電荷を Green の相反定理 (誘導電荷 −ψ̃·q) で求め、Poisson の前に電極の電位を決める (v2 の GPU
+  PIC は回路もデバイスで進める)。静電場の計算 (/solve) は無視する
 - 粒子種: 電子+イオン(質量 amu 指定、検証用にイオン固定オプション)の2種を常時管理
 - **MCC衝突**(実装済み): 背景中性ガス(一様圧力[Pa]・温度[K]指定)との null-collision 法。
   電子: 弾性(2m/M損失)・励起(閾値損失)・電離(新e+新イオン生成、余剰エネルギー乱数分配)。
@@ -243,7 +243,7 @@ SI(長さm、電位V、電荷C)。UI上は mm 表示の切り替えを持つ(内
     "domain": { "polygon": [[0,0],[0.1,0],[0.1,0.1],[0,0.1]], "bulges": [0, 0, 0.2, 0], "edge_ids": ["e1", "e2", "e3", "e4"] },
     "regions": [
       { "id": "anode", "type": "conductor", "polygon": [...], "voltage": 1000.0 },
-      // blocking_capacitor: 電源との間の阻止コンデンサ (自己バイアス、v2 PIC 以外。容量は軸対称で F、平面 2D で F/m)
+      // blocking_capacitor: 電源との間の阻止コンデンサ (自己バイアス。容量は軸対称で F、平面 2D で F/m)
       { "id": "rf", "type": "conductor", "polygon": [...], "voltage": 0.0,
         "voltage_rf": { "amplitude": 100.0, "freq_hz": 13.56e6 }, "blocking_capacitor": { "capacitance": 5e-9, "initial_bias_v": 0.0 } },
       { "id": "wire",  "type": "conductor", "shape": { "kind": "circle", "center": [0.05, 0.02], "radius": 0.005 }, "voltage": -200.0 },

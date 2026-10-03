@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 import scipy.sparse.linalg as spla
 
+from ..amr.composite import electrode_charge_functionals
 from ..amr.hierarchy import AmrHierarchy, AmrSpec
 from ..circuit import BlockingCircuit
 from ..field.electrostatic import group_voltages
@@ -157,30 +158,8 @@ class AmrFluid2dSimulation(CartesianFluid2dSimulation):
         for j, groups in enumerate(self._cap_groups):
             group_elec[groups] = j
         self._cap_factor = 2.0 * np.pi if self.rz else 1.0
-        # 未知番号 → 節点番号
-        unk = np.nonzero(op.fixed_group < 0)[0]
-        node_of_u = np.empty(unk.size, dtype=np.int64)
-        node_of_u[op.u_of_node[unk]] = unk
-        a = np.zeros((m, N))
-        b = np.zeros((m, K))
-        c = np.zeros((m, N))
-        ej = group_elec[op.coup_grp] if op.coup_grp.size else np.zeros(0, dtype=np.int64)
-        for j in range(m):
-            # Dirichlet 結合の電束 Σ g (V − φ_u)
-            s = ej == j
-            np.add.at(a[j], node_of_u[op.coup_u[s]], -op.coup_g[s])
-            np.add.at(b[j], op.coup_grp[s], op.coup_g[s])
-            # ぶら下がり節点の拘束反力 (Cᵀ r)_j、r = A_full φ_U − coup_full V − q_U
-            if op.C.nnz:
-                cols = np.zeros(op.C.shape[1])
-                cols[self._cap_groups[j]] = 1.0
-                w = np.asarray(op.C @ cols).ravel()
-                a[j][node_of_u] += op.A_full.T @ w
-                b[j] -= op.coup_full.T @ w
-                c[j][node_of_u] -= w
-            # 電極の固定節点の電荷 (Poisson は見ない) を引く
-            fixed = np.nonzero((op.fixed_group >= 0) & (group_elec[np.maximum(op.fixed_group, 0)] == j))[0]
-            c[j][fixed] -= 1.0
+        # 電極の電荷の線形汎関数 Q = a·φ + b·V + c·q (結合の電束 + ぶら下がり節点の拘束反力 − 固定節点の電荷)
+        a, b, c = electrode_charge_functionals(op, self._cap_groups)
         self._cap_a, self._cap_b, self._cap_c = a, b, c
         # ψ_j: 合成格子の未知 x_ψ と全節点 φ_ψ (空間電荷 0)。GPU 版は CPU の解法を持たないので、ここだけ
         # 疎行列の直接法 (大きければ AMG-CG) で解く

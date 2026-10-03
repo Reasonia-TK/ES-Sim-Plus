@@ -50,6 +50,16 @@ RF 位相分解、イオンサブサイクリング、quiet start、既定 dt = 
   入射と逆方向の近似)。
 - 時間平均の電子温度: 双一次重みで堆積した w·v² から評価 (v1 は P1 重み)。
 
+## 阻止コンデンサ (自己バイアス、prompts/134)
+
+回路もデバイスで進め、1 ステップは CUDA Graph のまま: 堆積のあと cap_induced が節点の電荷の誘導電荷
+Q_e0 = Σ W·q (Green の相反定理。一様格子は W = −2π ψ̃、AMR は合成格子の電極の電荷の汎関数を随伴で解いた重み) を
+電極ごとに決定的な和で求め、cap_solve が V_e = (C + C_b)⁻¹ (Q_N − Q_e0 + C_b V_s) をグループ電位 vg に書く
+(右辺を組む前なので Poisson は 1 回、V_e は PCG の反復回数によらない)。境界のカーネルが吸収した粒子と電極から
+出た二次電子の電荷を電極ごとに atomicAdd で数え、cap_step が Q_N に足して V_e・電流をデバイスの履歴に書く。
+周期の集計 (V_dc・|V1|・I_dc) はホストの circuit.BlockingCircuit が履歴を読むとき (_flush_history) に行う。
+AMR の再格子化では W と容量行列を作り直す (Q_N はそのまま)。
+
 未対応 (指定するとエラー): 粒子注入 (injection)、FN 電界放出、粒子マージ、
 DSMC ガス場連成 (use_dsmc_gas)。
 """
@@ -63,10 +73,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..circuit import reject_blocking_capacitors
+from ..circuit import BlockingCircuit, model_capacitor_electrodes, rf_period
 from ..device import Device, get_device
-from ..eb.build import MASK_FIXED
+from ..eb.build import MASK_FIXED, MASK_SLAVE
 from ..eb.grid import make_grid
+from ..field.electrostatic import fill_fixed
 from ..field.gmg import GMGSolver
 from ..geom.model import EPS0, GeometryModel
 from ..mcc import MccModel
@@ -101,6 +112,12 @@ PCG_TOL = 1e-8
 MONITOR_EVERY = 64
 #: 動的再格子化のタグ用に電子の密度・温度を積算する間隔 [ステップ]
 TAG_EVERY = 8
+#: 阻止コンデンサ (prompts/134): 電極の数の上限 (kernels/pic.cu の CAP_MAX)、誘導電荷の部分和のブロック数、
+#: ψ の Poisson の収束判定、合成格子の ψ を疎行列の直接法で解く未知数の上限 (超えたら AMG-CG)
+CAP_MAX = 16
+CAP_NB = 64
+CAP_PSI_TOL = 1e-12
+CAP_HOST_DIRECT_MAX = 240_000
 
 _BLOCK = 256
 _HIST_COLS = (
@@ -165,7 +182,6 @@ class GpuPicSimulation:
     def __init__(self, project: Project, gas_field=None, device: Device | str | None = None):
         if project.pic is None:
             raise ValueError("project.pic が指定されていません")
-        reject_blocking_capacitors(project, "v2 PIC (直交格子)")
         dev = device if isinstance(device, Device) else get_device(device or "cuda")
         if not dev.is_gpu:
             raise RuntimeError(
@@ -208,7 +224,8 @@ class GpuPicSimulation:
         mod = load_module("pic", ("ES_AMR",) if self.amr is not None else ())
         names = ["begin_step", "end_step", "eval_groups", "push", "boundary", "deposit", "accum_phi",
                  "deposit_cell", "vmax2", "numax_lookup", "mcc_electron", "mcc_ion", "history_row",
-                 "sum_into", "eedf_hist", "compact_scan", "compact_scan_blocks", "compact_scatter"]
+                 "sum_into", "eedf_hist", "compact_scan", "compact_scan_blocks", "compact_scatter",
+                 "cap_induced", "cap_solve", "cap_step"]
         if self.amr is None:
             names += ["rhs_base", "rhs_coupling", "fill_phi", "efield_nodes", "edge_energy"]
         else:
@@ -566,6 +583,9 @@ class GpuPicSimulation:
         self._init_collectors()
         self._init_eedf()
 
+        # ---- 阻止コンデンサ (prompts/134) ----
+        self._init_circuit()
+
     def _setup_amr_fields(self, lay) -> None:
         """AMR の場の表・行列・体積を GPU へ (初期化と再格子化で共通)。"""
         cp = self.cp
@@ -769,6 +789,8 @@ class GpuPicSimulation:
                           np.float64(sp.q / self._two_pi), self._rho, self._rho, np.int32(0), np.int64(n),
                           np.int32(0), self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py),
                           *self._gx))
+        if self.circuit is not None:
+            self._launch_circuit()
         if self.amr is not None:
             self._launch_field_amr()
             return
@@ -837,7 +859,7 @@ class GpuPicSimulation:
             el.x, el.y, el.vx, el.vy, el.vz, el.w, np.int64(el.cap),
             np.int32(self._n_coll), self._coll, np.float64(sp.m),
             self._rec_e, self._rec_a, self._rec_w, self._rec_n, self._coll_w, np.int64(COLLECTOR_MAX_SAMPLES),
-            self._prm, self._see_seed, *self._gx,
+            self._prm, self._see_seed, self._side_elec, self._cond_elec, self._cap_dq, *self._gx,
         ))
 
     def _launch_mcc(self) -> None:
@@ -921,6 +943,9 @@ class GpuPicSimulation:
             k["sum_into"]((64,), (_BLOCK,), (self._q_surf, np.int64(self.n_nodes), self._dsl[3:4]))
         k["history_row"]((1,), (1,), (self._hist, np.int32(HISTORY_ROWS), np.int32(len(_HIST_COLS)), self._prm,
                                       self._cnt, self._dsl, np.float64(0.5 * self._two_pi), np.float64(self._two_pi)))
+        if self.circuit is not None:
+            k["cap_step"]((1,), (1,), (self._cap_st, self._cap_hist, np.int32(HISTORY_ROWS), self._prm,
+                                       np.int32(self._cap_m)))
         k["end_step"]((1,), (1,), (self._prm,))
 
     def _run_one_step(self) -> None:
@@ -974,6 +999,143 @@ class GpuPicSimulation:
             qm = sp.q / sp.m
             sp.vx[:n] -= qm * interp(exf) * 0.5 * dt_s
             sp.vy[:n] -= qm * interp(eyf) * 0.5 * dt_s
+
+    # ======================================================================================
+    # 阻止コンデンサ (自己バイアス、prompts/134・モジュール docstring)
+    # ======================================================================================
+
+    def _init_circuit(self) -> None:
+        """電極の表 (外周の辺・導体 → 電極)、誘導電荷の重み W・容量行列、デバイスの回路の状態と履歴。"""
+        cp = self.cp
+        model = self.model
+        self.circuit: BlockingCircuit | None = None
+        self._cap_m = 0
+        elecs = model_capacitor_electrodes(self.project, model)
+        side_elec = np.full(4, -1, dtype=np.int32)
+        cond_elec = np.full(max(len(model.conductors), 1), -1, dtype=np.int32)
+        if elecs:
+            m = len(elecs)
+            if m > CAP_MAX:
+                raise ValueError(f"阻止コンデンサの電極は {CAP_MAX} 個までです ({m} 個)")
+            self._cap_m = m
+            self._cap_groups = [groups for _, groups in elecs]
+            group_elec = np.full(max(len(model.groups), 1), -1, dtype=np.int64)
+            for j, groups in enumerate(self._cap_groups):
+                group_elec[groups] = j
+            # 境界のカーネルの st 1〜4 (左・右・下・上) と導体の番号 (model.conductors の順) → 電極
+            for k, side in enumerate(("left", "right", "bottom", "top")):
+                g = model.side_group.get(side)
+                if g is not None:
+                    side_elec[k] = group_elec[g]
+            for k, g in enumerate(model.conductor_group):
+                cond_elec[k] = group_elec[g]
+            w, c_matrix = self._cap_weights()
+            self.circuit = BlockingCircuit([spec for spec, _ in elecs], c_matrix, rf_period(self.project))
+            self._cap_upload(w)
+            # グループの表: m+1 個の位置 (この配列の中の絶対位置) とグループ番号
+            flat: list[int] = []
+            off: list[int] = []
+            for groups in self._cap_groups:
+                off.append(m + 1 + len(flat))
+                flat.extend(groups)
+            off.append(m + 1 + len(flat))
+            self._cap_grp = cp.asarray(np.asarray(off + flat, dtype=np.int32))
+            self._cap_st = cp.zeros(5 * m + 1)
+            self._cap_part = cp.zeros(m * CAP_NB)
+            self._cap_hist = cp.zeros((HISTORY_ROWS, 2 * m))
+            self._cap_dq = self._cap_st[3 * m:4 * m]
+        else:
+            self._cap_st = cp.zeros(1)
+            self._cap_dq = self._cap_st  # 書かれない (電極が無いので境界のカーネルは数えない)
+        self._side_elec = cp.asarray(side_elec)
+        self._cond_elec = cp.asarray(cond_elec)
+
+    def _cap_weights(self) -> tuple[np.ndarray, np.ndarray]:
+        """誘導電荷の重み W (電極 × 全節点。Q_e0 = W·q、q は右辺の単位の節点の電荷) と容量行列 C。
+
+        どちらも物理の電荷の単位 (軸対称は 2π 込み、平面は奥行き 1 m あたり)。
+        一様格子: W_j = −2π ψ̃_j (ψ_j は電極 j のグループ 1 V・ほか 0 V・空間電荷 0 の解を GMG-PCG で解き、固定節点に
+        グループの電位を入れたもの。周期の従属節点は 0)。C_jk は ψ_k の解での電極 j の電荷 (結合の電束、v2 の流体と同じ)。
+        AMR: 電極の電荷の汎関数 Q_j = a_j·φ + b_j·V + c_j·q (amr.composite.electrode_charge_functionals) に
+        φ = P_node A_c⁻¹ (P_nodeᵀ q + coup_c V) + C_node V を入れ、随伴 y_j = A_c⁻¹ P_nodeᵀ a_j から
+        W_j = c_j + P_node y_j、C_jk = y_j·coup_c e_k + a_j·C_node e_k + b_j·e_k。
+        """
+        factor = self._two_pi
+        m = self._cap_m
+        if self.amr is None:
+            op = self.op
+            k_groups = op.coupling.shape[1]
+            group_elec = np.full(k_groups, -1, dtype=np.int64)
+            for j, groups in enumerate(self._cap_groups):
+                group_elec[groups] = j
+            coo = op.coupling.tocoo()
+            ej = group_elec[coo.col]
+            sel = ej >= 0
+            slave = (op.mask == MASK_SLAVE).ravel()
+            w = np.zeros((m, self.n_nodes))
+            c = np.zeros((m, m))
+            for k, groups in enumerate(self._cap_groups):
+                v = np.zeros(k_groups)
+                v[groups] = 1.0
+                b = np.asarray(op.coupling @ v).reshape(op.grid.shape)
+                x, info = self.solver.solve(self.cp.asarray(b), tol=CAP_PSI_TOL, max_iter=2000)
+                if not info.converged:
+                    self.warnings.append(
+                        f"阻止コンデンサの ψ の Poisson (GMG-PCG) が収束しませんでした (相対残差 {info.relative_residual:.2e})"
+                    )
+                psi = fill_fixed(op, self.cp.asnumpy(x), v).ravel()
+                w[k] = np.where(slave, 0.0, -factor * psi)
+                flux = coo.data * (v[coo.col] - psi[coo.row])
+                c[:, k] = factor * np.bincount(ej[sel], weights=flux[sel], minlength=m)
+            return w, c
+        from ..amr.composite import electrode_charge_functionals
+
+        lay = self.amr
+        n, n_c = lay.n_nodes, lay.n_c
+        a, b, cfun = electrode_charge_functionals(lay.op, self._cap_groups)
+        p_node = lay.PC[:, :n_c]
+        c_node = lay.PC[:, n_c:]
+        coup_c = lay.PTq[:, n:]
+        units = []
+        for groups in self._cap_groups:
+            u = np.zeros(lay.n_groups)
+            u[groups] = 1.0
+            units.append(u)
+        solve = _host_composite_solver(lay.op.A_c) if n_c else None
+        w = np.zeros((m, n))
+        c = np.zeros((m, m))
+        for j in range(m):
+            y = solve(np.asarray(p_node.T @ a[j]).ravel()) if n_c else np.zeros(0)
+            w[j] = factor * (cfun[j] + np.asarray(p_node @ y).ravel())
+            for k in range(m):
+                c[j, k] = factor * (y @ np.asarray(coup_c @ units[k]).ravel()
+                                    + a[j] @ np.asarray(c_node @ units[k]).ravel() + b[j] @ units[k])
+        return w, c
+
+    def _cap_upload(self, w: np.ndarray) -> None:
+        """誘導電荷の重みと回路の定数 ((C + C_b)⁻¹・C・C_b・初期バイアス) をデバイスへ。"""
+        cp = self.cp
+        circ = self.circuit
+        ainv = np.linalg.inv(circ.c + np.diag(circ.c_b))
+        self._cap_w = cp.asarray(np.ascontiguousarray(w, dtype=np.float64))
+        self._cap_par = cp.asarray(np.concatenate([ainv.ravel(), circ.c.ravel(), circ.c_b, circ.bias0]))
+
+    def _launch_circuit(self) -> None:
+        """堆積のあと: 誘導電荷 → 新しい電極の電位をグループ電位 vg へ (右辺を組む前、同期なし)。"""
+        m = self._cap_m
+        self._k["cap_induced"]((CAP_NB, m), (_BLOCK,), (self._cap_w, self._q_static, self._rho, self._q_surf,
+                                                       np.int64(self.n_nodes), self._cap_part))
+        self._k["cap_solve"]((1,), (1,), (self._cap_st, self._vg, self._cap_par, self._cap_grp, self._cap_part,
+                                         np.int32(CAP_NB), np.int32(m)))
+
+    def _flush_circuit(self, idx: np.ndarray, t: np.ndarray) -> None:
+        """デバイスの回路の履歴 (V_e・電流) を周期の集計へ、状態 (Q_N・V_e・V_s) をホストの回路へ (同期済みで呼ぶ)。"""
+        m = self._cap_m
+        rows = self._cap_hist.get()[idx]
+        for row, t0 in zip(rows, t):
+            self.circuit.record(row[:m], row[m:], float(t0), self.dt)
+        st = self._cap_st.get()
+        self.circuit.set_state(st[:m], st[m:2 * m], st[2 * m:3 * m])
 
     # ======================================================================================
     # 動的再格子化 (prompts/123)
@@ -1072,6 +1234,11 @@ class GpuPicSimulation:
                 self._x[: new.n_c] = cp.asarray(phi_new[new.node_of_c])
             self._set_amr_display(new)
             self._see_delta = 1e-3 * new.h_min
+            # 阻止コンデンサ: 新しい格子の誘導電荷の重みと容量行列 (Q_N はそのまま、prompts/134)
+            if self.circuit is not None:
+                w, c_matrix = self._cap_weights()
+                self.circuit.set_capacitance(c_matrix)
+                self._cap_upload(w)
             # 平均用の節点配列 (平均区間の前なので 0 のまま大きさだけ変える)
             self._acc_phi = cp.zeros(self._shape)
             self._acc_n = {"electron": cp.zeros(self._shape), "ion": cp.zeros(self._shape)}
@@ -1338,6 +1505,8 @@ class GpuPicSimulation:
         h["fn_i"].extend([0.0] * m)
         h["fn_events"].extend([0] * m)
         h["merged"].extend([0] * m)
+        if self.circuit is not None:
+            self._flush_circuit(idx, block[:, 0])
         self._hist_pending = 0
 
     def _check_solver(self) -> None:
@@ -1359,7 +1528,7 @@ class GpuPicSimulation:
         self.t += self.dt
         self._hist_pending += 1
         self._stream.synchronize()
-        if self._hist_pending >= HISTORY_ROWS:
+        if self._hist_pending >= HISTORY_ROWS or self.circuit is not None:
             self._flush_history()
         return self._phi
 
@@ -1387,6 +1556,8 @@ class GpuPicSimulation:
             "n_i": dens["ion"].tolist(),
             "particles": particles,
             "diag": diag,
+            # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
+            "circuit": None if self.circuit is None else self.circuit.frame(),
         }
         # 再格子化で表示用メッシュが変わったら、その後の最初のフレームに新しい格子を添える
         # (server は古いフレームを捨てるとき、この mesh を新しいフレームへ引き継ぐ)
@@ -1498,6 +1669,8 @@ class GpuPicSimulation:
             self._prm[P_NBINS] = float(max(self._cycle_bins, 1))
         self._flush_history()
         self.history = {key: [] for key in self.history}
+        if self.circuit is not None:
+            self.circuit.reset_history()  # 回路の状態 (コンデンサの電荷) はデバイスにあり、引き継ぐ
         self.timing = {key: 0.0 for key in self.timing}
         self._reset_accumulators()
         self._prm[P_ACC_START] = 1e300
@@ -1506,3 +1679,16 @@ class GpuPicSimulation:
         self.collector_results = None
         self.collector_result = None
         self.eedf_results = None
+
+
+def _host_composite_solver(a_c):
+    """合成格子の A_c の求解 (阻止コンデンサの随伴の重み用。中小規模は疎行列 LU、大きければ AMG-CG)。"""
+    if a_c.shape[0] <= CAP_HOST_DIRECT_MAX:
+        import scipy.sparse.linalg as spla
+
+        lu = spla.splu(a_c.tocsc(), permc_spec="MMD_AT_PLUS_A")
+        return lu.solve
+    import pyamg
+
+    ml = pyamg.smoothed_aggregation_solver(a_c, symmetry="symmetric", max_coarse=500)
+    return lambda rhs: ml.solve(rhs, tol=1e-12, accel="cg", maxiter=500)

@@ -702,3 +702,44 @@ def energy_and_charges(model: GeometryModel, op: CompositeOperator, phi: np.ndar
         q = q + (op.C.T @ r)[: vg.size]
     factor = 2.0 * np.pi if model.radial_axis() is not None else 1.0
     return factor * w, factor * q
+
+
+def electrode_charge_functionals(op: CompositeOperator, group_sets: list[list[int]],
+                                 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """電極 (グループの集まり) ごとの電荷の線形汎関数 Q_j = a_j·φ_all + b_j·V + c_j·q_all (2π なし)。
+
+    電荷は energy_and_charges と同じ「Dirichlet 結合の電束 + ぶら下がり節点の拘束反力 Cᵀr」から、電極の固定節点に
+    置かれた節点の電荷 q を引いたもの (阻止コンデンサ、prompts/134。Poisson は固定節点の電荷を見ないので、電極の
+    表面のすぐ外の層とみなす)。φ_all・q_all は全節点 (op.keys の順)、V はグループ電位 (K = coup_full の列数)。
+    戻り値: a (m, N)・b (m, K)・c (m, N)。
+    """
+    n = op.keys.size
+    k = op.coup_full.shape[1]
+    m = len(group_sets)
+    group_elec = np.full(k, -1, dtype=np.int64)
+    for j, groups in enumerate(group_sets):
+        group_elec[groups] = j
+    unk = np.nonzero(op.fixed_group < 0)[0]
+    node_of_u = np.empty(unk.size, dtype=np.int64)
+    node_of_u[op.u_of_node[unk]] = unk
+    a = np.zeros((m, n))
+    b = np.zeros((m, k))
+    c = np.zeros((m, n))
+    ej = group_elec[op.coup_grp] if op.coup_grp.size else np.zeros(0, dtype=np.int64)
+    for j, groups in enumerate(group_sets):
+        # Dirichlet 結合の電束 Σ g (V − φ_u)
+        s = ej == j
+        np.add.at(a[j], node_of_u[op.coup_u[s]], -op.coup_g[s])
+        np.add.at(b[j], op.coup_grp[s], op.coup_g[s])
+        # ぶら下がり節点の拘束反力 (Cᵀ r)_j、r = A_full φ_U − coup_full V − q_U
+        if op.C.nnz:
+            cols = np.zeros(op.C.shape[1])
+            cols[groups] = 1.0
+            w = np.asarray(op.C @ cols).ravel()
+            a[j][node_of_u] += op.A_full.T @ w
+            b[j] -= op.coup_full.T @ w
+            c[j][node_of_u] -= w
+        # 電極の固定節点の電荷 (Poisson は見ない) を引く
+        fixed = np.nonzero((op.fixed_group >= 0) & (group_elec[np.maximum(op.fixed_group, 0)] == j))[0]
+        c[j][fixed] -= 1.0
+    return a, b, c

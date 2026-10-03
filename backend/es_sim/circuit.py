@@ -144,6 +144,24 @@ class BlockingCircuit:
         """電荷の恒等式 Q_N − (Q_e + C_b (V_e − V_s)) (検証用。q_e は解き直した φ の電極の電荷)。"""
         return self.q_node - (np.asarray(q_e, dtype=np.float64) + self.c_b * (self.v - self.v_src))
 
+    # ---- 回路をデバイスで進めるエンジン (GPU PIC) ----------------------------------------
+
+    def record(self, v, i, t0: float, dt: float) -> None:
+        """周期の集計だけを進める (Q_N はデバイスが積む。conduct の集計の部分)。"""
+        if self.period is not None and dt > 0.0:
+            self._accumulate(np.asarray(v, dtype=np.float64), np.asarray(i, dtype=np.float64), t0, t0 + dt)
+
+    def set_state(self, q_node, v, v_src) -> None:
+        """デバイスの回路の状態 (Q_N・V_e・V_s) を写す (結果・フレーム用)。"""
+        self.q_node = np.array(q_node, dtype=np.float64)
+        self.v = np.array(v, dtype=np.float64)
+        self.v_src = np.array(v_src, dtype=np.float64)
+
+    def set_capacitance(self, c_matrix) -> None:
+        """電極の容量行列を差し替える (AMR の再格子化。Q_N はそのまま)。"""
+        self.c = np.asarray(c_matrix, dtype=np.float64).reshape(self.m, self.m)
+        self._a = self.c + np.diag(self.c_b)
+
     # ---- 周期の集計 ----------------------------------------------------------------------
 
     def _accumulate(self, v: np.ndarray, i: np.ndarray, t0: float, t1: float) -> None:
@@ -269,7 +287,52 @@ class BlockingCircuit:
         }
 
 
-# ---- 電極の節点 (三角形メッシュ) -------------------------------------------------------------------
+# ---- 電極 (直交格子の Dirichlet グループ・三角形メッシュの節点) --------------------------------------
+
+
+def rf_period(project) -> float | None:
+    """集計の周期: 2D の電極の RF 成分と CSV 波形の最低周波数の周期 (流体 2D・v1 PIC の _find_rf_freq と同じ)。"""
+    from .schema import rf_components
+
+    freqs: list[float] = []
+    geo = project.geometry
+    sources = [bc for bc in geo.boundaries] + [r for r in geo.regions if r.type == "conductor"]
+    for src in sources:
+        freqs.extend(c.freq_hz for c in rf_components(src.voltage_rf))
+        if src.voltage_waveform is not None:
+            freqs.append(src.voltage_waveform.freq_hz)
+    return 1.0 / min(freqs) if freqs else None
+
+
+def model_capacitor_electrodes(project, model) -> list[tuple[CapacitorSpec, list[int]]]:
+    """直交格子 (v2 の流体 2D・PIC) の阻止コンデンサの電極と、その Dirichlet グループの番号 (geom.model)。
+
+    外周の境界条件は辺ごとに別のグループになるので、1 つの境界条件の辺はまとめて 1 つの電極にする (辺どうしは
+    つながった 1 つの導体とみなす)。導体の領域は 1 つのグループ。
+    """
+    out: list[tuple[CapacitorSpec, list[int]]] = []
+    for bc in project.geometry.boundaries:
+        cap = bc.blocking_capacitor
+        if bc.type != "dirichlet" or cap is None:
+            continue
+        groups: list[int] = []
+        for e in bc.edges:
+            g = model.side_group.get(model.domain.edge_sides.get(e))
+            if g is not None and g not in groups:
+                groups.append(g)
+        if groups:
+            label = "+".join(f"edge{e}" for e in bc.edges)
+            out.append((CapacitorSpec(label, cap.capacitance, cap.initial_bias_v), groups))
+    for k, c in enumerate(model.conductors):
+        cap = c.region.blocking_capacitor
+        if cap is not None:
+            out.append((CapacitorSpec(c.id, cap.capacitance, cap.initial_bias_v), [model.conductor_group[k]]))
+    used: set[int] = set()
+    for spec, groups in out:
+        if used & set(groups):
+            raise ValueError(f"阻止コンデンサの電極 {spec.label} の辺が、ほかの阻止コンデンサの電極と重なっています")
+        used |= set(groups)
+    return out
 
 
 def mesh_capacitor_electrodes(project, mesh) -> list[tuple[CapacitorSpec, np.ndarray]]:
@@ -296,32 +359,3 @@ def mesh_capacitor_electrodes(project, mesh) -> list[tuple[CapacitorSpec, np.nda
             raise ValueError(f"阻止コンデンサの電極 {spec.label} に Dirichlet 節点がありません")
         out.append((spec, nodes))
     return out
-
-
-# ---- 未対応のエンジン ------------------------------------------------------------------------
-
-
-def blocking_capacitor_labels(project) -> list[str]:
-    """2D の電極のうち阻止コンデンサを付けたものの名前 (導体の region id、外周の辺は "edge{k}")。"""
-    out = []
-    geo = project.geometry
-    for bc in geo.boundaries:
-        if bc.type == "dirichlet" and bc.blocking_capacitor is not None:
-            out.extend(f"edge{e}" for e in bc.edges)
-    for r in geo.regions:
-        if r.type == "conductor" and r.blocking_capacitor is not None:
-            out.append(r.id)
-    return out
-
-
-def reject_blocking_capacitors(project, engine: str) -> None:
-    """阻止コンデンサにまだ対応していないエンジンで、付けた電極があればエラーにする。
-
-    黙って直結で計算すると自己バイアスの無い別の物理になるため (prompts/134)。
-    """
-    labels = blocking_capacitor_labels(project)
-    if labels:
-        raise ValueError(
-            f"{engine} はまだ阻止コンデンサ (自己バイアス) に対応していません (付けた電極: {', '.join(labels)})。"
-            "コンデンサを外すか、対応している計算 (流体、三角形メッシュの PIC) で実行してください"
-        )

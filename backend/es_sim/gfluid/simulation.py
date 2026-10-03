@@ -34,7 +34,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from ..circuit import BlockingCircuit, CapacitorSpec
+from ..circuit import BlockingCircuit, CapacitorSpec, model_capacitor_electrodes
 from ..device import Device, get_device
 from ..eb.build import MASK_FIXED, MASK_UNKNOWN, LevelOperator, build_level
 from ..eb.grid import make_grid
@@ -226,35 +226,8 @@ class CartesianFluid2dSimulation(Fluid2dSimulation):
     # ---- 阻止コンデンサ (自己バイアス、prompts/134・モジュール docstring) ----------------------
 
     def _capacitor_electrodes(self) -> list[tuple[CapacitorSpec, list[int]]]:
-        """阻止コンデンサを付けた電極と、その Dirichlet グループの番号。
-
-        外周の境界条件は辺ごとに別のグループになる (geom.model) ので、1 つの境界条件の辺はまとめて 1 つの電極に
-        する (辺どうしはつながった 1 つの導体とみなす)。導体の領域は 1 つのグループ。
-        """
-        model = self.model
-        out: list[tuple[CapacitorSpec, list[int]]] = []
-        for bc in self.project.geometry.boundaries:
-            cap = bc.blocking_capacitor
-            if bc.type != "dirichlet" or cap is None:
-                continue
-            groups: list[int] = []
-            for e in bc.edges:
-                g = model.side_group.get(model.domain.edge_sides.get(e))
-                if g is not None and g not in groups:
-                    groups.append(g)
-            if groups:
-                label = "+".join(f"edge{e}" for e in bc.edges)
-                out.append((CapacitorSpec(label, cap.capacitance, cap.initial_bias_v), groups))
-        for k, c in enumerate(model.conductors):
-            cap = c.region.blocking_capacitor
-            if cap is not None:
-                out.append((CapacitorSpec(c.id, cap.capacitance, cap.initial_bias_v), [model.conductor_group[k]]))
-        used: set[int] = set()
-        for spec, groups in out:
-            if used & set(groups):
-                raise ValueError(f"阻止コンデンサの電極 {spec.label} の辺が、ほかの阻止コンデンサの電極と重なっています")
-            used |= set(groups)
-        return out
+        """阻止コンデンサを付けた電極と、その Dirichlet グループの番号 (circuit.model_capacitor_electrodes)。"""
+        return model_capacitor_electrodes(self.project, self.model)
 
     def _init_circuit(self) -> None:
         """阻止コンデンサの回路を組む: 電荷の集計の表、ψ と容量行列、壁の小片の行き先。"""
