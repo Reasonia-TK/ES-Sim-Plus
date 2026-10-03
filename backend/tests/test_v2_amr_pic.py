@@ -60,6 +60,9 @@ def test_gpu_amg_pcg_matches_cpu_and_async_warm_start_converges():
     solver = AmgGpuSolver(op.A_c)
     assert not solver.direct and solver.n_levels >= 3
     bd, xd = cp.asarray(b), cp.zeros(op.n_unknowns)
+    # ソルバーの表・右辺・初期値は既定 (null) ストリームで作られ、非ブロッキングのストリームとは順序が無いので、
+    # グラフを流す前に終わらせる (しないと負荷の高いときにコピー前の配列を読む。PIC は全てステップのストリームで作る)
+    cp.cuda.Device().synchronize()
     stream = cp.cuda.Stream(non_blocking=True)
     with stream:
         stream.begin_capture()
