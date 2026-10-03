@@ -3,7 +3,8 @@
 - 粒子位置 → 所属三角形の特定: walk 探索 + 前回要素キャッシュ
 - E 補間: P1 要素なので要素内一定 (将来、節点平均場の重心座標補間に変更可)
 - 積分器: リープフロッグ (kick-drift-kick / velocity-Verlet 形式。静電場のみ。
-  磁場を導入する際に Boris 化)
+  磁場を導入する際に Boris 化)。軸対称 (rz / rz_x0) の移動は回転法
+  (局所座標の3D直線移動 → 子午面へ回転、PIC・DSMC と同じ)
 - 全粒子を numpy 一括で進め、backend.get_xp() で CuPy に切り替え可能にする
 - 電極・外周到達で吸収し、衝突位置・エネルギーを記録
 """
@@ -558,6 +559,24 @@ def _estimate_dt(mesh: Mesh, e_field: np.ndarray, v0: np.ndarray, q: float, m: f
     return 0.3 * h_min / v_rep
 
 
+def _rz_rotate(
+    xr: np.ndarray, yt: np.ndarray, vr: np.ndarray, vt: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """軸対称の回転法: 局所直交座標で (径 xr、周 yt) へ動いた点の半径と、そこでの (vr, vθ) を返す。
+
+    半径 r' = √(xr² + yt²) (≥ 0)。速度の (径, 周) 成分を位置と同じ角
+    (cos = xr/r'、sin = yt/r') だけ回して、動いた先の局所座標の成分に直す
+    (r'·vθ' = xr·vt − yt·vr)。r' = 0 (軸の上) では回さない。
+    演算順は v2 の GPU PIC (kernels/pic.cu の push) の回転と同じ。
+    """
+    r_new = np.sqrt(xr * xr + yt * yt)
+    moved = r_new > 0.0
+    r_div = np.where(moved, r_new, 1.0)
+    cos_a = np.where(moved, xr / r_div, 1.0)
+    sin_a = np.where(moved, yt / r_div, 0.0)
+    return r_new, cos_a * vr + sin_a * vt, -sin_a * vr + cos_a * vt
+
+
 # ---- 本体 -------------------------------------------------------------------
 
 
@@ -595,9 +614,13 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
 
     # 軸対称モード (prompts/39, 41): 面内速度2成分 + 第3成分 vθ。
     # 径方向座標インデックス ridx (rz: y=1、rz_x0: x=0) で径成分を一般化する。
-    # 角運動量 L = r·vθ を初期に確定し、ステップ後に vθ = L/r で更新する。
-    # 遠心力項 vθ²/r は「現在位置で評価する半陰的」としてリープフロッグの
-    # 両半キックに組み込む。軸交差 (r<0) は径座標・径速度の鏡映で処理する
+    # 速度は粒子の位置の局所直交座標 (軸・径・周) の成分で、移動は回転法 (v1/v2 の
+    # PIC・DSMC と同じ): E だけで半キック → 局所座標の3D直線移動 (径 r + vr·dt、
+    # 周 vθ·dt) → 新しい半径 r' = √((r + vr·dt)² + (vθ·dt)²) へ移し (vr, vθ) を同じ角
+    # だけ回す → 新しい位置の E で半キック (_rz_rotate)。角運動量 r·vθ を厳密に保存し、
+    # 無電場では3D直線運動を丸め誤差でなぞる。r ≥ 0 のままなので軸 (境界メッシュ
+    # エッジ) で吸収されず、vθ = 0 では軸の鏡映 (r → −r、vr → −vr) と一致する。
+    # 遠心力の項 vθ²/r は使わない (軸の近くで L²/r³ の蹴りが発散するため)
     ridx = _radial_index(project.coord)
     rz = ridx is not None
     # 一様磁場 (prompts/51)。schema の validator で rz + B は弾かれている。
@@ -646,8 +669,6 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
     else:
         x0, v0 = _init_particles(settings.emitter, m, vtheta=three_v)
     n = len(x0)
-    ang_l = x0[:, ridx] * v0[:, 2] if rz else None  # L = r·vθ (軸鏡映で符号反転)
-    _R_TINY = 1e-30  # 軸上 (r=0) のゼロ割ガード
 
     dt = settings.dt
     if dt is None:
@@ -685,12 +706,9 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
             a_cur = qm * e_at
             x_prev = x[idx_active]
             if rz:
-                # 遠心力項 dvr/dt += vθ²/r を現在位置で評価 (半陰的)
-                r_cur = np.maximum(x_prev[:, ridx], _R_TINY)
-                l_act = ang_l[idx_active]
-                vth = np.where(l_act != 0.0, l_act / r_cur, 0.0)
-                a_cur[:, ridx] += vth * vth / r_cur  # (qm*e_at は新規配列なので in-place 可)
+                # 回転法の前半キックは E だけ (E は周成分を持たないので vθ は変わらない)
                 v_half = v[idx_active, :2] + 0.5 * dt * a_cur
+                vth = v[idx_active, 2]
             elif boris_rt is not None:
                 # 一様磁場 (prompts/51): Boris 法。半キック (E) → 回転 (B) の順で
                 # 3成分速度 v3 を作り、ドリフト・境界処理は面内成分ビューで行う
@@ -703,14 +721,15 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
             x_new = x_prev + dt * v_half
 
             if rz:
-                # 軸交差: r < 0 → r → −r, vr → −vr, vθ → −vθ (鏡映)。
-                # 所属要素は鏡映後の位置への walk で追従する
-                cross = x_new[:, ridx] < 0.0
-                if np.any(cross):
-                    x_new[cross, ridx] = -x_new[cross, ridx]
-                    v_half[cross, ridx] = -v_half[cross, ridx]
-                    g_idx = idx_active[cross]
-                    ang_l[g_idx] = -ang_l[g_idx]  # vθ 反転 = L の符号反転
+                # 局所座標の3D直線移動 (径 = x_new の径成分 r + vr·dt、周 vθ·dt) の後の半径へ移し、
+                # 速度 (vr, vθ) を移動後の位置の局所座標へ回す。軸を越える移動 (r + vr·dt < 0) も
+                # r ≥ 0 のまま扱える。所属要素は移動後の位置への walk で追従し、反射・後半キックは
+                # 移動後の局所座標の速度に対して行う
+                r_new, vr_rot, vth = _rz_rotate(
+                    x_new[:, ridx], dt * vth, v_half[:, ridx], vth
+                )
+                x_new[:, ridx] = r_new
+                v_half[:, ridx] = vr_rot
 
             new_elem, absorbed_mask, b_elem, b_loc = _walk_step(
                 coeffs, adjacency, elem[idx_active], x_new, packed=packed
@@ -738,13 +757,9 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 e_new = e_field[elem[cont_idx]]
                 a_new = qm * e_new
                 if rz:
-                    # 後半キックの遠心力項は新しい位置で評価し、vθ = L/r を更新
-                    r_new = np.maximum(x_new[cont, ridx], _R_TINY)
-                    l_cont = ang_l[cont_idx]
-                    vth_new = np.where(l_cont != 0.0, l_cont / r_new, 0.0)
-                    a_new[:, ridx] += vth_new * vth_new / r_new
+                    # 後半キック (E だけ、移動後の位置の局所座標)。vθ は回転で更新済み
                     v[cont_idx, :2] = v_half[cont] + 0.5 * dt * a_new
-                    v[cont_idx, 2] = vth_new
+                    v[cont_idx, 2] = vth[cont]
                 elif boris_rt is not None:
                     # 後半キック (E のみ)。vz は回転で更新済み
                     v[cont_idx] = v3[cont]
@@ -772,10 +787,22 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
 
                 x[abs_idx] = xp_a + frac[:, None] * (xn_a - xp_a)
                 if rz:
-                    v[abs_idx, :2] = v[abs_idx, :2] + frac[:, None] * dt * a_cur[absorbed_mask]
-                    r_abs = np.maximum(x[abs_idx, ridx], _R_TINY)
-                    l_abs = ang_l[abs_idx]
-                    v[abs_idx, 2] = np.where(l_abs != 0.0, l_abs / r_abs, 0.0)
+                    # 衝突時刻の速度: x_n の局所座標で E の蹴りを frac だけ進め (平面と同じ)、
+                    # 3D直線移動のその時刻の位置 (径 r + frac·vr·dt、周 frac·vθ·dt。vr は
+                    # 前半キック後の移動の速度) の局所座標へ回す。|v| は回転で変わらない
+                    v_abs = v[abs_idx]
+                    a_abs = a_cur[absorbed_mask]
+                    u = v_abs[:, :2] + frac[:, None] * dt * a_abs
+                    vr_drift = v_abs[:, ridx] + 0.5 * dt * a_abs[:, ridx]
+                    _, u_r, u_t = _rz_rotate(
+                        xp_a[:, ridx] + frac * (dt * vr_drift),
+                        frac * (dt * v_abs[:, 2]),
+                        u[:, ridx],
+                        v_abs[:, 2],
+                    )
+                    u[:, ridx] = u_r
+                    v[abs_idx, :2] = u
+                    v[abs_idx, 2] = u_t
                 elif boris_rt is not None:
                     # 半キック+回転後の速度を衝突時速度として採用する (近似)
                     v[abs_idx] = v3[absorbed_mask]
@@ -790,10 +817,9 @@ def trace(project: Project, mesh: Mesh, sol: Solution) -> TraceOutput:
                 hit_idx = idx_active[hit_solid]
                 x[hit_idx] = x_new[hit_solid]
                 if rz:
+                    # 移動後の位置の局所座標に回した速度 (後半キック前) を採用する
                     v[hit_idx, :2] = v_half[hit_solid]
-                    r_hit = np.maximum(x_new[hit_solid, ridx], _R_TINY)
-                    l_hit = ang_l[hit_idx]
-                    v[hit_idx, 2] = np.where(l_hit != 0.0, l_hit / r_hit, 0.0)
+                    v[hit_idx, 2] = vth[hit_solid]
                 elif boris_rt is not None:
                     v[hit_idx] = v3[hit_solid]
                 else:

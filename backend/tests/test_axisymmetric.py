@@ -4,6 +4,8 @@
 2. エネルギー/容量: W = ½CV1²、C = 2πεL/ln(b/a) と数%以内
 3. 軸を含む解: 有限で軸上 ∂V/∂r ≈ 0
 4. 粒子: Ez 加速の解析解一致 (vθ=0)、L 保存 + エネルギー保存 (vθ≠0)、軸交差の鏡映
+4b. 軸のすぐ近く (1 µm) の熱電子 (回転法、rz と rz_x0): 無電場では 3D 直線運動を丸め誤差でなぞり、
+   一様 Ez で電極に当たる粒子の衝突時のエネルギー・半径・角度が解析解と一致
 5. バリデーション: y<0 domain・軸への Dirichlet・pic 実行のエラー
 """
 
@@ -194,7 +196,7 @@ def test_rz_angular_momentum_and_energy_conservation():
     r_exact = np.sqrt((r0 + v0[:, 1] * t) ** 2 + (v0[:, 2] * t) ** 2)
     z_exact = z0 + v0[:, 0] * t
     final = result.trajectories[:, -1, :]
-    # L = r·vθ の保存を含む径方向運動 (遠心力 + vθ = L/r) の検証
+    # L = r·vθ の保存を含む径方向運動 (回転法の 3D 直線移動) の検証
     assert np.allclose(final[:, 1], r_exact, rtol=1e-6)
     assert np.allclose(final[:, 0], z_exact, rtol=1e-6)
 
@@ -238,6 +240,146 @@ def test_rz_axis_crossing_mirrors():
     # 反射後は +r 方向へ直進 (z は不変)
     assert result.final_angle_deg[0] == pytest.approx(90.0, abs=1.0)
     assert traj[-1, 0] == pytest.approx(z0, abs=1e-6)
+
+
+# ---- 4b. 軸のすぐ近くの熱電子 (回転法) ------------------------------------------------
+
+
+def _near_axis_project(
+    coord: str, lz: float, rr: float, z0: float, r0: float, emitter: dict,
+    boundaries: dict, dt: float, n_steps: int, save_every: int,
+) -> tuple[Project, int, int]:
+    """軸を含む円柱 [0, lz] (軸方向) × [0, rr] (径方向) の rz / rz_x0 版と (径, 軸) の成分番号。
+
+    boundaries は辺の名前 ("z0": z=0、"zl": z=lz、"rr": r=rr) → 境界条件 (edges 以外) の対応。
+    軸の辺は自然境界のまま。エミッタは (z0, r0) の点。
+    """
+    if coord == "rz":
+        poly, ri = [[0, 0], [lz, 0], [lz, rr], [0, rr]], 1
+        edge = {"zl": 1, "rr": 2, "z0": 3}
+    else:
+        poly, ri = [[0, 0], [rr, 0], [rr, lz], [0, lz]], 0
+        edge = {"z0": 0, "rr": 1, "zl": 2}
+    zi = 1 - ri
+    p1 = [0.0, 0.0]
+    p1[ri], p1[zi] = r0, z0
+    project = Project.model_validate(
+        {
+            "coord": coord,
+            "geometry": {
+                "domain": {"polygon": poly},
+                "boundaries": [{"edges": [edge[k]], **bc} for k, bc in boundaries.items()],
+            },
+            "mesh": {"size": 0.001},
+            "particles": {
+                "species": {"preset": "electron"},
+                "emitter": {**emitter, "kind": "point", "p1": p1},
+                "dt": dt,
+                "n_steps": n_steps,
+                "save_every": save_every,
+            },
+        }
+    )
+    return project, ri, zi
+
+
+@pytest.mark.parametrize("coord", ["rz", "rz_x0"])
+def test_rz_near_axis_thermal_electrons_free_flight(coord):
+    """軸から 1 µm の 2 eV 熱電子 (maxwell、vθ ≠ 0、無電場): 吸収されず、運動エネルギーが一定で、
+    各フレームの位置が 3D の直線運動 r(t) = √((r0 + vr t)² + (vθ t)²)、z(t) = z0 + vz t と一致する。
+
+    旧方式 (遠心力 vθ²/r = L²/r³ を今の位置で評価) では、軸のそばを通る粒子が 100〜2000 倍の
+    エネルギーを得て 8 個中 6 個が壁で吸収されていた。
+    """
+    z0, r0 = 0.01, 1e-6
+    dt, n_steps = 1e-10, 50
+    emitter = {
+        "n": 8, "energy_ev": 0.0, "energy_dist": "maxwell",
+        "temperature_ev": 2.0, "seed": 4,
+    }
+    grounded = {"voltage": 0.0}
+    project, ri, zi = _near_axis_project(
+        coord, 0.02, 0.01, z0, r0, emitter,
+        {"z0": grounded, "zl": grounded, "rr": grounded}, dt, n_steps, 1,
+    )
+    mesh = generate_mesh(project)
+    sol = solve(project, mesh)
+    assert np.all(sol.e_field == 0.0)  # 無電場
+    result = trace(project, mesh, sol)
+
+    _, v0 = _init_particles(project.particles.emitter, ME, vtheta=True)
+    assert np.all(v0[:, 2] != 0.0)
+    # 最初のステップで軸の反対側へ向かう (r + vr·dt < 0) 粒子を含む設定
+    assert np.any(r0 + v0[:, ri] * dt < 0.0)
+
+    assert not np.any(result.absorbed)
+    e0_ev = 0.5 * ME * np.sum(v0**2, axis=1) / QE
+    assert np.allclose(result.final_energy_ev, e0_ev, rtol=1e-12, atol=0.0)
+
+    t = dt * np.arange(n_steps + 1)[None, :]
+    xr = r0 + v0[:, ri, None] * t  # 3D 直線運動の (径, 周) 成分
+    yt = v0[:, 2, None] * t
+    r_exact = np.hypot(xr, yt)
+    traj = result.trajectories
+    assert traj.shape == (8, n_steps + 1, 2)
+    assert np.allclose(traj[:, :, ri], r_exact, rtol=1e-9, atol=0.0)
+    assert np.allclose(traj[:, :, zi], z0 + v0[:, zi, None] * t, rtol=1e-12, atol=0.0)
+
+    # 最終速度の向き: 3D の速度を最終位置の局所座標で見た (vr, vz) の角度
+    vel = np.zeros((8, 2))
+    vel[:, ri] = (xr[:, -1] * v0[:, ri] + yt[:, -1] * v0[:, 2]) / r_exact[:, -1]
+    vel[:, zi] = v0[:, zi]
+    angle_exact = np.degrees(np.arctan2(vel[:, 1], vel[:, 0]))
+    assert np.allclose(result.final_angle_deg, angle_exact, rtol=0.0, atol=1e-9)
+
+
+@pytest.mark.parametrize("coord", ["rz", "rz_x0"])
+def test_rz_near_axis_thermal_electrons_hit_electrodes(coord):
+    """一様 Ez (陰極 z=0 が 0 V、陽極 z=L が V1) の中で、軸から 1 µm・陰極から 0.1 mm の 2 eV 熱電子が
+    陰極か陽極に当たる。横方向は自由運動なので、衝突時の運動エネルギーは KE0 + V1·(z_hit − z0)/L、
+    半径は r(tof) = √((r0 + vr·tof)² + (vθ·tof)²)、速度の向きは衝突時刻の 3D の速度を衝突位置の
+    局所座標で見たものと一致する (吸収時の速度の回転の検証)。
+    """
+    lz, z0, r0 = 0.03, 1e-4, 1e-6
+    dt, n_steps = 1e-11, 1500
+    emitter = {
+        "n": 16, "energy_ev": 0.0, "energy_dist": "maxwell",
+        "temperature_ev": 2.0, "seed": 7,
+    }
+    project, ri, zi = _near_axis_project(
+        coord, lz, 0.02, z0, r0, emitter,
+        {"z0": {"voltage": 0.0}, "zl": {"voltage": V1}}, dt, n_steps, n_steps,
+    )
+    mesh = generate_mesh(project)
+    sol = solve(project, mesh)
+    result = trace(project, mesh, sol)
+
+    _, v0 = _init_particles(project.particles.emitter, ME, vtheta=True)
+    assert np.all(v0[:, 2] != 0.0)
+    assert np.all(result.absorbed)
+    hit = result.trajectories[:, -1, :]
+    at_anode = np.isclose(hit[:, zi], lz, rtol=0.0, atol=1e-12)
+    at_cathode = np.isclose(hit[:, zi], 0.0, rtol=0.0, atol=1e-12)
+    assert np.all(at_anode | at_cathode)
+    assert np.any(at_anode) and np.any(at_cathode)  # 陰極へ戻る粒子も含む設定
+
+    e0_ev = 0.5 * ME * np.sum(v0**2, axis=1) / QE
+    e_exact = e0_ev + V1 * (hit[:, zi] - z0) / lz
+    # 誤差は衝突時刻の補間の O(dt²) (陰極で 4×10⁻⁵ 程度)。旧方式は 16 個中 11〜13 個が 10⁻³ を
+    # 超え、最大 30〜40 倍ずれていた
+    assert np.allclose(result.final_energy_ev, e_exact, rtol=1e-3, atol=0.0)
+
+    tof = result.tof
+    xr = r0 + v0[:, ri] * tof
+    yt = v0[:, 2] * tof
+    r_exact = np.hypot(xr, yt)
+    assert np.allclose(hit[:, ri], r_exact, rtol=1e-5, atol=0.0)
+
+    vel = np.zeros((16, 2))
+    vel[:, ri] = (xr * v0[:, ri] + yt * v0[:, 2]) / r_exact
+    vel[:, zi] = v0[:, zi] + (QE * V1 / (ME * lz)) * tof  # 陽極へ向かう一様な加速
+    angle_exact = np.degrees(np.arctan2(vel[:, 1], vel[:, 0]))
+    assert np.allclose(result.final_angle_deg, angle_exact, rtol=0.0, atol=1e-6)
 
 
 # ---- 5. バリデーション -------------------------------------------------------------
