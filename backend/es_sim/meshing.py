@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import math
 import re
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import gmsh
@@ -84,6 +86,28 @@ def _region_polygon(region: Region, h: float) -> list[tuple[float, float]]:
 def _region_rings(region: Region, h: float) -> list[list[tuple[float, float]]]:
     """領域の輪郭の輪: 外周 (_region_polygon) と穴 (prompts/132。円弧は Project の検証で弦に分けてある)。"""
     return [list(_region_polygon(region, h)), *[list(hole.polygon) for hole in region.holes]]
+
+
+# gmsh の API はプロセスに 1 つだけの状態 (初期化・現在のモデル・オプション) を使い、スレッドセーフではない。
+# ジョブ (1 ジョブ = 1 本のスレッド)・FastAPI の同期エンドポイント (/mesh・/solve・/profile・/trace)・v1 の
+# WebSocket (asyncio.to_thread) はそれぞれ別のスレッドから generate_mesh を呼ぶ。同時に走ると、他方の
+# gmsh.model.add で現在のモデルが入れ替わったり、先に終わった側の finalize で他方が落ちたりする (実測では
+# ヒープが壊れてプロセスごと落ちた)。gmsh は必ず _gmsh_session() の中で使い、1 セッションずつ直列にする
+_GMSH_LOCK = threading.Lock()
+
+
+@contextmanager
+def _gmsh_session():
+    """gmsh の 1 セッション (initialize → finalize) を開く。他のスレッドのセッションが終わるまで待ち、
+    本体で例外が出ても finalize してからロックを解放する。"""
+    with _GMSH_LOCK:
+        # interruptible=False: シグナルハンドラを登録しない
+        # (FastAPI はワーカースレッドで実行するため必須)
+        gmsh.initialize(interruptible=False)
+        try:
+            yield
+        finally:
+            gmsh.finalize()
 
 
 def _occ_loop(points) -> int:
@@ -202,10 +226,7 @@ def _generate_unstructured(project: Project) -> Mesh:
     scale = float(np.max(np.abs(domain_poly)))
     tol = 1e-8 * (scale if scale > 0.0 else 1.0)
 
-    # interruptible=False: シグナルハンドラを登録しない
-    # (FastAPI はワーカースレッドで実行するため必須)
-    gmsh.initialize(interruptible=False)
-    try:
+    with _gmsh_session():
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("es_sim")
         occ = gmsh.model.occ
@@ -468,8 +489,6 @@ def _generate_unstructured(project: Project) -> Mesh:
             nodes, triangles, tri_region, dirichlet, dirichlet_rf, dirichlet_waveform,
             see_gamma, pairs, electrode,
         )
-    finally:
-        gmsh.finalize()
 
 
 def _finalize_mesh(
