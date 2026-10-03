@@ -3,7 +3,8 @@
 - paths.py: 円弧の中心・面積・弦への分割 (円の多角形化と同じ密度)
 - schema: bulges・edge_ids の検査、周期境界は直線だけ、円弧の無い文書は何も変えない
 - Project の検証で円弧を弦に分け、外周の辺の番号の参照 (境界条件・FN・反射・DSMC) を展開する
-- メッシュと静電場: 円弧の外周の電極ラベルは元の辺の番号、同軸の静電容量が解析解に近い
+- メッシュと静電場: 円弧の外周の電極ラベルは元の辺の番号 (円弧のあとの辺の電荷・静電容量も落とさない)、
+  同軸の静電容量が解析解に近い
 """
 
 import math
@@ -205,6 +206,27 @@ def test_arc_edge_electrode_label_uses_the_original_edge():
     charges = {label: q for label, _, q in sol.charges}
     assert set(charges) == {"edge2", "edge3"}
     assert charges["edge2"] == pytest.approx(-charges["edge3"], rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("bulges", "boundaries", "labels"),
+    [
+        # 円弧 (辺 2) のあとの辺 3 は弦の番号が 3 からずれる
+        ([0, 0, 0.3, 0], [{"edges": [3], "voltage": 1.0}, {"edges": [1], "voltage": 0.0}], ["edge3", "edge1"]),
+        # 円弧 (辺 1) のあとの円弧 (辺 2) の電極: 弦の番号に 2 が無く、弦がいくつあっても 1 つの電極
+        ([0, 0.3, 0.3, 0], [{"edges": [2], "voltage": 1.0}, {"edges": [0], "voltage": 0.0}], ["edge2", "edge0"]),
+    ],
+)
+def test_electrodes_after_an_arc_keep_charge_and_capacitance(bulges, boundaries, labels):
+    """円弧のあとの外周の辺の電極も電荷の一覧に元の辺の番号で出て、静電容量が定義される。"""
+    p = _project({"domain": {"polygon": _rect(0.02, 0.01), "bulges": bulges}, "boundaries": boundaries}, {"size": 1e-3})
+    # 前提: 弦の番号のまま "edge{e}" にすると元の辺のラベルが揃わない (修正前の fem._label_order はここで電極を落とした)
+    assert not set(labels) <= {f"edge{e}" for bc in p.geometry.boundaries for e in bc.edges}
+    sol = solve(p, generate_mesh(p))
+    assert [(label, v) for label, v, _ in sol.charges] == [(labels[0], 1.0), (labels[1], 0.0)]
+    q_ground = sol.charges[1][2]
+    assert sol.capacitance is not None
+    assert sol.capacitance == pytest.approx(-q_ground / 1.0, rel=1e-6)
 
 
 def test_coaxial_capacitance_with_arc_domain():

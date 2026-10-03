@@ -29,7 +29,7 @@ class Solution:
     e_field: np.ndarray  # (M, 2) 要素ごとの E = -∇V [V/m]
     energy: float        # 蓄積エネルギー [J/m] (奥行き単位長あたり)
     # 電極ごとの誘起電荷 (label, voltage [V], q)。xy: [C/m]、軸対称: [C]。
-    # label は "edge0".."edge3" (domain 外周の Dirichlet エッジ) または conductor の region id
+    # label は "edge{k}" (domain 外周の Dirichlet エッジ k。円弧を弦に分けても元の辺の番号) または conductor の region id
     charges: list[tuple[str, float, float]] = field(default_factory=list)
     # 静電容量 [F/m] (xy) / [F] (軸対称)。電極の電位がちょうど2水準かつ空間電荷が
     # 全域 0 の場合のみ定義。それ以外 (3水準以上・電荷あり・電極なし) は None
@@ -157,19 +157,22 @@ def assemble_transport_operator(
 def _label_order(project: Project) -> list[str]:
     """電極ラベルの表示順を決める (エッジ境界の指定順 → conductor 領域の定義順)。
 
-    charges の並びを毎回決定的にするため (dict の走査順に依存させない)。
+    charges の並びを毎回決定的にするため (dict の走査順に依存させない)。外周の辺のラベルは mesh.electrode と
+    同じ Geometry.edge_label で付ける (円弧を弦に分けたとき bc.edges は弦の番号なので、元の辺の番号に直す。
+    同じ円弧の弦は 1 つのラベル)。
     """
+    geo = project.geometry
     order: list[str] = []
     seen: set[str] = set()
-    for bc in project.geometry.boundaries:
+    for bc in geo.boundaries:
         if bc.type != "dirichlet":
             continue
         for edge in bc.edges:
-            label = f"edge{edge}"
+            label = geo.edge_label(edge)
             if label not in seen:
                 seen.add(label)
                 order.append(label)
-    for region in project.geometry.regions:
+    for region in geo.regions:
         if region.type == "conductor" and region.id not in seen:
             seen.add(region.id)
             order.append(region.id)
