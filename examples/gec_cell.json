@@ -79,7 +79,7 @@
   },
   "pic": {
     "initial_plasma": {"density": 1.0e15, "te_ev": 3.0, "ti_ev": 0.026, "ion_mass_amu": 39.948, "seed": 1},
-    "n_macro": 4000000,
+    "n_macro": 2000000,
     "dt": 9.21829e-11,
     "n_steps": 16000,
     "frame_every": 800,

@@ -12,6 +12,7 @@ Fluid2dRunner.result、PIC: make_pic_simulation と batch._build_results_bundle)
 - GPU の計算は実行ごとにわずかに違う (atomic) ので、作り直すと中身は変わる。エンジンを大きく変えたときに作り直す。
 
 使い方 (backend で): .venv/Scripts/python.exe scripts/build_sample_results.py [キー ...]   (省くと PLANS の全て)
+  --only 種類 [種類 ...]: その種類 (pic・fluid2d など) だけ計算し直し、ほかは今のファイルのまま
   --repack: 計算し直さず、今のファイルを今の桁数で丸め直して書き直す (桁数の方針を変えたとき)
 """
 
@@ -198,21 +199,42 @@ def _engine(sim) -> str:
     return f"{type(sim).__name__} ({where})"
 
 
-def build(key: str, log=print) -> Path:
+def _read(key: str) -> dict:
+    with gzip.open(OUT_DIR / f"{key}.json.gz", "rb") as fh:
+        return json.loads(fh.read().decode("utf-8"))
+
+
+def build(key: str, log=print, only: list[str] | None = None) -> Path:
+    """PLANS の種類を計算して書く。only なら、その種類だけ計算し直し、ほかの種類は今のファイルのまま残す。"""
     plan = PLANS[key]
+    if only:
+        unknown = sorted(set(only) - {kind for kind, _, _ in plan})
+        if unknown:
+            raise SystemExit(f"{key} の表にない種類: {', '.join(unknown)}")
     data = json.loads((EXAMPLES / f"{key}.json").read_text(encoding="utf-8"))
     Project.model_validate(data)  # 長い計算の前に設定を確かめる (種類ごとに新しく組み立てる)
+    old = _read(key) if only else {}
     bundle: dict = {"version": 1}
     runs: dict[str, dict] = {}
+    today = _dt.datetime.now().astimezone().date().isoformat()
     for kind, periods, avg_periods in plan:
+        if only and kind not in only:
+            if kind not in old:
+                raise SystemExit(f"{key}.json.gz に {kind} が無いので、残せません (--only を外して全部を作る)")
+            bundle[kind] = old[kind]
+            runs[kind] = old.get("meta", {}).get("runs", {}).get(kind, {})
+            runs[kind].setdefault("generated", old.get("meta", {}).get("generated"))
+            log(f"{key}: {kind} は今のファイルのまま")
+            continue
         log(f"{key}: {kind} ({'サンプルのまま' if periods is None else f'{periods} 周期'}"
             f"{'' if avg_periods is None else f'、最後の {avg_periods} 周期を時間平均'})")
         result, record = _run(kind, Project.model_validate(data), periods, avg_periods, log)
+        record["generated"] = today
         bundle[kind] = result
         runs[kind] = record
     bundle["meta"] = {
         "sample": key,
-        "generated": _dt.datetime.now().astimezone().date().isoformat(),
+        "generated": today,
         "es_sim": __version__,
         "runs": runs,
     }
@@ -221,21 +243,27 @@ def build(key: str, log=print) -> Path:
 
 def repack(key: str, log=print) -> Path:
     """計算し直さず、今のファイルを今の桁数で丸め直して書き直す。"""
-    with gzip.open(OUT_DIR / f"{key}.json.gz", "rb") as fh:
-        bundle = json.loads(fh.read().decode("utf-8"))
-    return _write(key, bundle, log)
+    return _write(key, _read(key), log)
 
 
 def main(argv: list[str] | None = None) -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("keys", nargs="*", help="サンプルのキー (省くと全て)")
+    ap.add_argument("--only", nargs="+", metavar="種類", help="その種類だけ計算し直す (ほかは今のファイルのまま)")
     ap.add_argument("--repack", action="store_true", help="計算し直さず、今のファイルを今の桁数で丸め直す")
     args = ap.parse_args(argv)
+
+    def log(m: str) -> None:
+        print(m, flush=True)
+
     for key in args.keys or list(PLANS):
         if key not in PLANS:
             raise SystemExit(f"結果を作る表にないサンプル: {key} ({', '.join(PLANS)})")
-        (repack if args.repack else build)(key, log=lambda m: print(m, flush=True))
+        if args.repack:
+            repack(key, log=log)
+        else:
+            build(key, log=log, only=args.only)
 
 
 if __name__ == "__main__":
