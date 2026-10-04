@@ -7,7 +7,7 @@ import { useJobs } from "../jobs/jobsStore";
 import type { JobSummary } from "../jobs/types";
 import { hasArcs, pathHandles } from "../cad/path";
 import { coordOf, domainPath, type Project } from "../model/project";
-import { formatNumber, formatSi } from "../util/format";
+import { formatNumber, formatSi, maxOf, minOf } from "../util/format";
 import { ampAtF0, center1d } from "./charts/Charts1d";
 import { circuitFrameRows, circuitResultRows } from "./charts/SelfBias";
 import { timingRows, useLength } from "./charts/common";
@@ -317,9 +317,9 @@ function TraceSummary({ job, project }: { job: JobSummary; project: Project | nu
         [t("summary.nParticles"), n],
         [t("summary.absorbedAlive"), pair(absorbed, n - absorbed)],
         [t("summary.meanTof"), meanTof !== null ? `${meanTof.toExponential(3)} s` : "-"],
-        [t("summary.finalEnergy"), es.length ? `${Math.min(...es).toExponential(3)} / ${Math.max(...es).toExponential(3)} eV` : "-"],
+        [t("summary.finalEnergy"), es.length ? `${minOf(es).toExponential(3)} / ${maxOf(es).toExponential(3)} eV` : "-"],
         [t("summary.angleMeanStd"), mean !== null && std !== null ? `${mean.toFixed(2)} ± ${std.toFixed(2)} deg` : "-"],
-        [t("summary.angleMinMax"), angles.length ? `${Math.min(...angles).toFixed(2)} / ${Math.max(...angles).toFixed(2)} deg` : "-"],
+        [t("summary.angleMinMax"), angles.length ? `${minOf(angles).toFixed(2)} / ${maxOf(angles).toFixed(2)} deg` : "-"],
         r.fn_current != null ? [t("summary.fnTotal"), `${r.fn_current.toExponential(3)} ${rz ? "A" : "A/m"}`] : null,
       ]}
     />

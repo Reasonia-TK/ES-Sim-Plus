@@ -17,7 +17,7 @@ import { columns, saveCsv } from "../../plots/csv";
 import { Heatmap } from "../../plots/Heatmap";
 import { LineChart, type LineSeries } from "../../plots/LineChart";
 import { edgeLabel } from "../../tree/treeModel";
-import { formatNumber } from "../../util/format";
+import { formatNumber, maxOf } from "../../util/format";
 import { pickTimeUnit, rfComponents, waveformFreqs, type VoltageWaveform } from "../../util/waveform";
 import { useChartPref, useResultsView, type Field2dKind } from "../resultsView";
 import { useFrame } from "../runData";
@@ -92,7 +92,7 @@ function PicHistoryCard({ rows }: { rows: Partial<PicDiag>[] }) {
   const chart = useMemo(() => {
     if (rows.length < 2) return null;
     const tt = rows.map((r) => r.t ?? 0);
-    const unit = pickTimeUnit(Math.max(...tt));
+    const unit = pickTimeUnit(maxOf(tt));
     const ke = rows.map((r) => (r.ke_e ?? 0) + (r.ke_i ?? 0));
     const fe = rows.map((r) => r.fe ?? 0);
     const tot = ke.map((k, i) => k + fe[i]);
@@ -118,7 +118,7 @@ function Fluid2dHistoryCard({ t: time, ne, ni }: { t: number[]; ne: number[]; ni
   const { t } = useTranslation();
   const chart = useMemo(() => {
     if (time.length < 2) return null;
-    const unit = pickTimeUnit(Math.max(...time));
+    const unit = pickTimeUnit(maxOf(time));
     return {
       x: time.map((v) => v * unit.scale),
       unit: unit.label,

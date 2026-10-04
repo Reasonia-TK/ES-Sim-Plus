@@ -11,7 +11,7 @@ import { ChartCard } from "../../plots/ChartCard";
 import { columns, saveCsv } from "../../plots/csv";
 import { LineChart, type LineSeries } from "../../plots/LineChart";
 import { edgeLabel } from "../../tree/treeModel";
-import { formatNumber, formatSi } from "../../util/format";
+import { formatNumber, formatSi, maxOf } from "../../util/format";
 import { pickTimeUnit } from "../../util/waveform";
 import type { CircuitElectrode, CircuitFrame, CircuitResult } from "../types";
 import type { RfElectrode } from "./RfMonitor";
@@ -95,7 +95,7 @@ function biasChart(es: CircuitElectrode[], project: Project | null, t: TFunction
   const shown = es.filter((e) => e.t.length > 0);
   if (!shown.length) return null;
   const tt = shown[0].t;
-  const unit = pickTimeUnit(Math.max(...tt));
+  const unit = pickTimeUnit(maxOf(tt));
   const series: LineSeries[] = [];
   shown.forEach((e, k) => {
     const label = circuitLabel(e.label, project, t);
@@ -111,7 +111,7 @@ function waveChart(es: CircuitElectrode[], project: Project | null, t: TFunction
   if (!shown.length) return null;
   // 電極ごとに標本の時刻が同じ (同じ回路のサブステップ) なので最初の電極の時刻を横軸にする
   const tt = shown[0].last_period!.t;
-  const unit = pickTimeUnit(Math.max(...tt));
+  const unit = pickTimeUnit(maxOf(tt));
   const series: LineSeries[] = shown.map((e, k) => ({
     label: circuitLabel(e.label, project, t),
     values: e.last_period!.t.length === tt.length ? e.last_period!.v : tt.map(() => null),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatElapsed, formatNumber, fromDisplayLength, parseNumber, toDisplayLength } from "../src/util/format";
+import { formatElapsed, formatNumber, fromDisplayLength, maxOf, minOf, parseNumber, toDisplayLength } from "../src/util/format";
 
 describe("number formatting (same rules as v1 CommitInput)", () => {
   it("switches to exponent notation outside [1e-3, 1e5)", () => {
@@ -29,5 +29,15 @@ describe("number formatting (same rules as v1 CommitInput)", () => {
     expect(fromDisplayLength(4, "mm")).toBeCloseTo(0.004);
     expect(formatElapsed(59)).toBe("0:59");
     expect(formatElapsed(3725)).toBe("1:02:05");
+  });
+});
+
+describe("maxOf / minOf", () => {
+  it("handles arrays too long for Math.max(...a) (PIC history of 240k rows)", () => {
+    const a = Array.from({ length: 500_000 }, (_, i) => i * 1e-12);
+    expect(maxOf(a)).toBe(499_999e-12);
+    expect(minOf(a)).toBe(0);
+    expect(maxOf([])).toBe(-Infinity);
+    expect(minOf([])).toBe(Infinity);
   });
 });

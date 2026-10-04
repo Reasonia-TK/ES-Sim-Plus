@@ -14,6 +14,22 @@ export function formatNumber(v: number): string {
   return String(Number(v.toPrecision(6)));
 }
 
+/**
+ * 配列の最大・最小 (空なら -Infinity / Infinity、Math.max と同じ)。Math.max(...a) は要素数が十数万を超えると
+ * 引数がスタックに収まらず RangeError になるので、長くなり得る配列 (履歴・粒子) ではこちらを使う
+ */
+export function maxOf(a: ArrayLike<number>): number {
+  let m = -Infinity;
+  for (let i = 0; i < a.length; i++) if (a[i] > m) m = a[i];
+  return m;
+}
+
+export function minOf(a: ArrayLike<number>): number {
+  let m = Infinity;
+  for (let i = 0; i < a.length; i++) if (a[i] < m) m = a[i];
+  return m;
+}
+
 /** 数値の解析 (指数表記可)。空欄・不正な値は null。 */
 export function parseNumber(text: string): number | null {
   const s = text.trim();
