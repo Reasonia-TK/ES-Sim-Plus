@@ -1,4 +1,5 @@
-// E2E: シェル・作図と元に戻す・静電場・ジョブと結果・結果付き保存と読み込み (実物のバックエンドで)。
+// E2E: シェル・作図と元に戻す・静電場・ジョブと結果・結果付き保存と読み込み・サンプルの保存された結果
+// (実物のバックエンドで)。
 
 import { readFileSync } from "node:fs";
 import { enableStudy, expect, menu, openApp, selectNode, setNumber, test } from "./fixtures";
@@ -78,4 +79,20 @@ test("saves with results and opens them back as an imported run", async ({ page 
   await (await chooser).setFiles(file);
   await expect(page.locator(".tree")).toContainText("PIC 1D (");
   await expect(page.getByText("時間平均のプロファイル")).toBeVisible();
+});
+
+test("opens an example together with its saved results", async ({ page }) => {
+  await openApp(page);
+  await page.getByRole("menuitem", { name: "ファイル", exact: true }).click();
+  await page.getByRole("menuitem", { name: /^サンプル/ }).click(); // 下位のメニュー (名前に › が続く)
+  await page.getByRole("menuitem", { name: "容量結合プラズマ (PIC)", exact: true }).click();
+  // examples/results/ccp_demo.json.gz が「読み込んだ実行」として並ぶ (prompts/135)
+  const run = page.locator(".tree").getByText(/^PIC \(容量結合プラズマ \(PIC\)、保存された結果・RF [\d.]+ 周期\)/);
+  await expect(run).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".messages-list")).toContainText("保存された計算結果 1 件");
+  await run.click();
+  await expect(page.getByRole("heading", { name: /^結果 › PIC \(容量結合プラズマ \(PIC\)、保存された結果/ })).toBeVisible();
+  await expect(page.getByText("時間平均したステップ数")).toBeVisible();
+  await page.getByRole("button", { name: "グラフで見る" }).click();
+  await expect(page.getByRole("tab", { name: "グラフ" })).toHaveAttribute("aria-selected", "true");
 });

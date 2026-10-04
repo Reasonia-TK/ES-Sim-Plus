@@ -278,6 +278,7 @@ ES-Sim/
 ├── README.md            # セットアップ・起動手順
 ├── docs/SPEC.md         # 本書
 ├── examples/            # サンプルプロジェクト(平行平板など)
+│   └── results/         # サンプルの保存された計算結果 (<キー>.json.gz、backend/scripts/build_sample_results.py)
 ├── backend/
 │   ├── pyproject.toml
 │   ├── es_sim/          # server / schema / geometry / meshing / fem / particles / pic / backend

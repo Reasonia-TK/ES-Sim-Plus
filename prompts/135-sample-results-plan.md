@@ -112,3 +112,27 @@ GEC の PIC の検証 (格子・粒子数、自己バイアス・密度、軸の
   履歴・IEDF (コレクタの名前はサンプルの rf_electrode・ground_electrode)・EEDF・シース端のカードが出る (読み込み
   のあとのコンソールのエラーなし)。
 - UI のテスト (GEC の結果の URL を足した)・型検査・ビルド。
+
+## SR-b の記録 (UI、2026-10-03)
+
+実装:
+
+- `ui/src/io/exampleResults.ts`: `examples/results/*.json.gz` の URL の表 (`import.meta.glob` の `?url`、ビルドの
+  資産になり起動時には読まない)、gzip の展開 (`DecompressionStream`。開発サーバーは `Content-Encoding: gzip` で
+  展開済みを渡すので、先頭が gzip の印 1f 8b でなければそのまま読む)、読み込み。
+- `openExample` (`io/documents.ts`): サンプルの文書を開いたあと、結果のファイルがあれば読み込んで「読み込んだ実行」
+  として並べ、最後のもの (GEC は流体 2D) を表示する。読む間に別の文書を開いたら捨てる (`docSerial`)。読み込み中・
+  件数と計算した日・失敗をメッセージに出す (失敗しても文書は開いたまま)。実行の名前は種類ごとに
+  「PIC (容量結合プラズマ (PIC)、保存された結果・RF 4.8 周期)」(`importResultsBundle` の出どころを項目ごとに
+  変えられるようにした)。
+- テスト: vitest `tests/exampleResults.test.ts` (5 件: gzip と展開済みの読み込み、結果のあるサンプルだけ URL がある、
+  開くと読み込んだ実行が足されて表示される、読む間に別の文書を開くと捨てる、404 でも文書は開ける)。E2E
+  `e2e/app.spec.ts` に「サンプルを開くと保存された結果が並び、実行のページとグラフが出る」。
+- `docs/SPEC.md` のリポジトリ構成に `examples/results/`。サンプルの名前を「GEC 基準セル (流体 2D・PIC、軸対称)」に。
+- README に保存された計算結果の節 (中身・サンプルを開いたときの読み込み・作り直し方)。
+
+確かめたこと:
+
+- UI のテスト 222 件・型検査 (アプリ・E2E)・本番ビルド (`dist/assets/ccp_demo.json-<hash>.gz` が出る)。E2E の
+  app.spec.ts 6 件。
+- ブラウザ (開発サーバー) で `DecompressionStream` の経路を確かめた (gzip の印のあるバイト列を展開できる)。

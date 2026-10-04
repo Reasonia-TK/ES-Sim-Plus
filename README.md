@@ -121,7 +121,7 @@ python -m es_sim.batch run case1.json case2.json ... --parallel 2 --out out_dir
 
 ## examples/ のサンプルプロジェクト
 
-フロントの「開く」(読込ダイアログ)で `examples/*.json` を読み込むと各機能をすぐに試せる。
+メニュー「ファイル › サンプル」(または「開く」で `examples/*.json` を読み込む) で各機能をすぐに試せる。
 
 | ファイル | 内容 | 見られるもの |
 |---|---|---|
@@ -140,6 +140,27 @@ python -m es_sim.batch run case1.json case2.json ... --parallel 2 --out out_dir
 読み込むこと。**
 
 既存の `parallel_plates.json` / `coaxial.json` は静電場のみのフェーズ1サンプルとしてそのまま維持している。
+
+### 保存された計算結果 (examples/results/)
+
+計算に時間のかかる流体・PIC のサンプルは、計算した結果を `examples/results/<サンプル>.json.gz` (「結果付きで保存」と
+同じ結果の束を gzip したもの) に同梱している。メニュー「ファイル › サンプル」でサンプルを開くと、この結果が
+「読み込んだ実行」として結果の一覧に並び、計算しなくても時間平均・位相分解の場、グラフ、数値サマリを見られる
+(GPU の無い PC でも見られる。読み込んだ実行は続きの計算はできない)。「開く」でサンプルの JSON を読んだときは
+読み込まない。
+
+| ファイル | 中身 |
+|---|---|
+| `gec_cell.json.gz` | 流体 2D (RF 100 周期) と PIC (600 周期、最後の 50 周期を時間平均)。作り直しは RTX 5070 Ti で約 1.5 時間 |
+| `ccp_demo.json.gz` | PIC (v1・CPU、サンプルのまま 2000 ステップ = RF 4.8 周期) |
+
+作り直すとき (サンプルの設定で走らせ、`PLANS` の表の周期数まで「続き」で延ばす。GPU の計算は実行ごとにわずかに
+違うので、作り直すと中身が変わる。エンジンを大きく変えたときに作り直す):
+
+```powershell
+cd backend
+.venv\Scripts\python scripts\build_sample_results.py [サンプルのキー ...]
+```
 
 ## 検証について
 

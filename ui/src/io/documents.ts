@@ -7,7 +7,7 @@ import { askUnsaved } from "../app/dialogs";
 import { errorText, logError, logInfo, logWarning } from "../app/messages";
 import { t } from "../i18n";
 import { documentName, isDirty, useDocument, type DocFile } from "../model/documentStore";
-import { newProject, normalizeProject, serializeProject } from "../model/project";
+import { newProject, normalizeProject, serializeProject, type Project } from "../model/project";
 import { useSelection } from "../model/selection";
 import { isTauri } from "../util/env";
 import { usePrefs, type RecentFile } from "../prefs/prefs";
@@ -15,6 +15,7 @@ import { buildResultsBundle, importResultsBundle } from "../results/bundle";
 import { useResultsView } from "../results/resultsView";
 import { clearRecovery } from "./autosave";
 import { findExample } from "./examples";
+import { exampleResultsUrl, loadExampleResults, type ExampleResultsMeta } from "./exampleResults";
 import { pickAndRead, pickAndWrite, readRecent, writeInPlace } from "./fileAccess";
 
 const src = () => t("msg.source.file");
@@ -84,11 +85,15 @@ export async function openRecentFile(r: RecentFile): Promise<void> {
   }
 }
 
-/** サンプルを開く (保存先の無い新しい文書になる。保存すると名前を尋ねる) */
+/**
+ * サンプルを開く (保存先の無い新しい文書になる。保存すると名前を尋ねる)。保存された計算結果 (examples/results/、
+ * prompts/135) があれば続けて読み込み、「読み込んだ実行」として結果の一覧に並べる (結果付きのファイルを開いたときと同じ)
+ */
 export async function openExample(key: string): Promise<void> {
   const ex = findExample(key);
   if (!ex) return;
   if (!(await confirmDiscardIfDirty())) return;
+  let opened: { name: string; project: Project } | null = null;
   try {
     const name = t(`examples.${key}` as "examples.parallel_plates", { defaultValue: key });
     const { project } = normalizeProject(ex.data);
@@ -96,8 +101,32 @@ export async function openExample(key: string): Promise<void> {
     resetSelection();
     clearRecovery();
     logInfo(src(), t("msg.exampleOpened", { name }));
+    opened = { name, project };
   } catch (e) {
     logError(src(), t("msg.openFailed", { error: errorText(e) }));
+  }
+  const url = opened ? exampleResultsUrl(key) : undefined;
+  if (opened && url) await importExampleResults(url, opened.project, opened.name);
+}
+
+/** サンプルの保存された結果を読み込む。読む間に別の文書を開いたら捨てる */
+async function importExampleResults(url: string, project: Project, name: string): Promise<void> {
+  const serial = useDocument.getState().docSerial;
+  logInfo(src(), t("msg.exampleResultsLoading", { name }));
+  try {
+    const bundle = await loadExampleResults(url);
+    if (useDocument.getState().docSerial !== serial) return;
+    const meta = bundle.meta as ExampleResultsMeta | undefined;
+    const added = importResultsBundle(bundle, project, (key) => {
+      const periods = meta?.runs?.[key]?.periods;
+      return typeof periods === "number"
+        ? t("examples.savedResultsPeriods", { name, periods: periods >= 10 ? Math.round(periods) : Math.round(periods * 10) / 10 })
+        : t("examples.savedResults", { name });
+    });
+    logInfo(src(), t("msg.exampleResultsLoaded", { name, n: added.length, date: meta?.generated ?? "-" }));
+    if (added.length) useResultsView.getState().setActiveRun(added[added.length - 1].id);
+  } catch (e) {
+    logWarning(src(), t("msg.exampleResultsFailed", { name, error: errorText(e) }));
   }
 }
 

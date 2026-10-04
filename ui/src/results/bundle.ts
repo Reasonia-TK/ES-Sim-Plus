@@ -86,15 +86,19 @@ function normalizeResult(key: string, r: Record<string, unknown>, bundle: Record
   }
 }
 
-/** 結果の束を読み込む (実行の一覧に足し、静電場の結果は静電場のページへ)。足した実行を返す */
-export function importResultsBundle(results: unknown, project: Project, source: string): JobSummary[] {
+/**
+ * 結果の束を読み込む (実行の一覧に足し、静電場の結果は静電場のページへ)。足した実行を返す。
+ * source は実行の名前の出どころ (束の項目 (pic・fluid2d など) ごとに変えるときは関数)
+ */
+export function importResultsBundle(results: unknown, project: Project, source: string | ((key: string) => string)): JobSummary[] {
   if (!results || typeof results !== "object") return [];
   const b = results as Record<string, unknown>;
   const added: JobSummary[] = [];
   for (const { key, kind } of BUNDLE_KINDS) {
     const r = b[key];
     if (!r || typeof r !== "object") continue;
-    added.push(addImportedRun(kind, normalizeResult(key, r as Record<string, unknown>, b), project, source));
+    const src = typeof source === "function" ? source(key) : source;
+    added.push(addImportedRun(kind, normalizeResult(key, r as Record<string, unknown>, b), project, src));
   }
   const solve = b.solve as SolveResult | undefined;
   const mesh = b.mesh as MeshResult | undefined;
