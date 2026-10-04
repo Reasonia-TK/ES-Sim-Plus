@@ -5,7 +5,7 @@ import { OptionalBlock, Section } from "../../forms/blocks";
 import { SchemaField, Toggle } from "../../forms/SchemaField";
 import { setValue } from "../../forms/useField";
 import { useDocument } from "../../model/documentStore";
-import { domainBounds, type Point, type Project } from "../../model/project";
+import { coordOf, domainBounds, type Point, type Project } from "../../model/project";
 import { DEFAULT_INITIAL_PLASMA, DEFAULT_MCC, DEFAULT_MERGE, DEFAULT_PIC, defaultEmitter } from "../../schema/defaults";
 import { edgeLabel } from "../../tree/treeModel";
 import { projectFreqs } from "../../util/runHints";
@@ -125,6 +125,7 @@ export function PicPage() {
       <FnSection path={[...P, "fn"]} mode="pic" />
       <Section title={t("studyCommon.run")}>
         <SchemaField path={[...P, "n_macro"]} />
+        {coordOf(project) !== "xy" && <SchemaField path={[...P, "radial_weighting"]} />}
         <SchemaField path={[...P, "dt"]} />
         <RfCycleHint kind="pic" freqs={freqs} dt={pic.dt} nSteps={pic.n_steps ?? 2000} />
         <SchemaField path={[...P, "n_steps"]} />

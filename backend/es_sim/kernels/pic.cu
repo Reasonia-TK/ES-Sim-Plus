@@ -67,6 +67,15 @@
 #define C_LIM_I    20
 #define C_SOFT_E   21  // soft capacity: an append at or beyond it requests the halt
 #define C_SOFT_I   22
+// radial weighting (prompts/136): cumulative copies made by splitting / particles removed by
+// merging, and the merge counters at the last compaction (live count = stored - absorbed - merged
+// since then)
+#define C_SPLIT_E  24
+#define C_SPLIT_I  25
+#define C_MERGE_E  26
+#define C_MERGE_I  27
+#define C_MERGE_B_E 28
+#define C_MERGE_B_I 29
 
 __device__ __forceinline__ unsigned long long es_ord(double v)
 {
@@ -1064,9 +1073,102 @@ extern "C" __global__ void mcc_ion(double* __restrict__ vx, double* __restrict__
 }
 
 // ---------------------------------------------------------------------------
+// Radial weighting of axisymmetric runs (prompts/136). The target weight is
+// w_t(r) = c (r + r0), so the number of macro-particles per cell does not fall
+// towards the axis. Run once per species after the MCC; only the particles
+// present at the start of the step (C_SNAP_*) are handled (the step's appends
+// are handled at the next step).
+//  * split: w > 2 w_t -> m = round(w / w_t) (at most PC_MAX_SPLIT) particles of
+//    the same position and velocity (charge, momentum and energy conserved
+//    exactly); the copies are appended like the ionization products (capacity
+//    halt and overflow as in mcc_electron) and the parent keeps the rest of the
+//    weight (exact in floating point).
+//  * merge: w < w_t / 2 -> pair with another light particle of the same species
+//    in the same cell (one waiting slot per cell, reset to -1 before the kernel,
+//    taken with atomicCAS); the pair becomes one particle of weight w_a + w_b
+//    with the position and velocity of a or b, chosen with probability
+//    proportional to the weight (Teunissen & Ebert, JCP 259, 318 (2014)):
+//    charge exact, momentum and energy conserved on average. The other one is
+//    marked dead (w = 0) and removed by the next compaction.
+// ---------------------------------------------------------------------------
+#define PC_MAX_SPLIT 8
+#define PC_MAX_TRIES 8
+
+extern "C" __global__ void pop_control(
+    double* __restrict__ x, double* __restrict__ y, double* __restrict__ vx, double* __restrict__ vy,
+    double* __restrict__ vz, double* __restrict__ w, unsigned long long* __restrict__ cnt, const int species,
+    const int ridx, const double c_w, const double r0, int* __restrict__ slot,
+    const double* __restrict__ prm, const unsigned long long seed,
+    const double x0, const double y0, const double inv_dx, const double inv_dy,
+    const int nx, const int ny ES_GRID_PARAMS)
+{
+    const long long p = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (prm[P_HALT] != 0.0) return;
+    if (species == 1 && prm[P_ION_STEP] == 0.0) return;
+    const long long n = es_snap(cnt, species);
+    if (p >= n) return;
+    const double wp = w[p];
+    if (wp == 0.0) return;
+    const double px = x[p], py = y[p];
+    const double wt = c_w * ((ridx == 1 ? py : px) + r0);
+    if (wp > 2.0 * wt) {
+        int m = (int)floor(wp / wt + 0.5);
+        if (m > PC_MAX_SPLIT) m = PC_MAX_SPLIT;
+        const double q = wp / (double)m;
+        const unsigned long long nc = (unsigned long long)(m - 1);
+        const unsigned long long k = atomicAdd(cnt + (species == 0 ? C_NE : C_NI), nc);
+        if (k + nc > cnt[species == 0 ? C_SOFT_E : C_SOFT_I]) cnt[C_HALT_REQ] = 1ull;
+        const unsigned long long lim = cnt[species == 0 ? C_LIM_E : C_LIM_I];
+        const double ux = vx[p], uy = vy[p], uz = vz[p];
+        unsigned long long made = 0ull;
+        for (unsigned long long j = 0; j < nc; ++j) {
+            const unsigned long long d = k + j;
+            if (d < lim) {
+                x[d] = px; y[d] = py; vx[d] = ux; vy[d] = uy; vz[d] = uz; w[d] = q;
+                ++made;
+            }
+        }
+        if (made < nc) atomicAdd(cnt + C_OVERFLOW, nc - made);
+        w[p] = wp - q * (double)made;
+        if (made) atomicAdd(cnt + (species == 0 ? C_SPLIT_E : C_SPLIT_I), made);
+        return;
+    }
+    if (wp >= 0.5 * wt) return;
+    long long cell;
+#ifdef ES_AMR
+    {
+        int nd[4];
+        double wx, wy;
+        es_locate(px, py, nd, &wx, &wy, &cell ES_GRID_ARGS);
+    }
+#else
+    {
+        int i, j;
+        double wx, wy;
+        es_cell(px, py, x0, y0, inv_dx, inv_dy, nx, ny, &i, &j, &wx, &wy);
+        cell = (long long)j * nx + i;
+    }
+#endif
+    int* s = slot + cell;
+    for (int t = 0; t < PC_MAX_TRIES; ++t) {
+        const int old = atomicCAS(s, -1, (int)p);
+        if (old == -1) return;  // waiting: a later light particle of this cell takes it
+        if (atomicCAS(s, old, -1) != old) continue;  // taken by another particle meanwhile
+        const double wq = w[old];
+        const double tot = wp + wq;
+        EsRng rng;
+        rng.init((unsigned long long)p, (unsigned long long)prm[P_STEP], 6u, seed);
+        if (rng.uniform() * tot < wp) { w[p] = tot; w[old] = 0.0; }
+        else { w[old] = tot; w[p] = 0.0; }
+        atomicAdd(cnt + (species == 0 ? C_MERGE_E : C_MERGE_I), 1ull);
+        return;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // History row: one row per step in a device ring buffer (flushed by the host).
 // Columns: t ke_e ke_i fe n_e n_i wall_e wall_i phi_min phi_max coll_e
-//          ion_events see_events surf_q
+//          ion_events see_events surf_q merged split
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ double es_unord(unsigned long long o)
 {
@@ -1086,9 +1188,9 @@ extern "C" __global__ void history_row(double* __restrict__ hist, const int n_ro
     r[1] = dsl[0];
     r[2] = dsl[1];
     r[3] = fe_scale * dsl[2];
-    // live counts = stored - absorbed since the last compaction (cnt[14], cnt[15])
-    r[4] = (double)((unsigned long long)es_count(cnt, 0) - (cnt[C_WALL_E] - cnt[14]));
-    r[5] = (double)((unsigned long long)es_count(cnt, 1) - (cnt[C_WALL_I] - cnt[15]));
+    // live counts = stored - absorbed and merged since the last compaction (cnt[14], cnt[15], C_MERGE_B_*)
+    r[4] = (double)((unsigned long long)es_count(cnt, 0) - (cnt[C_WALL_E] - cnt[14]) - (cnt[C_MERGE_E] - cnt[C_MERGE_B_E]));
+    r[5] = (double)((unsigned long long)es_count(cnt, 1) - (cnt[C_WALL_I] - cnt[15]) - (cnt[C_MERGE_I] - cnt[C_MERGE_B_I]));
     r[6] = (double)cnt[C_WALL_E];
     r[7] = (double)cnt[C_WALL_I];
     r[8] = es_unord(cnt[C_PHIMIN]);
@@ -1097,6 +1199,8 @@ extern "C" __global__ void history_row(double* __restrict__ hist, const int n_ro
     r[11] = (double)cnt[C_ION_EV];
     r[12] = (double)cnt[C_SEE_EV];
     r[13] = surf_scale * dsl[3];
+    r[14] = (double)(cnt[C_MERGE_E] + cnt[C_MERGE_I]);
+    r[15] = (double)(cnt[C_SPLIT_E] + cnt[C_SPLIT_I]);
 }
 
 // sum of an array into dsl[slot] (grid-stride, block reduce)
@@ -1405,8 +1509,9 @@ extern "C" __global__ void compact_scan_blocks(long long* __restrict__ block_sum
     }
     if (cnt[C_HALT] != 0ull) return;  // identity copy: count and wall baseline unchanged
     cnt[species == 0 ? C_NE : C_NI] = (unsigned long long)acc;
-    // wall counter at this compaction (live count = stored - absorbed since then)
+    // wall and merge counters at this compaction (live count = stored - absorbed - merged since then)
     cnt[species == 0 ? 14 : 15] = cnt[species == 0 ? C_WALL_E : C_WALL_I];
+    cnt[species == 0 ? C_MERGE_B_E : C_MERGE_B_I] = cnt[species == 0 ? C_MERGE_E : C_MERGE_I];
 }
 
 extern "C" __global__ void compact_scatter(const unsigned char* __restrict__ flag, const long long cap,

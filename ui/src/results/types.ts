@@ -25,6 +25,7 @@ export interface PicDiag {
   fn_i?: number;
   fn_events?: number;
   merged?: number;
+  split?: number;
 }
 
 export interface PicStarted {

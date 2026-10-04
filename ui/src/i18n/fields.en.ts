@@ -91,7 +91,7 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
     },
     Collector: { tol: "Capture distance" },
     PicMerge: { n_max: "Max macro-particles per species", every: "Check interval" },
-    PicSettings: { ion_subcycle: "Ion subcycling" },
+    PicSettings: { ion_subcycle: "Ion subcycling", radial_weighting: "Radial weighting (axisymmetric)" },
     Pic1dElectrode: { v_dc: "DC voltage" },
     BlockingCapacitor: { capacitance: "Capacitance C_b", initial_bias_v: "Initial bias" },
     BlockingCapacitor1d: { capacitance: "Capacitance C_b (per area)", initial_bias_v: "Initial bias" },
@@ -159,7 +159,10 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
       frame_every: "Steps between display updates",
       wall_iedf_bins: "0 disables",
     },
-    PicSettings: { ion_subcycle: "Push ions once every N steps (5–10 is typical, 1 disables)" },
+    PicSettings: {
+      ion_subcycle: "Push ions once every N steps (5–10 is typical, 1 disables)",
+      radial_weighting: "Make the macro-particle weight proportional to the radius so that more particles sit near the axis and statistical noise does not heat the electrons there. Heavy particles are split and light ones merged (v2 PIC only; off = uniform weights)",
+    },
     DsmcSettings: {
       mesh_scale: "The DSMC mesh uses the FEM mesh size × this factor (1 = same mesh)",
       threads: "1 = sequential",

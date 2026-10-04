@@ -190,7 +190,7 @@ def test_mcc_ionization_threshold_and_half_split():
 # ---- 5. 軸対称 ------------------------------------------------------------------------
 
 
-def _rz_box(density=1e15, n_macro=400000, n_steps=2, te=0.0) -> Project:
+def _rz_box(density=1e15, n_macro=400000, n_steps=2, te=0.0, radial_weighting=True) -> Project:
     return Project.model_validate(
         {
             "coord": "rz",
@@ -207,6 +207,7 @@ def _rz_box(density=1e15, n_macro=400000, n_steps=2, te=0.0) -> Project:
                 "n_steps": n_steps,
                 "frame_every": 1000,
                 "avg_steps": n_steps,
+                "radial_weighting": radial_weighting,
             },
         }
     )
@@ -225,8 +226,9 @@ def test_rz_quiet_start_and_ring_density_normalization():
 
 
 def test_rz_centrifugal_free_motion_is_exact():
-    """場の無い軸対称のリング: 3D 直線運動なので r(t) = √(r0² + (vθ t)²)、角運動量保存。"""
-    sim = _sim(_rz_box(density=1e3, n_macro=1000, n_steps=200))
+    """場の無い軸対称のリング: 3D 直線運動なので r(t) = √(r0² + (vθ t)²)、角運動量保存 (粒子を手で置くので
+    一様の重み。半径に比例した重みでは分割・併合される)。"""
+    sim = _sim(_rz_box(density=1e3, n_macro=1000, n_steps=200, radial_weighting=False))
     n = 50
     r0 = np.linspace(1e-4, 5e-3, n)
     vth = np.full(n, 2e4)

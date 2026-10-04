@@ -149,7 +149,8 @@ def test_cuda_status_mentions_hidden_devices(monkeypatch):
 
 # ---- NVRTC だけの環境 ------------------------------------------------------------------------------
 
-#: NVRTC だけの環境で走らせる GPU のテスト (P8a で置き換えた 4 か所と、PIC・DSMC・流体の基本、流体の阻止コンデンサ)
+#: NVRTC だけの環境で走らせる GPU のテスト (P8a で置き換えた 4 か所と、PIC・DSMC・流体の基本、流体の阻止コンデンサ、
+#: PIC の阻止コンデンサと半径に比例した重み)
 _GPU_TESTS = [
     "tests/test_v2_gpu_nvrtc_only.py::test_spd_inverse_matches_numpy",
     "tests/test_v2_gpu_nvrtc_only.py::test_dense_inverse_of_singular_problem_matches_cpu",
@@ -162,8 +163,10 @@ _GPU_TESTS = [
     "tests/test_v2_gfluid_gpu.py::test_amr_singular_poisson_on_gpu",
     "tests/test_circuit_fluid2d.py::test_gpu_matches_cpu_with_two_capacitors",
     "tests/test_circuit_fluid2d.py::test_gpu_amr_matches_cpu_amr_with_capacitors",
-    "tests/test_circuit_gpic.py::test_charge_conservation_gpu[uniform]",
-    "tests/test_circuit_gpic.py::test_charge_conservation_gpu[amr]",
+    "tests/test_circuit_gpic.py::test_charge_conservation_gpu[uniform-xy]",
+    "tests/test_circuit_gpic.py::test_charge_conservation_gpu[amr-xy]",
+    "tests/test_circuit_gpic.py::test_charge_conservation_gpu[amr-rz]",
+    "tests/test_v2_gpic_radial_weighting.py::test_population_control_conserves_weight_and_stays_bounded",
 ]
 
 #: 配布版に入れない CUDA のライブラリ (読まれたら、配布版では GPU の計算が失敗する)

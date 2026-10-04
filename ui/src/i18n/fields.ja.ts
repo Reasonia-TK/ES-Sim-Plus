@@ -89,7 +89,7 @@ export const fieldsJa = {
     },
     Collector: { tol: "判定距離" },
     PicMerge: { n_max: "マクロ粒子数の上限 (種ごと)", every: "確認の間隔" },
-    PicSettings: { ion_subcycle: "イオンのサブサイクル" },
+    PicSettings: { ion_subcycle: "イオンのサブサイクル", radial_weighting: "半径に比例した重み (軸対称)" },
     Pic1dElectrode: { v_dc: "直流電圧" },
     BlockingCapacitor: { capacitance: "容量 C_b", initial_bias_v: "初期バイアス" },
     BlockingCapacitor1d: { capacitance: "容量 C_b (面積あたり)", initial_bias_v: "初期バイアス" },
@@ -157,7 +157,10 @@ export const fieldsJa = {
       frame_every: "何ステップごとに表示を更新するか",
       wall_iedf_bins: "0 で無効",
     },
-    PicSettings: { ion_subcycle: "イオンを N ステップに 1 回だけ進める (5〜10 が目安、1 で無効)" },
+    PicSettings: {
+      ion_subcycle: "イオンを N ステップに 1 回だけ進める (5〜10 が目安、1 で無効)",
+      radial_weighting: "マクロ粒子の重みを半径に比例させ、軸の近くの粒子を増やして統計の雑音による加熱を抑える。重すぎる粒子は分割、軽すぎる粒子は併合する (v2 PIC のみ。オフで一様の重み)",
+    },
     DsmcSettings: {
       mesh_scale: "DSMC 用のメッシュを FEM のメッシュ幅 × この倍率で作る (1 = 同じメッシュ)",
       threads: "1 で逐次",

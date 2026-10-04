@@ -166,16 +166,21 @@ def test_charge_identity_gpu(grid):
     assert max(worst) < 1e-10
 
 
+@pytest.mark.parametrize("coord", ["xy", "rz"])
 @pytest.mark.parametrize("grid", ["uniform", "amr"])
-def test_charge_conservation_gpu(grid):
-    """全ての電極にコンデンサ (MCC・二次電子・誘電体の表面電荷あり): 電荷の和が丸め誤差で一定。"""
-    sim = _sim(_project(**_caps("xy"), amr=PATCH if grid == "amr" else None))
+def test_charge_conservation_gpu(grid, coord):
+    """全ての電極にコンデンサ (MCC・二次電子・誘電体の表面電荷あり): 電荷の和が丸め誤差で一定。軸対称は半径に
+    比例した重み (既定、prompts/136) の分割・併合も電荷を厳密に保つ。"""
+    sim = _sim(_project(**_caps(coord), coord=coord, amr=PATCH if grid == "amr" else None))
+    assert sim._rw == (coord == "rz")
     sim.step()
     q0 = _total_charge(sim)
     for _ in range(600):
         sim.step()
     moved = QE * (sim.history["wall_e"][-1] + sim.history["wall_i"][-1]) * sim._w0
-    assert sim.history["see_events"][-1] > 0 and float(sim._q_surf.sum()) != 0.0 and moved > 1e-9
+    assert sim.history["see_events"][-1] > 0 and float(sim._q_surf.sum()) != 0.0 and moved > (1e-9 if coord == "xy" else 1e-10)
+    if coord == "rz":
+        assert sim.history["split"][-1] > 0 and sim.history["merged"][-1] > 0
     assert abs(_total_charge(sim) - q0) < 1e-12 * moved
 
 

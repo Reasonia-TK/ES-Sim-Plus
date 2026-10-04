@@ -83,6 +83,16 @@ AMR の再格子化では W と容量行列を作り直す (Q_N はそのまま)
 4. 予備まで使い切った (1 ステップの追加が予備を越えた) ときだけ粒子が失われ (C_OVERFLOW)、エラーにする。
    カウンタは配列の長さを越えて増え得るので、カーネルは粒子数を配列の長さで切る。
 
+## 半径に比例した重み (軸対称、prompts/136)
+
+重みが一定だとセルあたりの粒子数が r に比例し、軸の近くの粒子 1 個の電荷がほぼ点電荷として効いて、統計の雑音で
+電子が加熱される (軸の近くの電離・密度が過大になる)。pic.radial_weighting (既定 true) では目標の重みを
+w_t(r) = c (r + r0) (r0 = 基本格子の 1 セル) にする: 初めの粒子は r を一様に引いて (r < r0 は r/(r + r0) の確率で
+採り) 重み w_t を持たせ、毎ステップ MCC のあとに pop_control が w > 2 w_t の粒子を同じ位置・速度の m = round(w/w_t)
+個に分割し、w < w_t/2 の粒子を同じセルの軽い粒子と対にして 1 個に併合する (性質は重みに比例した確率で一方から
+選ぶ。電荷は厳密、運動量・エネルギーは期待値で保存)。分割の複製は電離と同じく末尾に追加し (容量の仕組みも同じ)、
+併合で消えた粒子は w = 0 にして次の圧縮で詰める。履歴に累計の split・merged。
+
 未対応 (指定するとエラー): 粒子注入 (injection)、FN 電界放出、粒子マージ、
 DSMC ガス場連成 (use_dsmc_gas)。
 """
@@ -152,13 +162,16 @@ CAP_MAX = 16
 CAP_NB = 64
 CAP_PSI_TOL = 1e-12
 CAP_HOST_DIRECT_MAX = 240_000
+#: 半径に比例した重み (prompts/136): 目標の重み c (r + r0) の r0 [基本格子のセル]
+RW_R0_CELLS = 1.0
 
 _BLOCK = 256
 _HIST_COLS = (
     "t", "ke_e", "ke_i", "fe", "n_e", "n_i", "wall_e", "wall_i", "phi_min", "phi_max",
-    "coll_e", "ion_events", "see_events", "surf_q",
+    "coll_e", "ion_events", "see_events", "surf_q", "merged", "split",
 )
-_HISTORY_KEYS = _HIST_COLS + ("fn_i", "fn_events", "merged")
+_HISTORY_KEYS = _HIST_COLS + ("fn_i", "fn_events")
+_HIST_INT = ("n_e", "n_i", "wall_e", "wall_i", "coll_e", "ion_events", "see_events", "merged", "split")
 _TIMING_KEYS = ("solve", "gather_push", "walk", "deposit", "mcc", "other", "frame")
 
 # prm (double) の位置 — kernels/pic.cu の P_* と一致させること
@@ -170,7 +183,8 @@ _N_PRM = 24
 # cnt (uint64) の位置 — kernels/pic.cu の C_* と一致させること
 C_NE, C_NI, C_ION_EV, C_SEE_EV, C_OVERFLOW = 0, 1, 7, 8, 9
 C_HALT_REQ, C_HALT, C_HALT_STEP, C_LIM_E, C_LIM_I, C_SOFT_E, C_SOFT_I = 16, 17, 18, 19, 20, 21, 22
-_N_CNT = 24
+C_SPLIT_E, C_SPLIT_I, C_MERGE_E, C_MERGE_I, C_MERGE_B_E, C_MERGE_B_I = 24, 25, 26, 27, 28, 29
+_N_CNT = 32
 
 
 def _reserve(cap: int) -> int:
@@ -273,7 +287,7 @@ class GpuPicSimulation:
         names = ["begin_step", "end_step", "eval_groups", "push", "boundary", "deposit", "accum_phi",
                  "deposit_cell", "vmax2", "numax_lookup", "mcc_electron", "mcc_ion", "history_row",
                  "sum_into", "eedf_hist", "compact_scan", "compact_scan_blocks", "compact_scatter",
-                 "cap_induced", "cap_solve", "cap_step"]
+                 "cap_induced", "cap_solve", "cap_step", "pop_control"]
         if self.amr is None:
             names += ["rhs_base", "rhs_coupling", "fill_phi", "efield_nodes", "edge_energy"]
         else:
@@ -328,7 +342,7 @@ class GpuPicSimulation:
         # ---- 粒子の容量の検査 (モジュール docstring の「粒子の容量」) -----------------------------
         self._checked_step = -1          # カウンタを読んで停止を解いたステップ (同じステップの再検査を省く)
         self._chk_step = 0               # 前の検査のデバイスのステップ数と電離・二次電子の累計
-        self._chk_ev = (0, 0)
+        self._chk_ev = (0, 0, 0, 0)
         self._cap_rate = {"electron": 0.0, "ion": 0.0}   # 追加の速さ [粒子/ステップ]
         self.capacity_log: list[dict] = []               # 停止からのやり直し (step・止まったステップ数・容量)
 
@@ -489,7 +503,14 @@ class GpuPicSimulation:
             nyv = vol_gas.shape[0] - (1 if op.periodic_y else 0)
             nxv = vol_gas.shape[1] - (1 if op.periodic_x else 0)
             self._total_gas_volume = float(self._two_pi * vol_gas[:nyv, :nxv].sum())
-            vol_phys = self._two_pi * vol_gas
+            g = self.grid
+            if self.ridx == 1:
+                r_node = np.broadcast_to((g.y0 + g.dy * np.arange(g.ny + 1))[:, None], vol_gas.shape)
+            elif self.ridx == 0:
+                r_node = np.broadcast_to((g.x0 + g.dx * np.arange(g.nx + 1))[None, :], vol_gas.shape)
+            else:
+                r_node = None
+            vol_phys = self._density_volume(self._two_pi * vol_gas, r_node)
             self._inv_vol_phys = cp.asarray(np.where(vol_phys > 0.0, 1.0 / np.where(vol_phys > 0, vol_phys, 1.0), 0.0))
             self._vol_gas = vol_gas
         else:
@@ -625,6 +646,12 @@ class GpuPicSimulation:
         self._scan_buffers(alloc)
         self._upload_limits()
         self._w0 = None
+        # 半径に比例した重み (prompts/136): 目標 w_t(r) = c (r + r0)。c は初めの装荷で決める
+        self._rw = bool(self.rz and pic.radial_weighting and ip is not None)
+        self._rw_r0 = RW_R0_CELLS * float(self.grid.dy if self.ridx == 1 else self.grid.dx) if self.rz else 0.0
+        self._rw_c = 0.0
+        self._pc_slot: dict[str, object] = {}
+        self._alloc_pc_slots()
         if ip is not None:
             self._load_initial_plasma(ip)
 
@@ -637,6 +664,7 @@ class GpuPicSimulation:
             self._setup_mcc_tables()
             self._check_collision_probability()
         self._see_seed = np.uint64(((pic.mcc.seed if pic.mcc else 0) + 7919) & 0xFFFFFFFFFFFFFFFF)
+        self._pc_seed = np.uint64(((pic.mcc.seed if pic.mcc else 0) + 104729) & 0xFFFFFFFFFFFFFFFF)
 
         # ---- コレクタ・EEDF ----
         self._init_collectors()
@@ -665,9 +693,22 @@ class GpuPicSimulation:
         self._gx = (cp.asarray(lay.dd), cp.asarray(lay.di), cp.asarray(lay.refined), i32(lay.blockid),
                     i32(lay.tab))
         self._total_gas_volume = float(lay.total_gas_volume)
-        vol_phys = lay.node_vol_gas
+        vol_phys = self._density_volume(lay.node_vol_gas, lay.xy[:, self.ridx] if self.rz else None)
         self._inv_vol_phys = cp.asarray(np.where(vol_phys > 0.0, 1.0 / np.where(vol_phys > 0, vol_phys, 1.0), 0.0))
-        self._vol_gas = vol_phys / self._two_pi
+        self._vol_gas = lay.node_vol_gas / self._two_pi
+
+    def _density_volume(self, vol_phys: np.ndarray, r_node: np.ndarray | None) -> np.ndarray:
+        """時間平均・位相分解の密度を割る節点の体積 (双対セルの気体の体積、物理単位)。
+
+        軸対称の軸の上の節点 (r = 0) は双一次の形状関数の体積 ∫N·2πr dV (双対セルの 4/3 倍) にする。双対セルで割ると
+        一様な密度でも軸の上だけ 4/3 倍に見える (堆積の重み 1 − r/h が軸のセルの体積 π h²/4 より広く集めるため)。
+        表示だけの補正で、Poisson の右辺の節点の電荷は変えない (prompts/136)。
+        """
+        if r_node is None:
+            return vol_phys
+        out = np.array(vol_phys, dtype=np.float64, copy=True)
+        out[np.asarray(r_node) <= 1e-9 * min(self.grid.dx, self.grid.dy)] *= 4.0 / 3.0
+        return out
 
     def _set_amr_display(self, lay) -> None:
         """AMR の表示用メッシュ (v1 UI 互換) と葉セルの気体体積。"""
@@ -695,24 +736,36 @@ class GpuPicSimulation:
                 np.array([el.alloc, io.alloc, el.cap, io.cap], dtype=np.uint64))
 
     def _load_initial_plasma(self, ip) -> None:
-        cp = self.cp
+        """一様な密度の初めのプラズマ (電子とイオンは同じ位置・重み、quiet start)。
+
+        重みが一定なら体積に一様に置く。半径に比例した重み (prompts/136) なら (r, z) を一様に引いて r < r0 は
+        r/(r + r0) の確率で採り (r + r0 に比例した重みで密度が一様になる)、全電荷が density·V_gas になるよう
+        目標の重みの係数 c を決める。
+        """
         rng = np.random.default_rng(ip.seed)
         n_macro = int(self.pic.n_macro)
         d = self.model.domain
+        r0 = self._rw_r0
         xs, ys = [], []
         need = n_macro
         while need > 0:
             m = max(1024, int(need * 1.3) + 64)
-            if self.ridx == 1:
+            if self._rw:
                 x = rng.uniform(d.x0, d.x1, m)
-                y = np.sqrt(rng.uniform(d.y0**2, d.y1**2, m))
-            elif self.ridx == 0:
-                x = np.sqrt(rng.uniform(d.x0**2, d.x1**2, m))
                 y = rng.uniform(d.y0, d.y1, m)
+                r = y if self.ridx == 1 else x
+                ok = self.model.gas_at(x, y) & (rng.uniform(0.0, 1.0, m) * (r + r0) < r)
             else:
-                x = rng.uniform(d.x0, d.x1, m)
-                y = rng.uniform(d.y0, d.y1, m)
-            ok = self.model.gas_at(x, y)
+                if self.ridx == 1:
+                    x = rng.uniform(d.x0, d.x1, m)
+                    y = np.sqrt(rng.uniform(d.y0**2, d.y1**2, m))
+                elif self.ridx == 0:
+                    x = np.sqrt(rng.uniform(d.x0**2, d.x1**2, m))
+                    y = rng.uniform(d.y0, d.y1, m)
+                else:
+                    x = rng.uniform(d.x0, d.x1, m)
+                    y = rng.uniform(d.y0, d.y1, m)
+                ok = self.model.gas_at(x, y)
             take = int(min(ok.sum(), need))
             xs.append(x[ok][:take])
             ys.append(y[ok][:take])
@@ -722,13 +775,26 @@ class GpuPicSimulation:
         v_gas = self._total_gas_volume
         if v_gas <= 0.0:
             raise ValueError("粒子を装荷できる気体領域がありません")
-        w0 = ip.density * v_gas / n_macro
-        self._w0 = w0
+        if self._rw:
+            rr = (y if self.ridx == 1 else x) + r0
+            self._rw_c = ip.density * v_gas / float(np.sum(rr))
+            w = self._rw_c * rr
+        else:
+            w = np.full(n_macro, ip.density * v_gas / n_macro)
+        self._w0 = float(np.mean(w))   # 粒子 1 個の平均の重み (重みが一定ならその値)
         for name, m_s, t_ev in (("electron", ME, ip.te_ev), ("ion", self.m_ion, ip.ti_ev)):
             sigma = math.sqrt(t_ev * QE / m_s) if t_ev > 0.0 else 0.0
             v = rng.normal(0.0, sigma, size=(n_macro, 3)) if sigma > 0.0 else np.zeros((n_macro, 3))
-            self._write_particles(name, {"x": x, "y": y, "vx": v[:, 0], "vy": v[:, 1], "vz": v[:, 2],
-                                         "w": np.full(n_macro, w0)})
+            self._write_particles(name, {"x": x, "y": y, "vx": v[:, 0], "vy": v[:, 1], "vz": v[:, 2], "w": w})
+
+    def _alloc_pc_slots(self) -> None:
+        """併合の相手を待つセルごとの枠 (種ごと、-1 = 空き。半径に比例した重みのときだけ)。"""
+        if not self._rw:
+            return
+        with self._stream:
+            self._pc_slot = {name: self.cp.full(max(int(self._n_cells), 1), -1, dtype=np.int32)
+                             for name in self.species}
+        self._graph = None
 
     def _write_particles(self, name: str, host: dict[str, np.ndarray]) -> None:
         """ホスト配列で種の粒子を丸ごと置き換える (容量不足なら拡張)。"""
@@ -745,6 +811,7 @@ class GpuPicSimulation:
             cnt = self._cnt.get()
             cnt[sp.index] = n
             cnt[14 + sp.index] = cnt[4 + sp.index]   # 吸収カウンタの基準 (生存数 = 格納数 − 基準以後の吸収)
+            cnt[C_MERGE_B_E + sp.index] = cnt[C_MERGE_E + sp.index]   # 併合も同じ
             self._cnt[...] = cp.asarray(cnt)
         self._graph = None
 
@@ -972,6 +1039,19 @@ class GpuPicSimulation:
             ))
         del g
 
+    def _launch_popctl(self) -> None:
+        """半径に比例した重みの分割・併合 (prompts/136、MCC のあと)。"""
+        for sp in self.species.values():
+            if not sp.mobile:
+                continue
+            slot = self._pc_slot[sp.name]
+            slot.fill(-1)
+            self._k["pop_control"](self._grid1(sp.alloc), (_BLOCK,), (
+                sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.int32(self.ridx),
+                np.float64(self._rw_c), np.float64(self._rw_r0), slot, self._prm, self._pc_seed,
+                *self._grid_args, *self._gx,
+            ))
+
     def _launch_accumulate(self) -> None:
         k = self._k
         n = self.n_nodes
@@ -1010,6 +1090,8 @@ class GpuPicSimulation:
         self._launch_boundary(el)
         self._launch_boundary(io)
         self._launch_mcc()
+        if self._rw:
+            self._launch_popctl()
         self._launch_accumulate()
         if self._has_diel:
             k["sum_into"]((64,), (_BLOCK,), (self._q_surf, np.int64(self.n_nodes), self._dsl[3:4]))
@@ -1223,7 +1305,9 @@ class GpuPicSimulation:
             return
         ip = self.pic.initial_plasma
         lam = self._w0 * QE
-        if self.rz:
+        if self._rw:
+            lam = self._rw_c * QE / (2.0 * math.pi)   # 線電荷 w_t·e/(2πr) は r ≫ r0 で c·e/(2π) (半径によらない)
+        elif self.rz:
             d = self.model.domain
             r_mid = 0.5 * ((d.y0 + d.y1) if self.ridx == 1 else (d.x0 + d.x1))
             lam /= 2.0 * math.pi * max(r_mid, 1e-30)
@@ -1311,6 +1395,7 @@ class GpuPicSimulation:
             if new.n_c:
                 self._x[: new.n_c] = cp.asarray(phi_new[new.node_of_c])
             self._set_amr_display(new)
+            self._alloc_pc_slots()
             self._see_delta = 1e-3 * new.h_min
             # 阻止コンデンサ: 新しい格子の誘導電荷の重みと容量行列 (Q_N はそのまま、prompts/134)
             if self.circuit is not None:
@@ -1378,13 +1463,13 @@ class GpuPicSimulation:
         if halted:
             self._rewind(skipped)
         self._tag_steps = []
-        # 追加の速さ [粒子/ステップ] (電離は電子とイオン、二次電子は電子)
-        ev = (int(cnt[C_ION_EV]), int(cnt[C_SEE_EV]))
+        # 追加の速さ [粒子/ステップ] (電離は電子とイオン、二次電子は電子、分割の複製は種ごと)
+        ev = (int(cnt[C_ION_EV]), int(cnt[C_SEE_EV]), int(cnt[C_SPLIT_E]), int(cnt[C_SPLIT_I]))
         steps = dev_step - self._chk_step
         if steps > 0:
-            d_ion, d_see = ev[0] - self._chk_ev[0], ev[1] - self._chk_ev[1]
+            d_ion, d_see, d_se, d_si = (a - b for a, b in zip(ev, self._chk_ev))
             decay = 0.5 ** (steps / CAP_RATE_HALFLIFE)
-            for name, added in (("electron", d_ion + d_see), ("ion", d_ion)):
+            for name, added in (("electron", d_ion + d_see + d_se), ("ion", d_ion + d_si)):
                 self._cap_rate[name] = max(added / steps, self._cap_rate[name] * decay)
             self._chk_step, self._chk_ev = dev_step, ev
         requested = halted or bool(cnt[C_HALT_REQ])
@@ -1644,13 +1729,12 @@ class GpuPicSimulation:
         h = self.history
         for c, key in enumerate(_HIST_COLS):
             col = block[:, c]
-            if key in ("n_e", "n_i", "wall_e", "wall_i", "coll_e", "ion_events", "see_events"):
+            if key in _HIST_INT:
                 h[key].extend(int(v) for v in col)
             else:
                 h[key].extend(float(v) for v in col)
         h["fn_i"].extend([0.0] * m)
         h["fn_events"].extend([0] * m)
-        h["merged"].extend([0] * m)
         if self.circuit is not None:
             self._flush_circuit(idx, block[:, 0])
         self._hist_pending = 0

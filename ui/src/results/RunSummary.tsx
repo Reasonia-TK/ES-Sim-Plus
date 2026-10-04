@@ -169,6 +169,7 @@ function PicSummary({ job, project }: { job: JobSummary; project: Project | null
             [t("summary.walls"), pair(num(d.wall_e), num(d.wall_i))],
             [t("summary.collIonSee"), `${num(d.coll_e)} / ${num(d.ion_events)} / ${num(d.see_events)}`],
             d.merged ? [t("summary.merged"), num(d.merged)] : null,
+            d.split ? [t("summary.split"), num(d.split)] : null,
             [rz ? t("summary.surfQRz") : t("summary.surfQ"), exp3(d.surf_q)],
             d.fn_i ? [rz ? t("summary.fnRz") : t("summary.fn"), exp3(d.fn_i)] : null,
             ...(frame?.circuit ? circuitFrameRows(frame.circuit, project, t) : []),

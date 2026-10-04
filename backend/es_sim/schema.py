@@ -649,6 +649,15 @@ class PicSettings(BaseModel):
     # 粒子マージ (高速化③、prompts/77)。null = 無効 (既定。マージ関連の処理・乱数消費が
     # 一切発生せず、従来経路と完全一致する)
     merge: PicMerge | None = None
+    # 半径に比例したマクロ粒子の重み (prompts/136)。軸対称の v2 PIC (直交格子) だけで効く。目標の重みを
+    # c·(r + r0) にし、重すぎる粒子は分割、軽すぎる粒子は同じセルの粒子と対で併合する (電荷は厳密に保存)。
+    # 一様の重みでは軸の近くの粒子が少なく、統計の雑音で電子が加熱される
+    radial_weighting: bool = Field(
+        True,
+        description="軸対称で、マクロ粒子の重みを半径に比例させる (軸の近くの粒子を増やし、統計の雑音による"
+        "加熱を抑える)。v2 PIC (直交格子) のみ",
+        json_schema_extra=ui(advanced=True),
+    )
     # シースエッジ評価ライン (prompts/98、最大4本)。可視化専用で backend は永続化のみ
     # (Brinkmann 判定・準中性度等値線の計算はフロント側、SheathLine 参照)
     sheath_lines: list[SheathLine] = []

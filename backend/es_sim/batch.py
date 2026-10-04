@@ -48,7 +48,7 @@ from .schema import Project
 # pic.py の history はこのキー全てを常に持つ (欠損なし) ので単純な列→行変換でよい。
 _DIAG_KEYS = (
     "t", "ke_e", "ke_i", "fe", "n_e", "n_i", "wall_e", "wall_i", "phi_min", "phi_max",
-    "coll_e", "ion_events", "see_events", "surf_q", "fn_i", "fn_events", "merged",
+    "coll_e", "ion_events", "see_events", "surf_q", "fn_i", "fn_events", "merged", "split",
 )
 
 # 進捗通知の最短間隔 [秒]。子プロセス→親への Queue 送信・親側の表示過多を防ぐ間引き

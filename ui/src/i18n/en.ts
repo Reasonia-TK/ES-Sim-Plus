@@ -463,6 +463,7 @@ const en: Resources = {
     phiMinMax: "φ min / max",
     walls: "Wall absorption (electrons / ions, cumulative)",
     merged: "Particles removed by merging (cumulative)",
+    split: "Particles added by splitting (cumulative)",
     surfQ: "Dielectric surface charge [C/m]",
     surfQRz: "Dielectric surface charge [C]",
     fn: "FN emission current [A/m]",
