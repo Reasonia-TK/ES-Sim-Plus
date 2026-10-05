@@ -65,6 +65,11 @@ MERGE_TARGET_FRAC = 0.9
 # (k=2 では削減にならず、k=1 では合成のしようがない)
 MERGE_MIN_GROUP = 3
 
+# 半径に比例した重み (軸対称、prompts/136): 1 ステップで 1 個の粒子を分ける数の上限。
+# 目標の重み c (r + r0) の r0 は mesh.size × RW_R0_SIZES
+RW_MAX_SPLIT = 8
+RW_R0_SIZES = 1.0
+
 # フレーム送出時の種ごとの最大粒子数 (間引き)
 MAX_FRAME_PARTICLES = 2000
 
@@ -430,6 +435,16 @@ class PicSimulation:
                     f"生じる可能性があります。ビン数 {int(steps_per_period)} 以下を推奨します"
                 )
 
+        # ---- 半径に比例した重み (軸対称、prompts/136) -----------------------
+        # 目標の重み w_t(r) = c (r + r0)。c は初めの装荷で決める。粒子マージ (merge) とは重みの調整が
+        # 重なるので、merge があるときは使わない
+        self._rw = bool(self.rz and self.pic.radial_weighting and ip is not None and self.pic.merge is None)
+        if self.rz and self.pic.radial_weighting and ip is not None and self.pic.merge is not None:
+            self.warnings.append("粒子マージ (merge) を使うので、半径に比例した重み (radial_weighting) は使いません")
+        self._rw_r0 = RW_R0_SIZES * float(project.mesh.size) if self.rz else 0.0
+        self._rw_c = 0.0
+        self.split_added = 0  # 半径に比例した重みの分割で増やした累計マクロ粒子数 (diag "split")
+
         # ---- 初期プラズマ装荷 -------------------------------------------------
         # 電子・イオンを同一位置に装荷して初期の厳密な電気的中性を保つ (quiet start)
         self.species: dict[str, PicSpecies] = {}
@@ -443,7 +458,15 @@ class PicSimulation:
             else:
                 area_load = float(self.elem_vol[~self._solid_elem].sum())
             w0 = ip.density * area_load / n_macro  # マクロ重み (実粒子数/マクロ。rz はリング)
-            x0, elem0 = self._sample_uniform(rng, n_macro)
+            if self._rw:
+                # 半径に比例した重み: r/(r + r0) の確率で採った位置に c (r + r0) の重み (全電荷は同じ)
+                x0, elem0 = self._sample_radial(rng, n_macro)
+                rr = x0[:, self.ridx] + self._rw_r0
+                self._rw_c = ip.density * area_load / float(rr.sum())
+                w_init = self._rw_c * rr
+            else:
+                x0, elem0 = self._sample_uniform(rng, n_macro)
+                w_init = np.full(n_macro, w0)
             for name, q, m, t_ev, mobile in (
                 ("electron", -QE, ME, ip.te_ev, True),
                 ("ion", QE, self.m_ion, ip.ti_ev, not ip.immobile_ions),
@@ -456,7 +479,7 @@ class PicSimulation:
                     else np.zeros((n_macro, 3))
                 )
                 self.species[name] = PicSpecies(
-                    name, q, m, x0.copy(), v, np.full(n_macro, w0), elem0.copy(), mobile
+                    name, q, m, x0.copy(), v, w_init.copy(), elem0.copy(), mobile
                 )
         else:
             for name, q, m in (("electron", -QE, ME), ("ion", QE, self.m_ion)):
@@ -666,6 +689,8 @@ class PicSimulation:
         self.merge_removed = 0   # マージで削減した累計マクロ粒子数 (diag "merged")
         if self.pic.merge is not None:
             self._merge_rng = np.random.default_rng(mcc_seed + 54321)
+        if self._rw:
+            self._rw_rng = np.random.default_rng(mcc_seed + 104729)
 
         # ---- 節点密度アキュムレータ (enable_density_accum で有効化) -----------
         self._accum_start: int | None = None
@@ -780,7 +805,7 @@ class PicSimulation:
                 "t", "ke_e", "ke_i", "fe", "n_e", "n_i",
                 "wall_e", "wall_i", "phi_min", "phi_max",
                 "coll_e", "ion_events", "see_events", "surf_q",
-                "fn_i", "fn_events", "merged",
+                "fn_i", "fn_events", "merged", "split",
             )
         }
         self._f_immobile: dict[str, np.ndarray] = {}  # 不動種の堆積キャッシュ
@@ -1389,6 +1414,115 @@ class PicSimulation:
             + (r1 * r2)[:, None] * pts[:, 2]
         )
         return x, elem
+
+    def _sample_radial(self, rng: np.random.Generator, n: int):
+        """半径に比例した重み (prompts/136) の初めの装荷の位置。
+
+        要素を面積比例で選び要素内は一様に引いた候補を、r/(r + r0) の確率で採る。重み c (r + r0) と
+        組み合わせると密度が一様になる (要素内の r 依存も厳密。軸の近くで重みが 0 にならないよう r0 を足す)。
+        """
+        loadable = (np.arange(len(self.tris)) if self._solid_elem is None
+                    else np.nonzero(~self._solid_elem)[0])
+        p_elem = self.area[loadable] / self.area[loadable].sum()
+        xs, es = [], []
+        need = n
+        while need > 0:
+            m = max(1024, int(need * 1.5) + 64)
+            elem = loadable[rng.choice(len(loadable), size=m, p=p_elem)].astype(np.int64)
+            r1 = np.sqrt(rng.random(m))
+            r2 = rng.random(m)
+            pts = self.mesh.nodes[self.tris[elem]]
+            x = (
+                (1.0 - r1)[:, None] * pts[:, 0]
+                + (r1 * (1.0 - r2))[:, None] * pts[:, 1]
+                + (r1 * r2)[:, None] * pts[:, 2]
+            )
+            r = x[:, self.ridx]
+            ok = rng.random(m) * (r + self._rw_r0) < r
+            take = min(int(ok.sum()), need)
+            xs.append(x[ok][:take])
+            es.append(elem[ok][:take])
+            need -= take
+        return np.concatenate(xs), np.concatenate(es)
+
+    def _pop_control(self, push_ions: bool) -> None:
+        """半径に比例した重みの分割・併合 (prompts/136)。イオンは押したステップだけ。"""
+        for sp in self.species.values():
+            if not sp.mobile or (sp.name == "ion" and not push_ions):
+                continue
+            if self._pop_control_species(sp) and sp.name == "ion":
+                self._f_ion_cache = None
+
+    def _pop_control_species(self, sp: PicSpecies) -> bool:
+        """種 sp の重みを目標 w_t = c (r + r0) の [1/2, 2] 倍に寄せる。変えたら True。
+
+        - 分割: w > 2 w_t の粒子を同じ位置・速度の m = round(w/w_t) 個 (上限 RW_MAX_SPLIT) に等分する
+          (電荷・運動量・エネルギー・電荷堆積が厳密に同じ)。親が残りの重みを持つ。
+        - 併合: w < w_t/2 の粒子を同じ要素の軽い粒子と対にし (要素の番号の順に隣どうし)、重み w_a + w_b の
+          1 個にする。位置は重み付き平均 (同じ要素の中なので P1 の電荷堆積が厳密に同じ)、速度は重みに比例した
+          確率で一方のもの (運動量・エネルギーは期待値で保存、速度分布を歪めない。Teunissen & Ebert 2014)。
+        """
+        n = len(sp.x)
+        if n == 0:
+            return False
+        wt = self._rw_c * (sp.x[:, self.ridx] + self._rw_r0)
+        ratio = sp.w / wt
+        heavy = np.nonzero(ratio > 2.0)[0]
+        light = np.nonzero(ratio < 0.5)[0]
+        if heavy.size == 0 and light.size < 2:
+            return False
+        bary = self._bary_cached(sp)
+        dead = np.zeros(0, dtype=np.int64)
+        if light.size >= 2:
+            order = np.argsort(sp.elem[light], kind="stable")
+            lo = light[order]
+            e = sp.elem[lo]
+            same_next = np.r_[e[1:] == e[:-1], False]
+            start = np.r_[True, ~same_next[:-1]]
+            first = np.maximum.accumulate(np.where(start, np.arange(lo.size), 0))
+            k = np.nonzero(((np.arange(lo.size) - first) % 2 == 0) & same_next)[0]
+            if k.size:
+                a, b = lo[k], lo[k + 1]
+                wa, wb = sp.w[a], sp.w[b]
+                tot = wa + wb
+                fa = (wa / tot)[:, None]
+                sp.x[a] = fa * sp.x[a] + (1.0 - fa) * sp.x[b]
+                bary[a] = fa * bary[a] + (1.0 - fa) * bary[b]
+                pick_b = self._rw_rng.random(a.size) * tot >= wa
+                sp.v[a[pick_b]] = sp.v[b[pick_b]]
+                sp.w[a] = tot
+                dead = b
+        if heavy.size:
+            m = np.minimum(np.floor(ratio[heavy] + 0.5), RW_MAX_SPLIT).astype(np.int64)
+            q = sp.w[heavy] / m
+            rep = m - 1
+            src = np.repeat(heavy, rep)
+            x_new, v_new, e_new, l_new = sp.x[src], sp.v[src], sp.elem[src], bary[src]
+            w_new = np.repeat(q, rep)
+            sp.w[heavy] = sp.w[heavy] - q * rep
+        if dead.size:
+            self._remove_particles(sp, dead)
+            self.merge_removed += int(dead.size)
+        if heavy.size:
+            self._append_species_buffered(sp, x_new, v_new, w_new, e_new, l_new)
+            self.split_added += len(w_new)
+        return True
+
+    @staticmethod
+    def _remove_particles(sp: PicSpecies, idx: np.ndarray) -> None:
+        """粒子 idx を消す (末尾の生きている粒子をその位置へ移して詰める。O(消す数)、並びは変わる)。"""
+        n = len(sp.x)
+        d = np.unique(idx)
+        n_new = n - d.size
+        holes = d[d < n_new]
+        tail = np.arange(n_new, n)
+        movers = tail[~np.isin(tail, d)]
+        bary_ok = sp.bary is not None and len(sp.bary) == n
+        for arr in (sp.x, sp.v, sp.w, sp.elem) + ((sp.bary,) if bary_ok else ()):
+            arr[holes] = arr[movers]
+        sp.x, sp.v, sp.w, sp.elem = sp.x[:n_new], sp.v[:n_new], sp.w[:n_new], sp.elem[:n_new]
+        sp.bary = sp.bary[:n_new] if bary_ok else None
+        sp.nidx = None
 
     def _bary_of(self, x: np.ndarray, elem: np.ndarray) -> np.ndarray:
         """位置・所属要素から P1 重心座標 (n, 3) を計算する。"""
@@ -2338,6 +2472,10 @@ class PicSimulation:
         # 揃える (電荷堆積は P1 形状関数が affine なのでマージ前後で厳密に不変)
         if self.pic.merge is not None:
             self._merge_step()
+        # 7'. 半径に比例した重み (軸対称、prompts/136): 重すぎる粒子の分割と軽すぎる粒子の対の併合。
+        # どちらも電荷堆積を変えない (分割は同じ位置、併合は同じ要素の重み付き平均の位置で P1 が affine)
+        if self._rw:
+            self._pop_control(push_ions)
 
         # 節点密度・時間平均フィールド (enable_density_accum 以後、毎ステップ積算)
         if accumulating:
@@ -2365,6 +2503,8 @@ class PicSimulation:
         h["surf_q"].append(float(self.q_surf.sum()))
         # 粒子マージ (prompts/77) で削減した累計マクロ粒子数。無効なら常に 0
         h["merged"].append(self.merge_removed)
+        # 半径に比例した重み (prompts/136) の分割で増やした累計マクロ粒子数。使わなければ常に 0
+        h["split"].append(self.split_added)
         # FN 電界放出: このステップの総放出電流 [A/m] と累計放出マクロ電子数
         h["fn_i"].append(fn_i)
         h["fn_events"].append(self.fn_events)

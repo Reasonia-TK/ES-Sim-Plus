@@ -2550,7 +2550,7 @@
     },
     "radial_weighting": {
      "default": true,
-     "description": "軸対称で、マクロ粒子の重みを半径に比例させる (軸の近くの粒子を増やし、統計の雑音による加熱を抑える)。v2 PIC (直交格子) のみ",
+     "description": "軸対称で、マクロ粒子の重みを半径に比例させる (軸の近くの粒子を増やし、統計の雑音による加熱を抑える)。v1 PIC は粒子マージ (merge) があると使わない",
      "title": "Radial Weighting",
      "type": "boolean",
      "x-advanced": true

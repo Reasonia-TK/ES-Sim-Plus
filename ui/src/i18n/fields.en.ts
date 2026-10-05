@@ -161,7 +161,7 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
     },
     PicSettings: {
       ion_subcycle: "Push ions once every N steps (5–10 is typical, 1 disables)",
-      radial_weighting: "Make the macro-particle weight proportional to the radius so that more particles sit near the axis and statistical noise does not heat the electrons there. Heavy particles are split and light ones merged (v2 PIC only; off = uniform weights)",
+      radial_weighting: "Make the macro-particle weight proportional to the radius so that more particles sit near the axis and statistical noise does not heat the electrons there. Heavy particles are split and light ones merged (off = uniform weights; v1 PIC skips it when particle merging is on)",
     },
     DsmcSettings: {
       mesh_scale: "The DSMC mesh uses the FEM mesh size × this factor (1 = same mesh)",
