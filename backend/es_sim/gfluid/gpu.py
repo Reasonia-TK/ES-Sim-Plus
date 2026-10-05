@@ -238,6 +238,20 @@ class GpuCartesianFluid2dSimulation(CartesianFluid2dSimulation):
         super().prepare_continue(extra_steps, frame_every, avg_steps, phase_bins)
         self._g.acc = None
 
+    # ---- 収束の判定 (prompts/137): 場はデバイスのまま足し込み、周期を閉じるとき計算のストリームの上で写す ----
+
+    def _conv_accumulate(self, c) -> None:
+        g = self._g
+        if getattr(self, "_conv_act", None) is None:
+            self._conv_act = g.cp.asarray(self.active_idx)
+        with g.stream:
+            c.sums.add("phi", g.phi[self._conv_act])
+            c.sums.add("n_e", g.ne)
+
+    def _conv_close(self, c) -> None:
+        with self._g.stream:
+            super()._conv_close(c)
+
 
 class _EbPoisson:
     """一様格子の EB Poisson (GMG-PCG。未知数 4096 以下は密な逆行列で厳密に)。"""

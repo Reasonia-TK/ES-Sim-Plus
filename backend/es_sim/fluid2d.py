@@ -158,6 +158,7 @@ import scipy.sparse.linalg as spla
 from . import _numba_kernels
 from .boltz import BoltzCoeffs, boltz_coeffs_at, boltz_coeffs_from_table
 from .circuit import BlockingCircuit, mesh_capacitor_electrodes
+from .convergence import BLOCKS_2D, BlockMap, make_monitor
 from .fem import EPS0, _radial_index, assemble, assemble_transport_operator
 from .fluid1d import FLOOR_N, FLOOR_W, _bernoulli, frost_mobility
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
@@ -374,6 +375,17 @@ class Fluid2dSimulation:
 
         # ---- 阻止コンデンサ (Poisson の前処理・RF の周期が決まってから) ----------------------
         self._init_circuit()
+
+        # ---- 収束の判定 (prompts/137、convergence.py。周期は阻止コンデンサの集計と同じ RF の周期) -------
+        # 場は気体の節点 (active_idx) を粗いブロックに体積で平均して比べる (v2 の直交格子・AMR も同じ)
+        self.conv = make_monitor(
+            s.convergence, kind="fluid", rf_period_s=1.0 / self._cycle_freq if self._cycle_freq is not None else None,
+            dt=self.dt, frame_every=s.frame_every,
+        )
+        self._conv_blocks = (
+            BlockMap(np.asarray(self.mesh.nodes)[self.active_idx], self.node_vol, BLOCKS_2D)
+            if self.conv is not None else None
+        )
 
     def _init_circuit(self) -> None:
         """阻止コンデンサの回路を組む (v1 の三角形メッシュ。v2 は es_sim.gfluid が差し替える。モジュール docstring)。"""
@@ -1394,23 +1406,53 @@ class Fluid2dSimulation:
             "elapsed_s": time.perf_counter() - self._run_t0,
             # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
             "circuit": None if self.circuit is None else self.circuit.frame(),
+            # 収束の判定の今の状態 (prompts/137)。判定しなければ None
+            "convergence": None if self.conv is None else self.conv.frame(),
         }
+
+    # ---- 収束の判定 (prompts/137) ---------------------------------------------------------------
+
+    def _conv_accumulate(self, c) -> None:
+        """周期平均の場 (気体の節点の φ・n_e) を足し込む (GPU 版はデバイスのまま足す)。"""
+        act = self.active_idx
+        c.sums.add("phi", self.phi[act])
+        c.sums.add("n_e", self.n_e[act])
+
+    def _conv_close(self, c) -> None:
+        c.close_period(self.t, self.step_count, blocks=self._conv_blocks, circuit=self.circuit)
+
+    def _conv_after_step(self) -> bool:
+        """周期平均の足し込みと周期の境での判定。収束で止めるなら True。"""
+        c = self.conv
+        if c is None:
+            return False
+        self._conv_accumulate(c)
+        h = self.history
+        c.sums.add("N_e", h["n_e_total"][-1])
+        c.sums.add("N_i", h["n_i_total"][-1])
+        if c.boundary_passed(self.t):
+            self._conv_close(c)
+        return c.stop_now
 
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
         """n_steps 回実行して (history, フレーム列) を返す (fluid1d.run_batch と同じ設計)。
 
         should_stop はステップ間に加えてサブステップの合間にも確認する (step 参照。
         発散しかけた解では 1 ステップが上限近くまで刻まれて長くなるため)。
+        収束で止める設定 (convergence.stop、prompts/137) なら、収束したステップから平均区間を取って早めに終える
+        (時間平均・位相分解の区間はその平均区間に移す)。
         """
         if self._accum_start is None:
             avg = self.s.avg_steps if self.s.avg_steps is not None else max(1, self.s.n_steps // 4)
             avg = min(avg, self.s.n_steps)
             self.enable_density_accum(self.step_count + self.s.n_steps - avg + 1)
+        if self.conv is not None:
+            self.conv.begin_run()
 
         frames: list[dict] = []
-        n_steps_total = self.s.n_steps
+        end = self.step_count + self.s.n_steps
         self._run_t0 = time.perf_counter()
-        for _ in range(n_steps_total):
+        while self.step_count < end:
             if should_stop is not None and should_stop():
                 break
             phi = self.step(should_stop)
@@ -1422,6 +1464,11 @@ class Fluid2dSimulation:
                     "エネルギーのいずれかが非有限値)。dt を小さくする、メッシュを"
                     "細かくする等を検討してください"
                 )
+            if self._conv_after_step():
+                new_end = self.conv.stop_end(self.step_count, end, self.s.avg_steps)
+                if new_end is not None:
+                    end = new_end
+                    self.enable_density_accum(self.step_count + 1)
             if self.step_count % self.s.frame_every == 0:
                 frame = self._make_frame()
                 if store_frames:
@@ -1532,4 +1579,6 @@ def build_fluid2d_result(sim: Fluid2dSimulation, elapsed_s: float) -> dict:
             {"capacitance": "F", "charge": "C", "current": "A"} if sim.rz
             else {"capacitance": "F/m", "charge": "C/m", "current": "A/m"}
         ),
+        # 収束の判定 (prompts/137): 周期ごとの変化・残りの変化と、収束した時。判定しなければ None
+        "convergence": None if sim.conv is None else sim.conv.result(),
     }

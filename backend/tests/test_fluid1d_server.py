@@ -179,7 +179,7 @@ def test_ws_sweep_fluid1d_two_values_full_flow_and_result_endpoint():
     assert fluid1d_result0 is not None
     assert set(fluid1d_result0) == {
         "history", "profiles", "sheath", "cycle", "wall_iedf", "walls", "gen_total", "elapsed_s", "timing", "settings",
-        "circuit",
+        "circuit", "convergence",
     }
     assert fluid1d_result0["settings"]["init_density_m3"] == 1.0e14
 
@@ -219,7 +219,7 @@ def test_batch_run_module_auto_selects_fluid1d_only_project(tmp_path: Path):
     assert result is not None
     assert set(result) == {
         "history", "profiles", "sheath", "cycle", "wall_iedf", "walls", "gen_total", "elapsed_s", "timing", "settings",
-        "circuit",
+        "circuit", "convergence",
     }
     assert result["settings"]["n_steps"] == 20
     assert result["elapsed_s"] > 0

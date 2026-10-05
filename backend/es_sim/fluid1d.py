@@ -120,6 +120,7 @@ from scipy.linalg import solve_banded
 
 from .boltz import BoltzCoeffs, boltz_coeffs_at, boltz_coeffs_from_table
 from .circuit import BlockingCircuit, CapacitorSpec
+from .convergence import BLOCKS_1D, BlockMap, make_monitor
 from .fem import EPS0
 from .fluid_coeffs import FluidReactions, build_fluid_reactions, interp_loglog
 from .mcc import KB
@@ -388,6 +389,13 @@ class Fluid1dSimulation:
             ]
             period = 1.0 / self._cycle_freq if self._cycle_freq is not None else None
             self.circuit = BlockingCircuit(specs, c_matrix, period)
+
+        # ---- 収束の判定 (prompts/137、convergence.py。周期は阻止コンデンサの集計と同じ RF の周期) ----------
+        self.conv = make_monitor(
+            s.convergence, kind="fluid", rf_period_s=1.0 / self._cycle_freq if self._cycle_freq is not None else None,
+            dt=self.dt, frame_every=s.frame_every,
+        )
+        self._conv_blocks = BlockMap(self.xg, self.node_vol, BLOCKS_1D) if self.conv is not None else None
 
         # ---- 安定性の目安警告 (陽的経路のみ。半陰は後退オイラー + サブステップで
         #      無条件安定なので警告不要) -------------------------------------------
@@ -1017,19 +1025,41 @@ class Fluid1dSimulation:
             "elapsed_s": time.perf_counter() - self._run_t0,
             # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
             "circuit": None if self.circuit is None else self.circuit.frame(),
+            # 収束の判定の今の状態 (prompts/137)。判定しなければ None
+            "convergence": None if self.conv is None else self.conv.frame(),
         }
 
+    def _conv_after_step(self) -> bool:
+        """収束の判定 (prompts/137): 周期平均の足し込みと周期の境での判定。収束で止めるなら True。"""
+        c = self.conv
+        if c is None:
+            return False
+        h = self.history
+        c.sums.add("phi", self.phi)
+        c.sums.add("n_e", self.n_e)
+        c.sums.add("N_e", h["n_e_total"][-1])
+        c.sums.add("N_i", h["n_i_total"][-1])
+        if c.boundary_passed(self.t):
+            c.close_period(self.t, self.step_count, blocks=self._conv_blocks, circuit=self.circuit)
+        return c.stop_now
+
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
-        """n_steps 回実行して (history, フレーム列) を返す (pic1d.run_batch と同じ設計)。"""
+        """n_steps 回実行して (history, フレーム列) を返す (pic1d.run_batch と同じ設計)。
+
+        収束で止める設定 (convergence.stop、prompts/137) なら、収束したステップから平均区間を取って早めに終える
+        (時間平均・位相分解の区間はその平均区間に移す)。
+        """
         if self._accum_start is None:
             avg = self.s.avg_steps if self.s.avg_steps is not None else max(1, self.s.n_steps // 4)
             avg = min(avg, self.s.n_steps)
             self.enable_density_accum(self.step_count + self.s.n_steps - avg + 1)
+        if self.conv is not None:
+            self.conv.begin_run()
 
         frames: list[dict] = []
-        n_steps_total = self.s.n_steps
+        end = self.step_count + self.s.n_steps
         self._run_t0 = time.perf_counter()
-        for _ in range(n_steps_total):
+        while self.step_count < end:
             if should_stop is not None and should_stop():
                 break
             phi = self.step()
@@ -1044,6 +1074,11 @@ class Fluid1dSimulation:
                     "エネルギーのいずれかが非有限値)。dt を小さくする、n_cells を"
                     "増やす等を検討してください"
                 )
+            if self._conv_after_step():
+                new_end = self.conv.stop_end(self.step_count, end, self.s.avg_steps)
+                if new_end is not None:
+                    end = new_end
+                    self.enable_density_accum(self.step_count + 1)
             if self.step_count % self.s.frame_every == 0:
                 frame = self._make_frame()
                 if store_frames:
@@ -1183,4 +1218,6 @@ def build_fluid1d_result(sim: Fluid1dSimulation, elapsed_s: float) -> dict:
         "circuit": None if sim.circuit is None else sim.circuit.result(
             {"capacitance": "F/m^2", "charge": "C/m^2", "current": "A/m^2"}
         ),
+        # 収束の判定 (prompts/137): 周期ごとの変化・残りの変化と、収束した時。判定しなければ None
+        "convergence": None if sim.conv is None else sim.conv.result(),
     }

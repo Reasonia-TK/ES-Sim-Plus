@@ -589,6 +589,32 @@ class PicMerge(BaseModel):
     every: int = Field(100, ge=1, description="チェック間隔 [ステップ]")
 
 
+class ConvergenceSettings(BaseModel):
+    """時間発展の収束の判定 (prompts/137、convergence.py)。
+
+    周期平均 (RF の最低周波数の周期の整数倍、RF が無ければ steps ステップ) の φ・n_e (粗いブロックの体積平均、
+    L2) と電子・イオンの総数・阻止コンデンサの自己バイアスを比べる。雑音を差し引いた変化 D と、変化の減り方から
+    見積もった残りの変化 R がどの量でも閾値以下の周期が hold 回続いたら収束とする。
+    """
+
+    enabled: bool = Field(True, description="周期平均の量が落ち着いたか (収束) を判定する")
+    tol: float | None = Field(
+        None, gt=0, lt=1, description="閾値 (相対)。空なら自動 (流体 0.001・PIC 0.01)", json_schema_extra=ui("1")
+    )
+    rf_periods: int = Field(1, ge=1, le=10000, description="判定の周期 (RF の最低周波数の周期の何個分)")
+    steps: int | None = Field(
+        None, ge=1, description="RF も CSV 波形も無いときの判定の周期 [ステップ]。空なら frame_every の 10 倍"
+    )
+    hold: int = Field(3, ge=1, le=1000, description="何回続けて満たしたら収束とするか")
+    stop: bool = Field(
+        False, description="収束したら、そこから平均区間 (avg_steps、空なら判定の周期 10 個分) を取って止める"
+    )
+    max_window: int = Field(
+        20, ge=1, le=200, description="比べる窓の最大 [判定の周期] (雑音が大きいときに広げる上限)",
+        json_schema_extra=ui(advanced=True),
+    )
+
+
 class PicSettings(BaseModel):
     initial_plasma: InitialPlasma | None = None
     injection: PicInjection | None = None
@@ -859,6 +885,8 @@ class Fluid1dSettings(BaseModel):
     # 流体は粒子を持たないため、位相分解シース電圧 + イオン走行時間フィルタで
     # 再構成する工学近似 (無衝突シース・CX 衝突なしを仮定、fluid1d.py 参照)
     wall_iedf_bins: int = Field(100, ge=0, le=1000)
+    # 収束の判定 (prompts/137)
+    convergence: ConvergenceSettings = ConvergenceSettings()
     # seed は不要 (流体は決定論的で乱数を使わない)
     # 電子輸送・反応係数のソース (prompts/117): "maxwell" (既定) は fluid_coeffs.py の
     # Maxwell 平均 (従来経路、ビット不変)。"boltzmann" は boltz_table (boltzpm による
@@ -928,6 +956,8 @@ class Fluid2dSettings(BaseModel):
     frame_every: int = Field(200, gt=0)
     avg_steps: int | None = Field(None, gt=0)
     phase_bins: int = Field(0, ge=0)
+    # 収束の判定 (prompts/137)
+    convergence: ConvergenceSettings = ConvergenceSettings()
     # seed は不要 (流体は決定論的で乱数を使わない)
     # 電子輸送・反応係数のソース (fluid1d.py と同じ規約・既定値、prompts/117)
     electron_model: Literal["maxwell", "boltzmann"] = "maxwell"

@@ -501,6 +501,80 @@
    "title": "Collector",
    "type": "object"
   },
+  "ConvergenceSettings": {
+   "description": "時間発展の収束の判定 (prompts/137、convergence.py)。\n\n周期平均 (RF の最低周波数の周期の整数倍、RF が無ければ steps ステップ) の φ・n_e (粗いブロックの体積平均、\nL2) と電子・イオンの総数・阻止コンデンサの自己バイアスを比べる。雑音を差し引いた変化 D と、変化の減り方から\n見積もった残りの変化 R がどの量でも閾値以下の周期が hold 回続いたら収束とする。",
+   "properties": {
+    "enabled": {
+     "default": true,
+     "description": "周期平均の量が落ち着いたか (収束) を判定する",
+     "title": "Enabled",
+     "type": "boolean"
+    },
+    "tol": {
+     "anyOf": [
+      {
+       "exclusiveMaximum": 1,
+       "exclusiveMinimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "閾値 (相対)。空なら自動 (流体 0.001・PIC 0.01)",
+     "title": "Tol",
+     "x-unit": "1"
+    },
+    "rf_periods": {
+     "default": 1,
+     "description": "判定の周期 (RF の最低周波数の周期の何個分)",
+     "maximum": 10000,
+     "minimum": 1,
+     "title": "Rf Periods",
+     "type": "integer"
+    },
+    "steps": {
+     "anyOf": [
+      {
+       "minimum": 1,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "RF も CSV 波形も無いときの判定の周期 [ステップ]。空なら frame_every の 10 倍",
+     "title": "Steps"
+    },
+    "hold": {
+     "default": 3,
+     "description": "何回続けて満たしたら収束とするか",
+     "maximum": 1000,
+     "minimum": 1,
+     "title": "Hold",
+     "type": "integer"
+    },
+    "stop": {
+     "default": false,
+     "description": "収束したら、そこから平均区間 (avg_steps、空なら判定の周期 10 個分) を取って止める",
+     "title": "Stop",
+     "type": "boolean"
+    },
+    "max_window": {
+     "default": 20,
+     "description": "比べる窓の最大 [判定の周期] (雑音が大きいときに広げる上限)",
+     "maximum": 200,
+     "minimum": 1,
+     "title": "Max Window",
+     "type": "integer",
+     "x-advanced": true
+    }
+   },
+   "title": "ConvergenceSettings",
+   "type": "object"
+  },
   "Domain": {
    "properties": {
     "polygon": {
@@ -1316,6 +1390,18 @@
      "title": "Wall Iedf Bins",
      "type": "integer"
     },
+    "convergence": {
+     "$ref": "#/$defs/ConvergenceSettings",
+     "default": {
+      "enabled": true,
+      "tol": null,
+      "rf_periods": 1,
+      "steps": null,
+      "hold": 3,
+      "stop": false,
+      "max_window": 20
+     }
+    },
     "electron_model": {
      "default": "maxwell",
      "enum": [
@@ -1478,6 +1564,18 @@
      "minimum": 0,
      "title": "Phase Bins",
      "type": "integer"
+    },
+    "convergence": {
+     "$ref": "#/$defs/ConvergenceSettings",
+     "default": {
+      "enabled": true,
+      "tol": null,
+      "rf_periods": 1,
+      "steps": null,
+      "hold": 3,
+      "stop": false,
+      "max_window": 20
+     }
     },
     "electron_model": {
      "default": "maxwell",
