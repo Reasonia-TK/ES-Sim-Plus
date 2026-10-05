@@ -75,3 +75,15 @@ def test_examples_bundled_in_the_ui_are_valid_projects():
     assert files, "examples/*.json が見つかりません"
     for f in files:
         Project.model_validate(json.loads(f.read_text(encoding="utf-8")))
+
+
+def test_old_documents_with_the_removed_solver_setting_still_load():
+    """初版の "solver": {"backend": ...} (計算に効いていなかった) は消したが、それを含む古い文書も読める
+    (知らないキーとして捨てる)。"""
+    doc = json.loads((EXAMPLES / "parallel_plates.json").read_text(encoding="utf-8"))
+    doc["solver"] = {"backend": "cupy"}
+    assert "solver" not in Project.model_validate(doc).model_dump()
+    assert "solver" not in Project.model_json_schema()["properties"]
+    res = TestClient(server.app).post("/solve", json=doc)
+    assert res.status_code == 200, res.text
+    assert res.json()["capacitance"] > 0

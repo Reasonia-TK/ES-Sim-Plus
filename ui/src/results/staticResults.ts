@@ -22,7 +22,7 @@ export function meshKey(p: Project): string {
 
 /** 求解に効く設定の要約 */
 export function solveKey(p: Project): string {
-  return JSON.stringify([p.coord ?? "xy", p.geometry, p.mesh, p.solver ?? null]);
+  return JSON.stringify([p.coord ?? "xy", p.geometry, p.mesh]);
 }
 
 export interface MeshEntry {

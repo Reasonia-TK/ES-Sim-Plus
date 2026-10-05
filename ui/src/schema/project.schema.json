@@ -2788,22 +2788,6 @@
    "title": "SheathLine",
    "type": "object"
   },
-  "SolverSettings": {
-   "properties": {
-    "backend": {
-     "default": "numpy",
-     "enum": [
-      "numpy",
-      "cupy",
-      "auto"
-     ],
-     "title": "Backend",
-     "type": "string"
-    }
-   },
-   "title": "SolverSettings",
-   "type": "object"
-  },
   "Species": {
    "description": "粒子種。electron/proton プリセット、または custom で q・m を直接指定する。",
    "properties": {
@@ -3112,12 +3096,6 @@
   },
   "mesh": {
    "$ref": "#/$defs/MeshSettings"
-  },
-  "solver": {
-   "$ref": "#/$defs/SolverSettings",
-   "default": {
-    "backend": "numpy"
-   }
   },
   "b_field": {
    "anyOf": [

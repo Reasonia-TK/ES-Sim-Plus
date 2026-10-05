@@ -21,7 +21,6 @@
     "size": 0.0015,
     "local_sizes": [ { "region": "focus_electrode", "size": 0.0006 } ]
   },
-  "solver": { "backend": "numpy" },
   "particles": {
     "species": { "preset": "electron" },
     "emitter": {

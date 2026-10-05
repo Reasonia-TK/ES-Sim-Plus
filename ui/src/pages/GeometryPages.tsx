@@ -158,7 +158,6 @@ export function ProjectPage() {
           />
         )}
       </Field>
-      <SchemaField path={["solver", "backend"]} />
     </>
   );
 }

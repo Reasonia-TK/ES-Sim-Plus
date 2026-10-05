@@ -37,7 +37,6 @@ export function FemPage() {
       ) : (
         <Hint tone="warn">{t("femPage.noElectrodes")}</Hint>
       )}
-      <SchemaField path={["solver", "backend"]} />
       <Hint>{t("femPage.computeHint")}</Hint>
       <MeshBuild />
       <SolveSummary />

@@ -2,11 +2,12 @@
 
 - 粒子位置 → 所属三角形の特定: walk 探索 + 前回要素キャッシュ
 - E 補間: P1 要素なので要素内一定 (将来、節点平均場の重心座標補間に変更可)
-- 積分器: リープフロッグ (kick-drift-kick / velocity-Verlet 形式。静電場のみ。
-  磁場を導入する際に Boris 化)。軸対称 (rz / rz_x0) の移動は回転法
+- 積分器: リープフロッグ (kick-drift-kick / velocity-Verlet 形式)。一様磁場 (b_field、平面 2D のみ) は
+  Boris 回転 (_boris_matrix、prompts/51)。軸対称 (rz / rz_x0) の移動は回転法
   (局所座標の3D直線移動 → 子午面へ回転、PIC・DSMC と同じ)
-- 全粒子を numpy 一括で進め、backend.get_xp() で CuPy に切り替え可能にする
-- 電極・外周到達で吸収し、衝突位置・エネルギーを記録
+- 全粒子を numpy 一括で進め、walk 探索は Numba (_numba_kernels.walk_step。Numba が無ければ同じ結果の
+  numpy 実装)。CPU だけで動く (v2 の GPU には移していない)
+- 電極・外周到達で吸収し、衝突位置・エネルギーを記録。対称境界は鏡面反射、周期境界は反対側へ移す
 """
 
 from __future__ import annotations

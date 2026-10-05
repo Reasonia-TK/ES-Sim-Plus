@@ -66,7 +66,6 @@ export const fieldsJa = {
       dsmc_h_over_mfp: "格子幅 / 平均自由行程 の上限",
     },
     MeshSettings: { size: "メッシュ幅", mode: "方式" },
-    SolverSettings: { backend: "行列計算" },
     Species: { preset: "粒子の種類", q: "電荷 q", m: "質量 m" },
     Emitter: {
       kind: "形",
@@ -136,7 +135,6 @@ export const fieldsJa = {
         cartesian: "直交格子 + 埋め込み境界 (v2・GPU)",
       },
     },
-    SolverSettings: { backend: { numpy: "NumPy", cupy: "CuPy (GPU)", auto: "自動" } },
     Species: { preset: { electron: "電子", proton: "陽子", custom: "任意 (q, m)" } },
     Emitter: { kind: { line: "線分", point: "点" }, energy_dist: { mono: "単色", maxwell: "Maxwell 分布" } },
     PicInjection: { species: { electron: "電子", ion: "イオン" } },

@@ -37,9 +37,6 @@
   "mesh": {
     "size": 0.001
   },
-  "solver": {
-    "backend": "numpy"
-  },
   "pic": {
     "initial_plasma": {
       "density": 1.0e14,

@@ -93,7 +93,6 @@ export interface Project {
   coord?: Coord;
   geometry: Geometry;
   mesh: MeshSettings;
-  solver?: { backend?: string } | null;
   b_field?: { bx?: number; by?: number; bz?: number } | null;
   particles?: Record<string, unknown> | null;
   pic?: Record<string, unknown> | null;
@@ -340,6 +339,9 @@ export function normalizeProject(raw: unknown): { project: Project; results: unk
     pic.collectors = [{ label: "C1", ...c }];
     delete pic.collector;
   }
+  // 旧形式: solver.backend (行列計算の numpy / cupy の切り替え。計算には効いていなかった) は捨てる (バックエンドも
+  // 知らないキーとして無視する)
+  delete project.solver;
   return { project, results: results ?? null };
 }
 

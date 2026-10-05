@@ -68,7 +68,6 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
       dsmc_h_over_mfp: "Max cell size / mean free path",
     },
     MeshSettings: { size: "Mesh size", mode: "Mode" },
-    SolverSettings: { backend: "Linear algebra" },
     Species: { preset: "Particle", q: "Charge q", m: "Mass m" },
     Emitter: {
       kind: "Shape",
@@ -138,7 +137,6 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
         cartesian: "Cartesian + embedded boundaries (v2, GPU)",
       },
     },
-    SolverSettings: { backend: { numpy: "NumPy", cupy: "CuPy (GPU)", auto: "Auto" } },
     Species: { preset: { electron: "Electron", proton: "Proton", custom: "Custom (q, m)" } },
     Emitter: { kind: { line: "Line", point: "Point" }, energy_dist: { mono: "Monoenergetic", maxwell: "Maxwellian" } },
     PicInjection: { species: { electron: "Electron", ion: "Ion" } },

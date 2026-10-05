@@ -13,7 +13,6 @@
     ]
   },
   "mesh": { "size": 1e-6 },
-  "solver": { "backend": "numpy" },
   "particles": {
     "species": { "preset": "electron" },
     "fn": {

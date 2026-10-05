@@ -374,10 +374,6 @@ class MeshSettings(BaseModel):
     amr: AmrSettings | None = None
 
 
-class SolverSettings(BaseModel):
-    backend: Literal["numpy", "cupy", "auto"] = "numpy"
-
-
 # ---- 粒子軌道追跡 (フェーズ2、仕様書 §8) --------------------------------------
 
 
@@ -1129,6 +1125,9 @@ class Params(BaseModel):
 
 
 class Project(BaseModel):
+    # 知らないキーは読み込みで捨てる (pydantic の既定)。初版の "solver": {"backend": "numpy" | "cupy" | "auto"}
+    # (計算には効いていなかった。GPU を使うかは mesh.mode と es_sim.device で決まる) は消したが、それを含む
+    # 古い文書もそのまま読める
     version: int = 1
     unit: Literal["m", "mm"] = "m"
     # 座標系 (prompts/39, 41)。"xy": 平面2D (従来)。
@@ -1137,7 +1136,6 @@ class Project(BaseModel):
     coord: Literal["xy", "rz", "rz_x0"] = "xy"
     geometry: Geometry
     mesh: MeshSettings
-    solver: SolverSettings = SolverSettings()
     # 一様磁場 [T] (prompts/51)。null または全成分 0 で磁場なし (従来と完全一致)
     b_field: BField | None = None
     # 定常ガス流れの DSMC 設定 (prompts/54)。null なら無効

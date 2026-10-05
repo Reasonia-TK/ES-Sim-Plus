@@ -20,9 +20,10 @@ describe("normalizeProject", () => {
     expect(() => normalizeProject({ geometry: { domain: { polygon: [[0, 0]] } } })).toThrow(/polygon/);
   });
 
-  it("fills defaults, strips results and migrates the old single collector", () => {
+  it("fills defaults, strips results and migrates the old single collector and solver setting", () => {
     const raw = {
       geometry: { domain: { polygon: [[0, 0], [0.02, 0], [0.02, 0.01], [0, 0.01]] } },
+      solver: { backend: "cupy" },
       pic: { collector: { p1: [0, 0], p2: [1, 1] } },
       results: { version: 1 },
     };
@@ -33,8 +34,11 @@ describe("normalizeProject", () => {
     expect(project.geometry.boundaries).toEqual([]);
     expect(project.mesh.size).toBeCloseTo(0.02 / 25);
     expect(project.pic).toEqual({ collectors: [{ label: "C1", p1: [0, 0], p2: [1, 1] }] });
+    // 計算に効いていなかった旧版の solver.backend は捨てる
+    expect("solver" in project).toBe(false);
     // 元のオブジェクトは変えない
     expect((raw.pic as Record<string, unknown>).collector).toBeDefined();
+    expect(raw.solver).toEqual({ backend: "cupy" });
   });
 
   it("opens every bundled example", () => {

@@ -16,6 +16,5 @@
       { "edges": [1], "type": "dirichlet", "voltage": 100.0 }
     ]
   },
-  "mesh": { "size": 0.004 },
-  "solver": { "backend": "numpy" }
+  "mesh": { "size": 0.004 }
 }

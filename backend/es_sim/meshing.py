@@ -25,8 +25,8 @@ from dataclasses import dataclass, field
 import gmsh
 import numpy as np
 
-# 円形状の多角形分割数の下限・上限 (仕様書 §8 スキーマ契約参照)。円弧 (bulges) の弦への分割と同じ値を使うので
-# paths.py に置いてある
+# 円形状の多角形分割数の下限・上限 (仕様書 §4.1、prompts/08 のスキーマ契約参照)。円弧 (bulges) の弦への
+# 分割と同じ値を使うので paths.py に置いてある
 from .paths import CIRCLE_SEGMENTS_MAX, CIRCLE_SEGMENTS_MIN
 from .schema import EdgeMeshSize, Project, Region, VoltageWaveform, rf_components
 
@@ -61,7 +61,7 @@ def _circle_polygon(center: tuple[float, float], radius: float, h: float) -> lis
 
         n = clamp(ceil(2*pi*r / h), CIRCLE_SEGMENTS_MIN, CIRCLE_SEGMENTS_MAX)
 
-    で決め、開始角0・反時計回りで頂点列を返す (仕様書 §8 スキーマ契約参照)。
+    で決め、開始角0・反時計回りで頂点列を返す (仕様書 §4.1、prompts/08 のスキーマ契約参照)。
     """
     n = math.ceil(2.0 * math.pi * radius / h)
     n = max(CIRCLE_SEGMENTS_MIN, min(CIRCLE_SEGMENTS_MAX, n))
@@ -191,9 +191,10 @@ def _add_edge_mesh_fields(entries: list[EdgeMeshSize], lc: float) -> None:
 def generate_mesh(project: Project) -> Mesh:
     """メッシュ生成の入口。mesh.mode に応じて非構造 (gmsh) / 構造格子を切り替える。
 
-    mode="cartesian" (v2 直交格子 + EB エンジン、prompts/119) は静電場 (/solve・/profile) と
-    PIC (/ws/pic) を v2 で解くが、v2 へ未移植の v1 ソルバー (軌道追跡・DSMC・流体 2D など)
-    はこの関数を通るため、同じ矩形 domain 前提の構造格子 (階段近似) にフォールバックする。
+    mode="cartesian" (v2 直交格子 + EB エンジン、prompts/119) は静電場 (/mesh・/solve・/profile)・PIC・
+    DSMC・流体 2D を v2 で解き、この関数を通らない。v2 へ移していない粒子軌道追跡 (/trace と
+    jobs/runners.py の TraceRunner: generate_mesh + fem.solve + particles.trace) だけがここを通り、
+    同じ矩形 domain 前提の構造格子 (階段近似) にフォールバックする。
     """
     if project.mesh.mode in ("structured", "cartesian"):
         mesh = _generate_structured(project)
