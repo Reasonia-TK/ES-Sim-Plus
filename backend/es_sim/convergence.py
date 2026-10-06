@@ -18,7 +18,8 @@ PIC・流体の時間発展で、周期平均の量が定常に落ち着いた�
   雑音なら不偏。2 次までの変化は消え、時定数 τ 周期でゆっくり減る変化は (1/τ)² 倍まで小さくなるので、流体では
   ほぼ 0。二階差分だと減る変化の曲がりが 1/τ 倍で残り、下の q の誤差と区別できない)。
 - 窓 W: 窓の平均どうしの比較の雑音の幅 √(2σ²/W) が閾値の半分以下になる最小の W。``max_window`` で足りなければ
-  「雑音が大きく判定できない」(閾値を上げるか周期を長くする)。量ごとの W の最大を使う。
+  「揺れが大きく比べられない」(状態 noisy。走り始めの速い変化も三階差分に残るので、流体でも初めの数〜数十周期は
+  これになることがある。続くなら閾値を上げるか周期を長くする)。量ごとの W の最大を使う。
 - 変化 D: 直近 W 周期の平均 B とその前の W 周期の平均 A の差から、雑音の分を引いた相対変化
   √max(0, ‖B − A‖² − 2σ²/W) / ‖B‖。
 - 残りの変化 R: 窓 W' の平均を 3 つ (B'・A'・A'') 並べ、Δ1 = B' − A'、Δ2 = A' − A''、q = ⟨Δ1, Δ2⟩ / ‖Δ2‖² (窓ごとに
@@ -35,7 +36,9 @@ PIC・流体の時間発展で、周期平均の量が定常に落ち着いた�
   越える。PIC) があるときは、遅い傾きを探す範囲がそろう 3 × max_window 周期まで判定しない (標本が少ないと雑音に
   埋もれた傾きを見つけられず、早すぎる合格になる)。
 
-結果の無限大・未計算の値は JSON に載せられないので None にする (状態 "fail" で R が None なら無限大)。
+結果の無限大・未計算の値は JSON に載せられないので None にする (状態 "fail" で R が None なら無限大)。R の種類
+(``r_kind``) も残す: "none" (有意な変化が無い)・"decay" (減っているとして等比で外挿)・"trend" (減っていると言えない、
+または減り方がとても遅い: 今の傾きでこれまでの長さの 10 倍だけ変わり続けたときの値なので大きく出る)。
 """
 
 from __future__ import annotations
@@ -228,9 +231,11 @@ class ConvergenceMonitor:
         self.now_passing = False
         self.stopped = False
         self.stop_now = False
+        #: この実行で収束で早めた終わりのステップ (早めていなければ None。ジョブの進捗の総ステップ数に使う)
+        self.run_end: int | None = None
         self._converged_at_run_start = False
         self.history: dict = {"t": [], "step": [], "period": [], "window": [], "status": [],
-                              "d": {}, "r": {}, "noise": {}}
+                              "d": {}, "r": {}, "noise": {}, "r_kind": {}}
 
     # ---- エンジンから -------------------------------------------------------------------------
 
@@ -246,6 +251,7 @@ class ConvergenceMonitor:
         """実行 (run_batch) の始まりに呼ぶ。止める設定は、この実行の中で初めて収束したときだけ効く。"""
         self._converged_at_run_start = self.converged
         self.stop_now = False
+        self.run_end = None
 
     def default_avg_steps(self) -> int:
         """収束で止めるときの平均区間の既定 (avg_steps が無いとき) [ステップ]。"""
@@ -266,6 +272,7 @@ class ConvergenceMonitor:
         if new_end >= end:
             return None
         self.stopped = True
+        self.run_end = new_end
         return new_end
 
     def close_period(self, t: float, step: int, *, blocks: BlockMap | None = None, circuit=None,
@@ -389,6 +396,7 @@ class ConvergenceMonitor:
         d_out: dict[str, float | None] = {n: None for n in names}
         r_out: dict[str, float | None] = {n: None for n in names}
         noise_out: dict[str, float | None] = {n: None for n in names}
+        kind_out: dict[str, str | None] = {n: None for n in names}
         if n_min < MIN_SAMPLES:
             status = "warming"
         elif window is None:
@@ -398,8 +406,8 @@ class ConvergenceMonitor:
         else:
             ok = True
             for n in names:
-                d, r, eta = self._change(n, series[n], window, sig2[n] or 0.0, inners[n], k_closed + 1)
-                d_out[n], r_out[n], noise_out[n] = d, r, eta
+                d, r, eta, kind = self._change(n, series[n], window, sig2[n] or 0.0, inners[n], k_closed + 1)
+                d_out[n], r_out[n], noise_out[n], kind_out[n] = d, r, eta, kind
                 if not (d <= self.tol and r <= self.tol):
                     ok = False
             status = "pass" if ok else "fail"
@@ -419,13 +427,18 @@ class ConvergenceMonitor:
         h["period"].append(int(k_closed))
         h["window"].append(window)
         h["status"].append(status)
-        for key, vals in (("d", d_out), ("r", r_out), ("noise", noise_out)):
+        for key, vals in (("d", d_out), ("r", r_out), ("noise", noise_out), ("r_kind", kind_out)):
             for n in set(h[key]) | set(vals):
                 lst = h[key].setdefault(n, [None] * n_prev)
                 lst.append(vals.get(n))
 
-    def _change(self, name: str, x: list, w: int, sig2: float, inner, elapsed: int) -> tuple[float, float, float]:
-        """窓 w の変化 D・残りの変化 R・雑音の幅 η (どれも相対)。elapsed: 始めからの周期の数 (外挿の上限に使う)。"""
+    def _change(self, name: str, x: list, w: int, sig2: float, inner,
+                elapsed: int) -> tuple[float, float, float, str]:
+        """窓 w の変化 D・残りの変化 R・雑音の幅 η (どれも相対) と R の種類。elapsed: 始めからの周期の数 (外挿の上限)。
+
+        R の種類: "none" (有意な変化が無い・丸め誤差、R = 0)、"decay" (減っているとして等比で外挿)、"trend" (減って
+        いると言えない、または減り方がとても遅いので、今の傾きでこれまでの長さの HORIZON 倍だけ変わり続けたとき)。
+        """
         vals = self._values(name, x)
         n = len(vals)
 
@@ -440,12 +453,14 @@ class ConvergenceMonitor:
         n1 = inner(d1, d1)
         scale = self._scale(name, x, w, inner)
         if scale <= 0.0:
-            zero = n1 <= 0.0
-            return (0.0 if zero else math.inf), (0.0 if zero else math.inf), 0.0
+            if n1 <= 0.0:
+                return 0.0, 0.0, 0.0, "none"
+            return math.inf, math.inf, 0.0, "trend"
         d = math.sqrt(max(0.0, n1 - nv)) / scale
         eta = math.sqrt(max(nv, 0.0)) / scale
         # 残りの変化: 変化が有意になる最初の窓 (W から広げる) で、窓ごとの変化の減り方から外挿する
         r = 0.0
+        kind = "none"
         for wr in range(w, n // 3 + 1):
             if wr != w:
                 d1, d2 = diffs(wr)
@@ -458,37 +473,42 @@ class ConvergenceMonitor:
                 break
             n2 = inner(d2, d2)
             if n2 <= nvr or n2 <= 0.0:
-                r = math.inf
+                r_geo = math.inf
             else:
                 q = inner(d1, d2) / n2
                 q_up = abs(q) + Q_SIG * math.sqrt(nvr / n2 * (1.0 + q * q))
-                r = dr * q_up / (1.0 - q_up) if q_up < 1.0 else math.inf
+                r_geo = dr * q_up / (1.0 - q_up) if q_up < 1.0 else math.inf
             # 外挿はこれまでの長さの HORIZON 倍の先まで: 今の速さ (1 周期あたり dr / wr) でそれだけ変わり続けたときの
             # 変化を上限にする (減っていると言えない傾き・時定数がとても長く見える数値的なずれを無限大にしない)
-            r = min(r, dr / wr * HORIZON * elapsed)
+            cap = dr / wr * HORIZON * elapsed
+            r, kind = (r_geo, "decay") if r_geo <= cap else (cap, "trend")
             break
-        return d, r, eta
+        return d, r, eta, kind
 
     # ---- 結果 ---------------------------------------------------------------------------------
 
     def frame(self) -> dict:
-        """フレームに載せる今の状態 (最後に判定した周期)。"""
+        """フレームに載せる今の状態 (最後に判定した周期)。worst は max(D, R) がいちばん大きい量の値 (無限大は None)。"""
         h = self.history
-        worst = None
+        worst = worst_name = worst_kind = None
         if h["status"] and h["status"][-1] in ("pass", "fail"):
-            vals = []
+            best = -1.0
             for n in h["d"]:
                 d = h["d"][n][-1]
                 r = h["r"][n][-1]
                 if d is None:
                     continue
-                vals.append(math.inf if r is None else max(d, r))
-            if vals:
-                worst = _finite_or_none(max(vals))
+                v = math.inf if r is None else max(d, r)
+                if v > best:
+                    best, worst_name, worst_kind = v, n, h["r_kind"][n][-1]
+            if worst_name is not None:
+                worst = _finite_or_none(best)
         return {
             "status": h["status"][-1] if h["status"] else "warming",
             "window": h["window"][-1] if h["window"] else None,
             "worst": worst,
+            "worst_name": worst_name,
+            "worst_kind": worst_kind,
             "tol": self.tol,
             "checks": len(h["t"]),
             "converged": self.converged,
@@ -521,6 +541,7 @@ class ConvergenceMonitor:
             "d": clean(h["d"]),
             "r": clean(h["r"]),
             "noise": clean(h["noise"]),
+            "r_kind": {n: list(lst) for n, lst in h["r_kind"].items()},
             "converged": self.converged,
             "converged_t": at.get("t"),
             "converged_step": at.get("step"),

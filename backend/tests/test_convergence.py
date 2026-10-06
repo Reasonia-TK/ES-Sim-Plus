@@ -45,8 +45,9 @@ def test_slow_exponential_approach_waits_for_the_remaining_change():
     assert mon.converged
     expected = tau * math.log(0.5 / TOL_FLUID)
     assert expected - 5 < mon.converged_at["period"] < expected + 15
-    # 窓は 1 周期 (決定的で雑音が無い)
+    # 窓は 1 周期 (決定的で雑音が無い)。残りの変化は減り方からの外挿 (decay)
     assert {w for w in mon.history["window"] if w is not None} == {1}
+    assert mon.history["r_kind"]["N_e"][-1] == "decay"
 
 
 def test_slow_decay_early_in_the_run_is_not_passed():
@@ -84,6 +85,10 @@ def test_slow_drift_hidden_in_noise_is_found_with_longer_windows():
     drift = [1.0 + 1.0e-3 * k + 0.005 * rng.standard_normal() for k in range(300)]
     _feed(mon, [{"N_e": v} for v in drift])
     assert not mon.converged
+    # 減っていると言えない傾き: 今の傾きでこれまでの長さの 10 倍 (trend)
+    assert mon.history["r_kind"]["N_e"][-1] == "trend"
+    f = mon.frame()
+    assert f["worst_name"] == "N_e" and f["worst_kind"] == "trend" and f["worst"] > TOL_PIC
     flat = [drift[-1] + 0.005 * rng.standard_normal() for _ in range(200)]
     _feed(mon, [{"N_e": v} for v in flat])
     assert mon.converged
@@ -98,6 +103,8 @@ def test_constant_quantity_converges_after_hold_checks():
     assert status[: MIN_SAMPLES - 1] == ["warming"] * (MIN_SAMPLES - 1)
     assert status[MIN_SAMPLES - 1:] == ["pass"] * (12 - MIN_SAMPLES + 1)
     assert mon.converged_at["period"] == MIN_SAMPLES - 1 + 2
+    assert mon.history["r_kind"]["N_e"][-1] == "none"               # 有意な変化が無い
+    assert mon.history["r_kind"]["N_e"][0] is None                    # 判定中は無し
 
 
 def test_one_failing_quantity_blocks_and_resets_the_hold():
@@ -191,14 +198,17 @@ def test_stop_only_when_convergence_is_found_during_the_run():
     assert mon.converged and mon.stop_now
     assert mon.stop_end(step_count=500, end=10_000, avg_steps=300, accum_start=9_701) == 800
     assert mon.stopped and not mon.stop_now
+    assert mon.run_end == 800                       # ジョブの進捗の総ステップ数 (この実行の中だけ)
     # 平均区間で終わりが早まらなければ止めない。時間平均の区間がもう始まっていても止めない (今の終わりまで)
     mon2 = _monitor(stop=True, hold=2)
     mon2.begin_run()
     _feed(mon2, [{"N_e": 1.0} for _ in range(MIN_SAMPLES + 1)])
     assert mon2.stop_end(step_count=500, end=600, avg_steps=300, accum_start=301) is None and not mon2.stopped
     assert mon2.stop_end(step_count=500, end=10_000, avg_steps=300, accum_start=400) is None and not mon2.stopped
+    assert mon2.run_end is None
     # 続きの実行 (収束したあと) では止めない
     mon.begin_run()
+    assert mon.run_end is None
     _feed(mon, [{"N_e": 1.0} for _ in range(3)])
     assert not mon.stop_now
     # avg_steps が無ければ判定の周期 10 個分

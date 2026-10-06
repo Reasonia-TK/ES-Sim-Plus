@@ -51,6 +51,8 @@ export interface PicFrame {
   mesh_version?: number;
   /** 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134) */
   circuit?: CircuitFrame[] | null;
+  /** 収束の判定の今の状態 (prompts/137) */
+  convergence?: ConvergenceFrame | null;
 }
 
 /** 時間平均の場 (e_abs は要素、ほかは節点) */
@@ -109,6 +111,8 @@ export interface PicResult {
   regrids?: unknown[];
   /** 阻止コンデンサ (自己バイアス、prompts/134)。コンデンサが無ければ null */
   circuit?: CircuitResult | null;
+  /** 収束の判定 (prompts/137)。判定しなければ null */
+  convergence?: ConvergenceResult | null;
 }
 
 // ---- 流体 2D ----
@@ -160,6 +164,58 @@ export interface CircuitFrame {
   v1?: number;
 }
 
+// ---- 収束の判定 (prompts/137。backend convergence.ConvergenceMonitor) ----
+
+/** 判定の状態: 判定中 (周期が足りない)・揺れが大きく比べられない (走り始めの速い変化か雑音)・未収束・合格 */
+export type ConvStatus = "warming" | "noisy" | "fail" | "pass";
+/** 残りの変化 R の種類: 有意な変化なし・減り方から外挿・傾きが続くとしてこれまでの長さの 10 倍 */
+export type ConvKind = "none" | "decay" | "trend";
+
+/**
+ * 判定の周期ごとの履歴。量は "phi"・"n_e" (場、粗いブロックの L2)・"N_e"・"N_i" (総数)・"V_dc:<電極>" (|V1| 比)。
+ * d・r・noise は相対値で、判定していない周期と無限大 (状態 "fail" の r) は null
+ */
+export interface ConvergenceResult {
+  tol: number;
+  basis: "rf" | "steps";
+  rf_periods: number | null;
+  period_s: number;
+  hold: number;
+  stop: boolean;
+  max_window: number;
+  blocks: number[] | null;
+  t: number[];
+  step: number[];
+  period: number[];
+  window: (number | null)[];
+  status: ConvStatus[];
+  d: Record<string, (number | null)[]>;
+  r: Record<string, (number | null)[]>;
+  noise: Record<string, (number | null)[]>;
+  /** CV-c (prompts/137) から。古い結果には無い */
+  r_kind?: Record<string, (ConvKind | null)[]>;
+  converged: boolean;
+  converged_t: number | null;
+  converged_step: number | null;
+  converged_period: number | null;
+  now_passing: boolean;
+  stopped: boolean;
+}
+
+/** フレームに載る今の状態 (worst は max(D, R) がいちばん大きい量の値、無限大は null) */
+export interface ConvergenceFrame {
+  status: ConvStatus;
+  window: number | null;
+  worst: number | null;
+  worst_name?: string | null;
+  worst_kind?: ConvKind | null;
+  tol: number;
+  checks: number;
+  converged: boolean;
+  converged_t: number | null;
+  now_passing: boolean;
+}
+
 export interface Fluid2dFrame {
   step: number;
   t: number;
@@ -170,6 +226,7 @@ export interface Fluid2dFrame {
   counts: Record<string, number>;
   elapsed_s: number;
   circuit?: CircuitFrame[] | null;
+  convergence?: ConvergenceFrame | null;
 }
 
 export interface Fluid2dFields {
@@ -202,6 +259,7 @@ export interface Fluid2dResult {
   settings: Record<string, unknown>;
   mesh?: { nodes: Point[]; triangles: [number, number, number][] };
   circuit?: CircuitResult | null;
+  convergence?: ConvergenceResult | null;
 }
 
 // ---- DSMC ----
@@ -315,6 +373,7 @@ export interface Pic1dResult {
   timing: Record<string, number>;
   settings: Record<string, unknown>;
   circuit?: CircuitResult | null;
+  convergence?: ConvergenceResult | null;
 }
 
 export interface Fluid1dResult {
@@ -329,6 +388,7 @@ export interface Fluid1dResult {
   timing: Record<string, number>;
   settings: Record<string, unknown>;
   circuit?: CircuitResult | null;
+  convergence?: ConvergenceResult | null;
 }
 
 export interface Frame1d {
@@ -342,6 +402,7 @@ export interface Frame1d {
   elapsed_s: number;
   sample?: { x: number[]; vx: number[] };
   circuit?: CircuitFrame[] | null;
+  convergence?: ConvergenceFrame | null;
 }
 
 // ---- VHF 定在波 ----

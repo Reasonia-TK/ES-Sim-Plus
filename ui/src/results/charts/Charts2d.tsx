@@ -26,6 +26,7 @@ import type { PicCollectorResult, PicDiag, PicFrame, PicResult } from "../types"
 import { EEDF_COLORS, ELECTRON_COLOR, ION_COLOR, useLength } from "./common";
 import { EedfCard } from "./Distributions";
 import { RfMonitor, type RfElectrode } from "./RfMonitor";
+import { ConvergenceCard } from "./Convergence";
 import { attachCircuit, SelfBiasCard, type CircuitSrc } from "./SelfBias";
 
 // ---- RF 波形 (2D の電極) ----
@@ -355,6 +356,7 @@ export function PicCharts({ job, project, result }: { job: JobSummary; project: 
     <>
       <RfCard project={project} time={frame?.t ?? null} circuit={circuit} />
       {result?.circuit && <SelfBiasCard circuit={result.circuit} project={project} csvPrefix="pic" />}
+      {result?.convergence && <ConvergenceCard convergence={result.convergence} project={project} csvPrefix="pic" />}
       <PicHistoryCard rows={rows as Partial<PicDiag>[]} />
       {result && result.collectors.length > 0 && <CollectorCard collectors={result.collectors} labels={labels} />}
       {result && result.eedf.length > 0 && <EedfCard eedf={result.eedf} csvPrefix="" prefKey="pic.eedf" defaultMode="eepf" />}
@@ -380,6 +382,7 @@ export function Fluid2dCharts({ job, project, result }: { job: JobSummary; proje
     <>
       <RfCard project={project} time={running ? (frame?.t ?? null) : null} circuit={circuit} />
       {result?.circuit && <SelfBiasCard circuit={result.circuit} project={project} csvPrefix="fluid2d" />}
+      {result?.convergence && <ConvergenceCard convergence={result.convergence} project={project} csvPrefix="fluid2d" />}
       <Fluid2dHistoryCard t={hist.t} ne={hist.ne} ni={hist.ni} />
       {mesh && result && (result.fields || result.cycle) && <SheathCard kind="fluid2d" src={{ mesh, fields: result.fields, cycle: result.cycle }} />}
     </>

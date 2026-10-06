@@ -97,6 +97,21 @@ class SimState:
     extra: dict = field(default_factory=dict)
 
 
+def _frame_sink(st: SimState, emit: Emitter) -> Callable[[dict], None]:
+    """run_batch のフレームの受け口。収束で止めると決めたら (prompts/137)、フレームに早めた終わりまでのステップ数を
+    n_steps として載せる (ジョブの進捗の総ステップ数になる。設定の n_steps は上限だった)。"""
+    conv = getattr(st.sim, "conv", None)
+    if conv is None:
+        return emit.frame
+
+    def sink(frame: dict) -> None:
+        if conv.run_end is not None:
+            frame = {**frame, "n_steps": conv.run_end - st.step_offset}
+        emit.frame(frame)
+
+    return sink
+
+
 class PicRunner(BaseRunner):
     kind = "pic"
     continuable = True
@@ -134,7 +149,7 @@ class PicRunner(BaseRunner):
     def run(self, st: SimState, emit: Emitter, should_stop) -> dict:
         sim = st.sim
         t0 = time.perf_counter()
-        sim.run_batch(emit.frame, should_stop, False)
+        sim.run_batch(_frame_sink(st, emit), should_stop, False)
         elapsed = time.perf_counter() - t0
         result = _build_results_bundle(sim, st.step_offset, elapsed)["pic"]
         result["frame"] = emit.last_frame
@@ -182,7 +197,7 @@ class _Run1dRunner(BaseRunner):
 
     def run(self, st: SimState, emit: Emitter, should_stop) -> dict:
         t0 = time.perf_counter()
-        st.sim.run_batch(emit.frame, should_stop, False)
+        st.sim.run_batch(_frame_sink(st, emit), should_stop, False)
         return self.result(st.sim, time.perf_counter() - t0)
 
     def prepare_continue(self, st: SimState, options: dict) -> None:
@@ -469,6 +484,8 @@ class SweepRunner(BaseRunner):
                     entry["error"] = ev.get("error")
                 if ev.get("self_bias"):
                     entry["self_bias"] = ev["self_bias"]   # [{label, v_dc, v1}] (prompts/134)
+                if ev.get("convergence"):
+                    entry["convergence"] = ev["convergence"]   # 収束の判定の要約 (prompts/137)
                 summary.append(entry)
                 emit.event({"type": "case", **entry})
                 emit.progress(len(summary), n)

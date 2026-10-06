@@ -91,6 +91,15 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
     Collector: { tol: "Capture distance" },
     PicMerge: { n_max: "Max macro-particles per species", every: "Check interval" },
     PicSettings: { ion_subcycle: "Ion subcycling", radial_weighting: "Radial weighting (axisymmetric)" },
+    ConvergenceSettings: {
+      enabled: "Judge convergence",
+      tol: "Tolerance",
+      rf_periods: "Judging period (RF periods)",
+      steps: "Judging period (without RF)",
+      hold: "Consecutive passes",
+      stop: "Stop when converged",
+      max_window: "Max window (periods)",
+    },
     Pic1dElectrode: { v_dc: "DC voltage" },
     BlockingCapacitor: { capacitance: "Capacitance C_b", initial_bias_v: "Initial bias" },
     BlockingCapacitor1d: { capacitance: "Capacitance C_b (per area)", initial_bias_v: "Initial bias" },
@@ -160,6 +169,15 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
     PicSettings: {
       ion_subcycle: "Push ions once every N steps (5–10 is typical, 1 disables)",
       radial_weighting: "Make the macro-particle weight proportional to the radius so that more particles sit near the axis and statistical noise does not heat the electrons there. Heavy particles are split and light ones merged (off = uniform weights; v1 PIC skips it when particle merging is on)",
+    },
+    ConvergenceSettings: {
+      enabled: "Judge whether the period-averaged φ, n_e, electron and ion totals and self-bias have settled (almost no extra cost)",
+      tol: "Passes when the change and the remaining change (both relative) are at most this. Blank = automatic (fluid 0.1%, PIC 1%)",
+      rf_periods: "Averaging length (periods of the lowest RF frequency)",
+      steps: "Judging period when there is no RF or CSV waveform. Blank = 10 × frame_every",
+      hold: "Converged after this many consecutive passes",
+      stop: "When converged, take the averaging window (avg_steps, blank = 10 judging periods) and stop (n_steps becomes a cap)",
+      max_window: "Widest comparison window for noisy quantities. Noisy quantities (PIC) are not judged before 3× this many periods",
     },
     DsmcSettings: {
       mesh_scale: "The DSMC mesh uses the FEM mesh size × this factor (1 = same mesh)",

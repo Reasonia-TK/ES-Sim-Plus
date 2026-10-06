@@ -9,10 +9,27 @@ import { hasArcs, pathHandles } from "../cad/path";
 import { coordOf, domainPath, type Project } from "../model/project";
 import { formatNumber, formatSi, maxOf, minOf } from "../util/format";
 import { ampAtF0, center1d } from "./charts/Charts1d";
+import { convergenceFrameRows, convergenceResultRows } from "./charts/Convergence";
 import { circuitFrameRows, circuitResultRows } from "./charts/SelfBias";
 import { timingRows, useLength } from "./charts/common";
 import { useFrame, useRunProject, useRunResult } from "./runData";
-import type { BoltzTable, DsmcFrame, DsmcResult, Fluid1dResult, Fluid2dFrame, Fluid2dResult, Frame1d, Pic1dResult, PicDiag, PicFrame, PicResult, TlResult, TraceResult } from "./types";
+import type {
+  BoltzTable,
+  ConvergenceFrame,
+  ConvergenceResult,
+  DsmcFrame,
+  DsmcResult,
+  Fluid1dResult,
+  Fluid2dFrame,
+  Fluid2dResult,
+  Frame1d,
+  Pic1dResult,
+  PicDiag,
+  PicFrame,
+  PicResult,
+  TlResult,
+  TraceResult,
+} from "./types";
 
 type Row = [ReactNode, ReactNode];
 
@@ -64,6 +81,15 @@ function useTimingRows(kind: string, timing: Record<string, number> | undefined,
   const out: Row[] = rows.map((r) => [label(r.key), `${r.sec.toFixed(3)} s (${r.pct === null ? "0.0" : r.pct.toFixed(1)}%)`]);
   if (!sumOnly) out.push([t("summary.total"), `${total.toFixed(3)} s`]);
   return out;
+}
+
+/** 収束の判定 (prompts/137): 実行中はフレームの今の状態、完了後は結果 (収束した周期・いちばん遠い量など) */
+function ConvergenceKv({ job, result, frame, project }: { job: JobSummary; result?: ConvergenceResult | null; frame?: ConvergenceFrame | null; project: Project | null }) {
+  const { t } = useTranslation();
+  const running = job.state === "running" || job.state === "queued";
+  const rows = result && !running ? convergenceResultRows(result, project, t) : frame ? convergenceFrameRows(frame, project, t) : null;
+  if (!rows) return null;
+  return <Kv title={t("summary.convTitle")} rows={rows} />;
 }
 
 /** 走査のセル数とセル寸法 (PIC・DSMC の walk の診断) */
@@ -139,6 +165,7 @@ function Summary1d({ job, kind }: { job: JobSummary; kind: "pic1d" | "fluid1d" }
           ]}
         />
       )}
+      <ConvergenceKv job={job} result={r?.convergence} frame={frame?.convergence} project={null} />
     </>
   );
 }
@@ -177,6 +204,7 @@ function PicSummary({ job, project }: { job: JobSummary; project: Project | null
         />
       )}
       {result?.circuit && <Kv title={t("summary.title")} rows={circuitResultRows(result.circuit, project, t)} />}
+      <ConvergenceKv job={job} result={result?.convergence} frame={live?.convergence} project={project} />
       {result && (
         <Kv
           title={t("summary.timingTitle")}
@@ -258,6 +286,7 @@ function Fluid2dSummary({ job, project }: { job: JobSummary; project: Project | 
           ]}
         />
       )}
+      <ConvergenceKv job={job} result={result?.convergence} frame={frame?.convergence} project={project} />
     </>
   );
 }

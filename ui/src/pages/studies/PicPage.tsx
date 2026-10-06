@@ -10,6 +10,7 @@ import { DEFAULT_INITIAL_PLASMA, DEFAULT_MCC, DEFAULT_MERGE, DEFAULT_PIC, defaul
 import { edgeLabel } from "../../tree/treeModel";
 import { projectFreqs } from "../../util/runHints";
 import { Hint } from "../widgets/common";
+import { ConvergenceSection } from "../widgets/ConvergenceSection";
 import { FnSection } from "../widgets/FnSection";
 import { ListEditor, nextLabel } from "../widgets/ListEditor";
 import { ProcessList } from "../widgets/ProcessList";
@@ -136,6 +137,7 @@ export function PicPage() {
         <SchemaField path={[...P, "phase_bins"]} />
         <PhaseBinHint kind="pic" freqs={freqs} dt={pic.dt} bins={pic.phase_bins ?? 40} avgSteps={pic.avg_steps} nSteps={pic.n_steps ?? 2000} />
       </Section>
+      <ConvergenceSection base={P} kind="pic" />
       <OptionalBlock path={[...P, "merge"]} title={t("picPage.merge")} defaults={() => ({ ...DEFAULT_MERGE })} hint={t("picPage.mergeHint")}>
         <SchemaField path={[...P, "merge", "n_max"]} />
         <SchemaField path={[...P, "merge", "every"]} />

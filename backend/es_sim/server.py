@@ -1609,6 +1609,8 @@ async def _run_sweep_session(ws: WebSocket, msg: dict) -> None:
                     entry["error"] = ev["error"]
                 if ev.get("self_bias"):
                     entry["self_bias"] = ev["self_bias"]   # 阻止コンデンサの自己バイアス (prompts/134)
+                if ev.get("convergence"):
+                    entry["convergence"] = ev["convergence"]   # 収束の判定の要約 (prompts/137)
                 summary.append(entry)
             await ws.send_json(ev)
         await run_task  # 例外があれば (通常は起きない想定だが) ここで送出される

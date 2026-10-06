@@ -54,6 +54,17 @@ export interface SweepSelfBias {
   v1: number;
 }
 
+/** 収束の判定の要約 (prompts/137。backend batch.convergence_metrics) */
+export interface SweepConvergence {
+  converged: boolean;
+  converged_period: number | null;
+  converged_t: number | null;
+  /** 最後の判定の状態 */
+  status: "warming" | "noisy" | "fail" | "pass" | null;
+  checks: number;
+  stopped: boolean;
+}
+
 export interface SweepCase {
   value?: number;
   ok?: boolean;
@@ -61,6 +72,7 @@ export interface SweepCase {
   step?: number;
   n_steps?: number;
   self_bias?: SweepSelfBias[];
+  convergence?: SweepConvergence | null;
 }
 
 export type JobEvent =
@@ -72,7 +84,16 @@ export type JobEvent =
   | ({ type: "frame"; id: string } & Record<string, unknown>)
   | { type: "done"; id: string; state: JobState; elapsed_s: number }
   | { type: "error"; id: string; detail: string }
-  | { type: "case"; id: string; case: number; value: number; ok: boolean; error?: string; self_bias?: SweepSelfBias[] }
+  | {
+      type: "case";
+      id: string;
+      case: number;
+      value: number;
+      ok: boolean;
+      error?: string;
+      self_bias?: SweepSelfBias[];
+      convergence?: SweepConvergence | null;
+    }
   | { type: "case_progress"; id: string; case: number; step: number; n_steps: number }
   | { type: "pong" };
 

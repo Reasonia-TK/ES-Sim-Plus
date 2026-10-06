@@ -1348,6 +1348,8 @@ details > summary {
 }
 
 .toggle {
+  /* 隠した input の位置の基準 (無いと input が設定の欄のスクロールの外に置かれ、押すとページ全体がずれる) */
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;

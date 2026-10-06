@@ -219,6 +219,8 @@ def run_sweep(
                 ev = {"type": "case_done", "case": idx, "ok": True}
                 if msg.get("self_bias"):
                     ev["self_bias"] = msg["self_bias"]  # 阻止コンデンサの自己バイアス (prompts/134)
+                if msg.get("convergence"):
+                    ev["convergence"] = msg["convergence"]  # 収束の判定の要約 (prompts/137)
                 on_event(ev)
             elif msg["kind"] == "error":
                 reported.add(idx)

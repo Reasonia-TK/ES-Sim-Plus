@@ -237,6 +237,27 @@ def self_bias_metrics(bundle: dict) -> list[dict]:
     return out
 
 
+def convergence_metrics(bundle: dict) -> dict | None:
+    """結果のバンドルから収束の判定の要約 (スイープのケースの一覧に出す、prompts/137)。判定しなければ None。
+
+    {converged, converged_period, converged_t, status (最後の判定), checks (判定した周期の数), stopped}
+    """
+    for key in ("fluid1d", "fluid2d", "pic1d", "pic"):
+        part = bundle.get(key)
+        conv = part.get("convergence") if isinstance(part, dict) else None
+        if conv:
+            status = conv["status"]
+            return {
+                "converged": conv["converged"],
+                "converged_period": conv["converged_period"],
+                "converged_t": conv["converged_t"],
+                "status": status[-1] if status else None,
+                "checks": len(status),
+                "stopped": conv["stopped"],
+            }
+    return None
+
+
 def _worker(
     case_path: str, out_path: str, case_name: str, progress_q: "mp.Queue", module: str = "pic"
 ) -> None:
@@ -396,6 +417,8 @@ def _worker(
                 "out_path": out_path,
                 # 阻止コンデンサの自己バイアス (スイープのケースの一覧に出す、prompts/134)
                 "self_bias": self_bias_metrics(bundle),
+                # 収束の判定の要約 (スイープのケースの一覧に出す、prompts/137)
+                "convergence": convergence_metrics(bundle),
             }
         )
     except Exception as exc:  # noqa: BLE001 - 子プロセスの例外は文字列化して親へ伝える

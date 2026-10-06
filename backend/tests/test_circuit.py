@@ -320,6 +320,9 @@ def test_sweep_summary_carries_self_bias():
     for c in res["summary"]:
         (bias,) = c["self_bias"]
         assert bias["label"] == "left" and bias["v1"] > 100.0 and abs(bias["v_dc"]) < 150.0
+        # 収束の判定の要約も載る (prompts/137。周期が短いのでまだ判定中)
+        conv = c["convergence"]
+        assert conv["checks"] >= 1 and conv["status"] == "warming" and not conv["converged"]
     # 容量が小さいほど自己バイアスが早く動く (最初の周期の片寄りが大きい)
     assert abs(res["summary"][0]["self_bias"][0]["v_dc"]) > abs(res["summary"][1]["self_bias"][0]["v_dc"])
     client.delete(f"/v2/jobs/{jid}")

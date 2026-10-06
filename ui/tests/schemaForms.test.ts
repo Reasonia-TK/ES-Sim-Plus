@@ -106,7 +106,7 @@ describe("labels", () => {
   });
 
   it("labels every simple field of the settings models", () => {
-    const models = ["Fluid2dSettings", "Fluid1dSettings", "Pic1dSettings", "PicSettings", "DsmcSettings", "TlSettings", "InitialPlasma", "MccGas", "AmrSettings", "Emitter"];
+    const models = ["Fluid2dSettings", "Fluid1dSettings", "Pic1dSettings", "PicSettings", "DsmcSettings", "TlSettings", "InitialPlasma", "MccGas", "AmrSettings", "Emitter", "ConvergenceSettings"];
     const unlabeled: string[] = [];
     for (const m of models) {
       for (const [k, p] of Object.entries(S.$defs![m].properties!)) {

@@ -33,6 +33,7 @@ import {
 } from "./common";
 import { EedfCard, WallIedfCard } from "./Distributions";
 import { electrode1d, RfMonitor } from "./RfMonitor";
+import { ConvergenceCard } from "./Convergence";
 import { attachCircuit, SelfBiasCard } from "./SelfBias";
 
 export type Kind1d = "pic1d" | "fluid1d";
@@ -498,6 +499,7 @@ export function Result1d({ job, kind, result }: { job: JobSummary; kind: Kind1d;
       {pic && pic.eedf.length > 0 && <EedfCard eedf={pic.eedf} csvPrefix="pic1d" prefKey="pic1d.eedf" defaultMode="eepf" />}
       {result.wall_iedf && <WallIedfCard iedf={result.wall_iedf} csvPrefix={kind} prefKey={`${kind}.wallIedf`} hint={kind === "fluid1d" ? t("charts.wallIedfFluidHint") : undefined} />}
       {"circuit" in result && result.circuit && <SelfBiasCard circuit={result.circuit} project={null} csvPrefix={kind} />}
+      {result.convergence && <ConvergenceCard convergence={result.convergence} project={null} csvPrefix={kind} />}
       <History1d kind={kind} result={result} />
     </>
   );

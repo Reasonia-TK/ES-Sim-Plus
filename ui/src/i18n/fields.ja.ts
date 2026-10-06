@@ -89,6 +89,15 @@ export const fieldsJa = {
     Collector: { tol: "判定距離" },
     PicMerge: { n_max: "マクロ粒子数の上限 (種ごと)", every: "確認の間隔" },
     PicSettings: { ion_subcycle: "イオンのサブサイクル", radial_weighting: "半径に比例した重み (軸対称)" },
+    ConvergenceSettings: {
+      enabled: "収束を判定する",
+      tol: "閾値",
+      rf_periods: "判定の周期 (RF 周期の数)",
+      steps: "判定の周期 (RF が無いとき)",
+      hold: "続けて満たす回数",
+      stop: "収束したら止める",
+      max_window: "窓の最大 (周期)",
+    },
     Pic1dElectrode: { v_dc: "直流電圧" },
     BlockingCapacitor: { capacitance: "容量 C_b", initial_bias_v: "初期バイアス" },
     BlockingCapacitor1d: { capacitance: "容量 C_b (面積あたり)", initial_bias_v: "初期バイアス" },
@@ -158,6 +167,15 @@ export const fieldsJa = {
     PicSettings: {
       ion_subcycle: "イオンを N ステップに 1 回だけ進める (5〜10 が目安、1 で無効)",
       radial_weighting: "マクロ粒子の重みを半径に比例させ、軸の近くの粒子を増やして統計の雑音による加熱を抑える。重すぎる粒子は分割、軽すぎる粒子は併合する (オフで一様の重み。v1 PIC は粒子マージがあると使わない)",
+    },
+    ConvergenceSettings: {
+      enabled: "周期平均の φ・n_e・電子とイオンの総数・自己バイアスが落ち着いたかを判定する (計算はほとんど増えない)",
+      tol: "変化と残りの変化 (どちらも相対) がこの値以下なら合格。空欄で自動 (流体 0.1%・PIC 1%)",
+      rf_periods: "周期平均を取る長さ (RF の最低周波数の周期の数)",
+      steps: "RF も CSV 波形も無いときの判定の周期。空欄で frame_every の 10 倍",
+      hold: "この回数続けて合格したら収束とする",
+      stop: "収束したら、そこから平均区間 (avg_steps、空欄なら判定の周期 10 個分) を取って止める (n_steps は上限になる)",
+      max_window: "雑音が大きいとき比べる窓をここまで広げる。雑音のある量 (PIC) はこの 3 倍の周期まで判定しない",
     },
     DsmcSettings: {
       mesh_scale: "DSMC 用のメッシュを FEM のメッシュ幅 × この倍率で作る (1 = 同じメッシュ)",

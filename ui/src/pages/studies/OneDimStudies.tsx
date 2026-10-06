@@ -12,6 +12,7 @@ import { defaultFluid1d, defaultFluid2d, defaultPic1d } from "../../schema/defau
 import { electrodeFreqs, projectFreqs } from "../../util/runHints";
 import type { VoltageWaveform } from "../../util/waveform";
 import { BoltzSection } from "../widgets/BoltzSection";
+import { ConvergenceSection } from "../widgets/ConvergenceSection";
 import { Hint } from "../widgets/common";
 import { ElectrodeEditor } from "../widgets/ElectrodeEditor";
 import { ListEditor, nextLabel } from "../widgets/ListEditor";
@@ -155,6 +156,7 @@ export function Pic1dPage() {
         <PhaseBinHint kind="pic1d" freqs={freqs} dt={blk.dt} bins={blk.phase_bins ?? 40} avgSteps={blk.avg_steps} nSteps={blk.n_steps ?? 2000} />
         <SchemaField path={[...P, "wall_iedf_bins"]} />
       </Section>
+      <ConvergenceSection base={P} kind="pic" />
       <Section title={t("pic1dPage.eedfRegions")}>
         <ListEditor<{ label?: string }>
           path={[...P, "eedf_regions"]}
@@ -268,6 +270,7 @@ export function Fluid1dPage() {
         <PhaseBinHint kind="fluid1d" freqs={freqs} dt={blk.dt} bins={blk.phase_bins ?? 40} avgSteps={blk.avg_steps} nSteps={blk.n_steps ?? 20000} />
         <SchemaField path={[...P, "wall_iedf_bins"]} />
       </Section>
+      <ConvergenceSection base={P} kind="fluid" />
     </StudyShell>
   );
 }
@@ -310,6 +313,7 @@ export function Fluid2dPage() {
         <SchemaField path={[...P, "phase_bins"]} />
         <PhaseBinHint kind="fluid2d" freqs={freqs} dt={blk.dt} bins={blk.phase_bins ?? 0} avgSteps={blk.avg_steps} nSteps={blk.n_steps ?? 20000} />
       </Section>
+      <ConvergenceSection base={P} kind="fluid" />
     </StudyShell>
   );
 }

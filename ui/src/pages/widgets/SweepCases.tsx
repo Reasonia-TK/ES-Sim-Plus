@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { errorText, logError, logInfo } from "../../app/messages";
 import { fetchResult, isTerminal, jobName, sortedJobs, useJobs } from "../../jobs/jobsStore";
 import { sweepCase } from "../../jobs/api";
-import type { SweepCase, SweepSelfBias } from "../../jobs/types";
+import type { SweepCase, SweepConvergence, SweepSelfBias } from "../../jobs/types";
 import { useDocument } from "../../model/documentStore";
 import { normalizeProject } from "../../model/project";
 import { VIEWER_KINDS } from "../../graphics/runScene";
@@ -16,7 +16,7 @@ import { formatNumber } from "../../util/format";
 import { t } from "../../i18n";
 
 interface SweepSummary {
-  summary: { case: number; value: number; ok: boolean; error?: string; self_bias?: SweepSelfBias[] }[];
+  summary: { case: number; value: number; ok: boolean; error?: string; self_bias?: SweepSelfBias[]; convergence?: SweepConvergence | null }[];
   values: number[];
 }
 
@@ -24,6 +24,14 @@ interface SweepSummary {
 function selfBiasText(c: SweepCase | undefined): string {
   if (!c?.self_bias?.length) return "-";
   return c.self_bias.map((s) => (c.self_bias!.length > 1 ? `${s.label}: ${s.v_dc.toFixed(1)} V` : `${s.v_dc.toFixed(1)} V`)).join(", ");
+}
+
+/** ケースの収束の判定 (収束した周期、まだなら最後の状態、prompts/137) */
+function convergenceText(c: SweepCase | undefined): string {
+  const v = c?.convergence;
+  if (!v) return "-";
+  if (v.converged && v.converged_period !== null) return t("jobs.sweepConvAt", { n: v.converged_period + 1 });
+  return v.status === "fail" || v.status === null ? t("jobs.sweepConvNo") : t(`conv.status.${v.status}`);
 }
 
 export async function loadSweepCase(jobId: string, i: number, label: string): Promise<void> {
@@ -70,13 +78,14 @@ export function SweepCases({ jobId }: { jobId?: string }) {
     void fetchResult<SweepSummary>(job.id).then((r) => {
       if (!r) return;
       const filled: Record<number, SweepCase> = {};
-      for (const c of r.summary) filled[c.case] = { value: c.value, ok: c.ok, error: c.error, self_bias: c.self_bias };
+      for (const c of r.summary) filled[c.case] = { value: c.value, ok: c.ok, error: c.error, self_bias: c.self_bias, convergence: c.convergence };
       useJobs.setState((s) => ({ cases: { ...s.cases, [job.id]: { ...filled, ...(s.cases[job.id] ?? {}) } } }));
     });
   }, [job, cases]);
   if (!job) return null;
   const values = (started?.values as number[] | undefined) ?? ((job.options.values as number[] | undefined) ?? []);
   const hasBias = Object.values(cases ?? {}).some((c) => (c.self_bias?.length ?? 0) > 0);
+  const hasConv = Object.values(cases ?? {}).some((c) => Boolean(c.convergence));
   return (
     <div className="subsection">
       <div className="subsection-title">
@@ -88,6 +97,7 @@ export function SweepCases({ jobId }: { jobId?: string }) {
             <th>#</th>
             <th>{t("jobs.sweepValue")}</th>
             {hasBias && <th>{t("jobs.sweepSelfBias")}</th>}
+            {hasConv && <th>{t("jobs.sweepConvergence")}</th>}
             <th>{t("jobs.sweepStatus")}</th>
             <th />
           </tr>
@@ -110,6 +120,7 @@ export function SweepCases({ jobId }: { jobId?: string }) {
                 <td>{i}</td>
                 <td className="mono">{formatNumber(v)}</td>
                 {hasBias && <td className="mono">{selfBiasText(c)}</td>}
+                {hasConv && <td>{convergenceText(c)}</td>}
                 <td className={c?.ok === false ? "text-error" : undefined}>{status}</td>
                 <td>
                   {c?.ok === true && (

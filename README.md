@@ -13,8 +13,8 @@ PIC・DSMC は NVIDIA GPU) の 2 系統。バックエンドは Python (FastAPI 
 Tauri 2 + React + TypeScript (UI v2、WebGL2 のビューアと uPlot のグラフ)。
 
 **主な機能**: CAD スケッチ (DXF の読み書き) / 静電場 / 粒子軌道追跡 / PIC-MCC (1D・2D) / プラズマ流体 (1D・2D) /
-DSMC / VHF 定在波 / Boltzmann 係数 / 軸対称 (r-z) / 阻止コンデンサ (自己バイアス) / IEDF・IADF・EEDF /
-RF 位相分解 / 続き実行 / パラメータスイープ・バッチ実行 / GPU (CUDA)・AMR —
+DSMC / VHF 定在波 / Boltzmann 係数 / 軸対称 (r-z) / 阻止コンデンサ (自己バイアス) / 時間発展の収束の判定 /
+IEDF・IADF・EEDF / RF 位相分解 / 続き実行 / パラメータスイープ・バッチ実行 / GPU (CUDA)・AMR —
 **検証**: Turner ベンチマーク (He CCP) で密度プロファイルが基準解と 2% 以内で一致、GEC 基準セルの自己バイアスを
 実測と比較 ([docs/VALIDATION.md](docs/VALIDATION.md)、下の「検証について」)。
 
@@ -155,7 +155,7 @@ python -m es_sim.batch run case1.json case2.json ... --parallel 2 --out out_dir
 
 | ファイル | 中身 |
 |---|---|
-| `gec_cell.json.gz` | 流体 2D (RF 100 周期) と PIC (600 周期、最後の 50 周期を時間平均)。作り直しは RTX 5070 Ti で流体 約 30 分・PIC 約 40 分 |
+| `gec_cell.json.gz` | 流体 2D (RF 100 周期) と PIC (600 周期、最後の 50 周期を時間平均)。作り直しは RTX 5070 Ti で流体 約 30 分・PIC 約 40 分。収束の判定 (prompts/137) より前に作ったので判定の結果は載っていない (同じ設定で走らせると、流体の 100 周期は密度の残りの変化を約 2 割、PIC の 600 周期は自己バイアスがまだ動いていると判定する) |
 | `ccp_demo.json.gz` | PIC (v1・CPU、サンプルのまま 2000 ステップ = RF 4.8 周期) |
 
 作り直すとき (サンプルの設定で走らせ、`PLANS` の表の周期数まで「続き」で延ばす。GPU の計算は実行ごとにわずかに
@@ -179,6 +179,9 @@ PIC-MCC統合ではTurnerベンチマーク(M. M. Turner et al., *Phys. Plasmas*
   [prompts/119](prompts/119-v2-rebuild-plan.md))。
 - 阻止コンデンサの自己バイアスは、電気的非対称効果 (1D の流体・PIC で理想値の 1.06〜1.35 倍) と GEC 基準セル
   (流体 −85 V・PIC −77 V。Hargis らの実測は −66〜−71 V) で確かめた ([prompts/134](prompts/134-self-bias-plan.md))。
+- 時間発展の収束の判定は、前の周期との比較 (0.1%) では早すぎる合格になる例 (流体 1D の CCP は 306 周期で満たすが
+  そのあと電子の総数が 1.5 倍に、GEC の PIC は 272 周期で満たすがそのあと自己バイアスが約 4 V 動く) で、残りの変化を
+  見積もって合格させないことを確かめた ([prompts/137](prompts/137-convergence-plan.md))。
 - 軸対称の PIC の軸の近くの統計の雑音 (重みが一定だと軸の近くの電離・密度が過大になる) は、半径に比例した重みで
   取り除いた ([prompts/136](prompts/136-rz-radial-weighting-plan.md))。
 
@@ -268,12 +271,20 @@ PIC-MCC統合ではTurnerベンチマーク(M. M. Turner et al., *Phys. Plasmas*
   v1 の三角形メッシュ、流体 2D は CPU・GPU) で使え、結果に RF 1 周期ごとの V_dc・電極の電圧の基本波 |V1|・正味の伝導電流と最後の 1 周期の電極の電位が載る
   (実行のページの数値・グラフ・RF 波形モニタ、スイープのケースの一覧)。容量は文献の値 (GEC セルの 2D
   シミュレーションの 5 nF) を既定にした
+- **時間発展の収束の判定** ([prompts/137](prompts/137-convergence-plan.md)): PIC と流体 (1D・2D、全てのエンジン) で、
+  RF 周期ごとの周期平均 (φ と n_e は粗いブロックの平均、電子・イオンの総数、阻止コンデンサの自己バイアス) が
+  落ち着いたかを判定する。前の周期との比較ではなく、雑音を差し引いた変化 D と、変化の減り方から見積もった残りの
+  変化 R (減っていると言えなければ、今の傾きでこれまでの長さの 10 倍走ったときの変化) が全ての量で閾値 (流体 0.1%・
+  PIC 1%) 以下の周期が 3 回続いたら収束とする。収束した周期・時刻は結果に残り、実行のページの数値・グラフ (量ごとの
+  max(D, R) の推移)・スイープのケースの一覧で見られる。「収束したら止める」をオンにすると、そこから平均区間を取って
+  止める (n_steps は上限になる)。計算はほとんど増えない (GPU PIC で +1%)。雑音に埋もれた遅い傾き (窓の最大
+  `max_window` の 3 倍の周期で見分けられないもの) は見逃すことがある
 - **LXCat 完全対応** (`es_sim/xs/`、`POST /v2/xs/parse`): boltzpmp のパーサーの上位互換
   (DATABASE・複数ガス・ROTATION・`<->` 統計重み・3 列目運動量移行・PARAM./COLUMNS 単位・
   Phelps イオン形式)、EFFECTIVE→ELASTIC の厳密変換、混合ガスの boltzpmp 変換
 - **実行と結果** (UI v2、[prompts/130](prompts/130-ui-v2-plan.md)): ジョブ (`/v2/jobs`・`WS /v2/events`) で実行する
   (同じソルバーの同時実行・待ち行列・停止・続き)。結果は実行ごとに 2D ビュー (ライブ・時間平均・位相分解の再生) と
-  グラフ (1D のプロファイルと比較・IEDF/IADF・EEDF・シース端・RF 波形・自己バイアスなど) と数値サマリで見られ、
+  グラフ (1D のプロファイルと比較・IEDF/IADF・EEDF・シース端・RF 波形・自己バイアス・収束の判定など) と数値サマリで見られ、
   結果付きで保存・読み込みできる。サンプルは保存された計算結果付き (上の「保存された計算結果」)
 
 ### v2 エンジン(`mesh.mode: "cartesian"`、[prompts/119](prompts/119-v2-rebuild-plan.md))
@@ -359,7 +370,8 @@ NVIDIA CUDA のライブラリ (配布物に同梱する NVRTC など、NVIDIA �
 
 済み: v2 再構築 (計算の GPU 化・局所細分化・UI/CAD の作り直し・配布、P0〜P8、[prompts/119](prompts/119-v2-rebuild-plan.md))、
 DXF の読み書き (CAD v2 P7g、[prompts/132](prompts/132-cad-v2-plan.md))、阻止コンデンサ (自己バイアス、
-[prompts/134](prompts/134-self-bias-plan.md))、軸対称 PIC の半径に比例した重み ([prompts/136](prompts/136-rz-radial-weighting-plan.md))。
+[prompts/134](prompts/134-self-bias-plan.md))、軸対称 PIC の半径に比例した重み ([prompts/136](prompts/136-rz-radial-weighting-plan.md))、
+時間発展の収束の判定 ([prompts/137](prompts/137-convergence-plan.md))。
 
 これからの候補:
 

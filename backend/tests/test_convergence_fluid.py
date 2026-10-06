@@ -120,6 +120,31 @@ def test_fluid1d_stop_takes_the_averaging_window_after_convergence():
     assert sim.fields["avg_steps"] == 150          # 時間平均は収束のあとの平均区間
 
 
+def test_job_progress_ends_at_the_convergence_stop(monkeypatch):
+    """ジョブで走らせて収束で止めると、進捗の総ステップ数は早めた終わりまで (設定の n_steps は上限だった。CV-c)。"""
+    import time
+
+    from fastapi.testclient import TestClient
+
+    import es_sim.server as server
+    from es_sim.jobs.runners import Fluid1dRunner
+
+    make = Fluid1dRunner.make
+    monkeypatch.setattr(Fluid1dRunner, "make", lambda self, p: _closed(make(self, p)))
+    client = TestClient(server.app)
+    project = _p1d(40, stop=True).model_dump(mode="json")
+    jid = client.post("/v2/jobs", json={"kind": "fluid1d", "project": project}).json()["id"]
+    deadline = time.monotonic() + 60.0
+    while (s := client.get(f"/v2/jobs/{jid}").json())["state"] not in ("done", "error"):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    end = SPP * (CONVERGED_PERIOD + 1) + 2 * SPP   # 収束のステップ + 平均区間 (avg_steps)
+    assert s["state"] == "done"
+    assert s["progress"]["step"] == s["progress"]["n_steps"] == end < 40 * SPP
+    assert client.get(f"/v2/jobs/{jid}/result").json()["convergence"]["stopped"]
+    client.delete(f"/v2/jobs/{jid}")
+
+
 def test_fluid1d_continue_keeps_the_judgement():
     sim = _closed(Fluid1dSimulation(_p1d(8, stop=True)))
     sim.run_batch(store_frames=False)

@@ -63,16 +63,27 @@ function canDraw(): boolean {
   return canvasOk;
 }
 
+/** 前後が欠けた値 (線にならない) の添字。点を描かない密度でも、これだけは点で出す (見えなくならないように) */
+export function isolatedPoints(ys: ArrayLike<number | null | undefined>): number[] | null {
+  const idx: number[] = [];
+  for (let i = 0; i < ys.length; i++) {
+    if (ys[i] != null && (i === 0 || ys[i - 1] == null) && (i === ys.length - 1 || ys[i + 1] == null)) idx.push(i);
+  }
+  return idx.length ? idx : null;
+}
+
+const isolatedFilter: uPlot.Series.Points.Filter = (u, si, show) => (show ? null : isolatedPoints(u.data[si]));
+
 function pathsOf(p: SeriesPaths | undefined): Partial<uPlot.Series> {
   switch (p) {
     case "step":
-      return { paths: uPlot.paths.stepped!({ align: 1 }) };
+      return { paths: uPlot.paths.stepped!({ align: 1 }), points: { filter: isolatedFilter } };
     case "bars":
       return { paths: uPlot.paths.bars!({ size: [0.92, Infinity], gap: 0 }), points: { show: false } };
     case "points":
       return { paths: () => null, points: { show: true, size: 4 } };
     default:
-      return {};
+      return { points: { filter: isolatedFilter } };
   }
 }
 
