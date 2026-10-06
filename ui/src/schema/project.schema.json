@@ -2420,6 +2420,18 @@
      "title": "Seed",
      "type": "integer",
      "x-advanced": true
+    },
+    "convergence": {
+     "$ref": "#/$defs/ConvergenceSettings",
+     "default": {
+      "enabled": true,
+      "tol": null,
+      "rf_periods": 1,
+      "steps": null,
+      "hold": 3,
+      "stop": false,
+      "max_window": 20
+     }
     }
    },
    "required": [
@@ -2660,6 +2672,18 @@
      },
      "title": "Sheath Lines",
      "type": "array"
+    },
+    "convergence": {
+     "$ref": "#/$defs/ConvergenceSettings",
+     "default": {
+      "enabled": true,
+      "tol": null,
+      "rf_periods": 1,
+      "steps": null,
+      "hold": 3,
+      "stop": false,
+      "max_window": 20
+     }
     }
    },
    "title": "PicSettings",

@@ -158,6 +158,12 @@ class PeriodSums:
         self._sum.clear()
         self._n.clear()
 
+    def drop(self, names) -> None:
+        """名前の足し込みだけ捨てる (格子を作り直して場の配列の大きさが変わったとき)。"""
+        for name in names:
+            self._sum.pop(name, None)
+            self._n.pop(name, None)
+
     def __len__(self) -> int:
         return len(self._sum)
 
@@ -245,12 +251,16 @@ class ConvergenceMonitor:
         """収束で止めるときの平均区間の既定 (avg_steps が無いとき) [ステップ]。"""
         return max(1, round(STOP_AVG_PERIODS * self.period_s / self.dt))
 
-    def stop_end(self, step_count: int, end: int, avg_steps: int | None) -> int | None:
+    def stop_end(self, step_count: int, end: int, avg_steps: int | None, accum_start: int | None) -> int | None:
         """収束で止めるときの新しい終わりのステップ。今の終わりより早まらなければ None。
 
-        呼ぶのは stop_now のとき。早まるなら呼び出し側が時間平均の区間の始まりを step_count + 1 に移す。
+        呼ぶのは stop_now のとき。早まるなら呼び出し側が時間平均の区間の始まりを step_count + 1 に移す。時間平均の
+        区間がもう始まっていたら (accum_start ≤ step_count) 移さずに今の終わりまで走る (区間に結び付いた積算を
+        途中で捨てないため。残りは平均区間より短い)。
         """
         self.stop_now = False
+        if accum_start is not None and accum_start <= step_count:
+            return None
         avg = int(avg_steps) if avg_steps is not None else self.default_avg_steps()
         new_end = step_count + max(1, avg)
         if new_end >= end:
@@ -258,9 +268,15 @@ class ConvergenceMonitor:
         self.stopped = True
         return new_end
 
-    def close_period(self, t: float, step: int, *, blocks: BlockMap | None = None, circuit=None) -> None:
-        """周期を閉じる: 足し込んだ量の平均を標本にして判定する (エンジンは boundary_passed のあとに呼ぶ)。"""
-        means = self.sums.means()
+    def close_period(self, t: float, step: int, *, blocks: BlockMap | None = None, circuit=None,
+                     means: dict | None = None) -> None:
+        """周期を閉じる: 足し込んだ量の平均を標本にして判定する (エンジンは boundary_passed のあとに呼ぶ)。
+
+        means: エンジンが sums.means() を変換したもの (GPU PIC が重みを密度にし、表示用の節点へ写す)。無ければ
+        sums.means() をそのまま使う。
+        """
+        if means is None:
+            means = self.sums.means()
         self.sums.clear()
         k_closed = self._k
         t0 = k_closed * self.period_s

@@ -1465,7 +1465,7 @@ class Fluid2dSimulation:
                     "細かくする等を検討してください"
                 )
             if self._conv_after_step():
-                new_end = self.conv.stop_end(self.step_count, end, self.s.avg_steps)
+                new_end = self.conv.stop_end(self.step_count, end, self.s.avg_steps, self._accum_start)
                 if new_end is not None:
                     end = new_end
                     self.enable_density_accum(self.step_count + 1)

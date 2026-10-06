@@ -683,6 +683,8 @@ class PicSettings(BaseModel):
     # シースエッジ評価ライン (prompts/98、最大4本)。可視化専用で backend は永続化のみ
     # (Brinkmann 判定・準中性度等値線の計算はフロント側、SheathLine 参照)
     sheath_lines: list[SheathLine] = []
+    # 収束の判定 (prompts/137)
+    convergence: ConvergenceSettings = ConvergenceSettings()
 
     @model_validator(mode="after")
     def _check_sheath_lines(self) -> "PicSettings":
@@ -783,6 +785,8 @@ class Pic1dSettings(BaseModel):
     # (粒子ベースの厳密な値。e_max は EEDF (eedf_regions) と同じ流儀で自動決定する)
     wall_iedf_bins: int = Field(100, ge=0, le=1000)
     seed: int = Field(0, json_schema_extra=ui(advanced=True))  # 初期装荷の乱数種 (MCC は mcc.seed を使う)
+    # 収束の判定 (prompts/137)
+    convergence: ConvergenceSettings = ConvergenceSettings()
 
     @model_validator(mode="after")
     def _check_no_dsmc(self) -> "Pic1dSettings":

@@ -175,8 +175,16 @@ def _build_results_bundle(sim: PicSimulation, step_offset: int, elapsed_s: float
             "elapsed_s": elapsed_s,
             # 阻止コンデンサ (自己バイアス、prompts/134)。コンデンサが無ければ None
             "circuit": pic_circuit_result(sim),
+            # 収束の判定 (prompts/137)。判定しなければ None
+            "convergence": pic_convergence_result(sim),
         },
     }
+
+
+def pic_convergence_result(sim) -> dict | None:
+    """2D PIC の結果の convergence (流体と同じ形、prompts/137)。判定しなければ None。"""
+    conv = getattr(sim, "conv", None)
+    return None if conv is None else conv.result()
 
 
 def pic_circuit_result(sim) -> dict | None:

@@ -107,6 +107,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..circuit import BlockingCircuit, model_capacitor_electrodes, rf_period
+from ..convergence import BLOCKS_2D, BlockMap, make_monitor
 from ..device import Device, get_device
 from ..eb.build import MASK_FIXED, MASK_SLAVE
 from ..eb.grid import make_grid
@@ -358,6 +359,13 @@ class GpuPicSimulation:
                 self._tag_w = self.cp.zeros(self._shape)
                 self._tag_ke = self.cp.zeros(self._shape)
         self._self_force_warning()
+
+        # ---- 収束の判定 (prompts/137、convergence.py。周期は阻止コンデンサの集計と同じ RF の最低周波数の周期) ----
+        self.conv = make_monitor(pic.convergence, kind="pic", rf_period_s=rf_period(project), dt=self.dt,
+                                 frame_every=pic.frame_every)
+        self._conv_blocks: BlockMap | None = None   # 表示用の節点のブロック (再格子化で作り直す)
+        self._conv_inv: np.ndarray | None = None     # 密度を割る節点の体積の逆数 (ホスト、再格子化で作り直す)
+        self._conv_scratch = None                     # 電子・イオンの重みを散布する作業配列 (2, n_nodes)
 
         # ---- 初期半ステップ後退キック (t=0 の場で v を -dt/2 へ) -----------------------
         with self._stream:
@@ -1419,6 +1427,11 @@ class GpuPicSimulation:
         self.mesh_version += 1
         self.regrid_log.append({"step": self.step_count, "n_nodes": new.n_nodes, "levels": new.hier.n_levels,
                                 "leaf_cells": new.hier.n_leaf_cells(), "setup_s": time.perf_counter() - t0})
+        if self.conv is not None:
+            # 判定の周期の途中の場の足し込みは古い格子の大きさなので捨てる (ブロックは同じなので標本は続けて比べる)
+            self.conv.sums.drop(("phi", "n_e"))
+            self._conv_blocks = None
+            self._conv_inv = None
         return True
 
     # ======================================================================================
@@ -1556,6 +1569,46 @@ class GpuPicSimulation:
     def _phase_bin(self, t: float) -> int:
         ph = (t / self._cycle_period) % 1.0
         return min(int(ph * self._cycle_bins), self._cycle_bins - 1)
+
+    # ---- 収束の判定 (prompts/137) ------------------------------------------------------------------
+
+    def _conv_sample(self) -> None:
+        """判定の足し込み (stride ステップおき、同期なし): φ と、電子・イオンの重みの節点への散布 (容量で止まって
+        いるステップは散布しない) と、その和 (総数)。密度にして表示用の節点へ写すのは周期を閉じるとき。"""
+        c = self.conv
+        k = self._k
+        n = self.n_nodes
+        with self._stream:
+            if self._conv_scratch is None or self._conv_scratch.shape[1] != n:
+                self._conv_scratch = self.cp.zeros((2, n))
+            s = self._conv_scratch
+            s.fill(0.0)
+            for sp in self.species.values():
+                k["deposit"](self._grid1(sp.alloc), (_BLOCK,),
+                             (sp.x, sp.y, sp.vx, sp.vy, sp.vz, sp.w, self._cnt, np.int32(sp.index), np.int32(0),
+                              np.float64(1.0), s[sp.index], s[sp.index], np.int32(0), np.int64(n), np.int32(2),
+                              self._prm, *self._grid_args, np.int32(self._px), np.int32(self._py), *self._gx))
+            c.sums.add("phi", self._phi.ravel())
+            c.sums.add("n_e", s[0])
+            c.sums.add("N_e", s[0].sum())
+            c.sums.add("N_i", s[1].sum())
+
+    def _conv_close(self) -> None:
+        """周期を閉じる (同期点で呼ぶ): 足し込みを写し、重みを密度にして表示用の節点へ写し、判定する。"""
+        c = self.conv
+        with self._stream:
+            m = c.sums.means()
+            if self._conv_inv is None:
+                self._conv_inv = self._inv_vol_phys.get().ravel()
+        inv = self._conv_inv
+        if "phi" in m:
+            m["phi"] = self._disp(np.asarray(m["phi"]).ravel())
+        if "n_e" in m:
+            m["n_e"] = self._disp(np.asarray(m["n_e"]).ravel() * inv)
+        if self._conv_blocks is None:
+            vol = np.where(inv > 0.0, 1.0 / np.where(inv > 0.0, inv, 1.0), 0.0)
+            self._conv_blocks = BlockMap(np.asarray(self.mesh.nodes), self._disp(vol), BLOCKS_2D)
+        c.close_period(self.t, self.step_count, blocks=self._conv_blocks, circuit=self.circuit, means=m)
 
     def _prepare_eedf_auto(self) -> None:
         """平均区間の最初のステップで、e_max 自動の EEDF 領域を「領域内の最大エネルギー×1.2」に決める。"""
@@ -1791,6 +1844,8 @@ class GpuPicSimulation:
             "diag": diag,
             # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
             "circuit": None if self.circuit is None else self.circuit.frame(),
+            # 収束の判定の今の状態 (prompts/137)。判定しなければ None
+            "convergence": None if self.conv is None else self.conv.frame(),
         }
         # 再格子化で表示用メッシュが変わったら、その後の最初のフレームに新しい格子を添える
         # (server は古いフレームを捨てるとき、この mesh を新しいフレームへ引き継ぐ)
@@ -1809,6 +1864,8 @@ class GpuPicSimulation:
 
         ホストが同期する所では必ず先に容量を検査し (_sync_point・_capacity_check)、デバイスが容量の停止で
         止まっていたら、巻き戻したステップから続ける (モジュール docstring の「粒子の容量」)。
+        収束で止める設定 (convergence.stop、prompts/137) なら、収束したステップから平均区間を取って早めに終える
+        (時間平均・位相分解・コレクタ・EEDF の区間と、最後の 1 周期の粒子の写しはその平均区間に移す)。
         """
         t_run = time.perf_counter()
         if self._accum_start is None:
@@ -1822,6 +1879,8 @@ class GpuPicSimulation:
         end = self.step_count + self.pic.n_steps
         t_frames = 0.0
         stopped = False
+        if self.conv is not None:
+            self.conv.begin_run()
         while True:
             while self.step_count < end:
                 if should_stop is not None and should_stop():
@@ -1839,6 +1898,24 @@ class GpuPicSimulation:
                     self._accum_count += 1
                     if self._n_eedf:
                         self._eedf_samples += 1
+                # 収束の判定 (prompts/137): stride ステップおきに足し込み、周期の境で (同期して) 判定する。
+                # 収束で止める設定なら、ここから平均区間を取って終わる
+                if self.conv is not None:
+                    if self.conv.due(self.step_count):
+                        self._conv_sample()
+                    if self.conv.boundary_passed(self.t):
+                        if self._sync_point():
+                            continue
+                        self._flush_history()   # 阻止コンデンサの RF 周期ごとの集計 (V_dc) を進める
+                        self._conv_close()
+                        if self.conv.stop_now:
+                            new_end = self.conv.stop_end(self.step_count, end, self.pic.avg_steps, self._accum_start)
+                            if new_end is not None:
+                                end = new_end
+                                self.enable_density_accum(self.step_count + 1)
+                                if self._cycle_enabled:
+                                    self._snap_t_start = (self.t + (end - self.step_count) * self.dt
+                                                          - self._cycle_period)
                 last = self.step_count == end
                 # 動的再格子化 (prompts/123): 時間平均区間の前だけ。タグ用の電子の密度・温度を
                 # TAG_EVERY ステップごとに積算し、regrid_every ステップごとに階層を作り直す

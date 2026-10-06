@@ -55,6 +55,7 @@ import numpy as np
 from scipy.linalg import solve_banded
 
 from .circuit import BlockingCircuit, CapacitorSpec
+from .convergence import BLOCKS_1D, BlockMap, make_monitor
 from .fem import EPS0
 from .fn import fn_current_density
 from .mcc import MccModel
@@ -204,6 +205,13 @@ class Pic1dSimulation:
                 for side in self._cap_sides
             ]
             self.circuit = BlockingCircuit(specs, c_matrix, 1.0 / self._cycle_freq if self._cycle_freq else None)
+
+        # ---- 収束の判定 (prompts/137、convergence.py。周期は阻止コンデンサの集計と同じ RF の周期) ----------
+        self.conv = make_monitor(
+            s.convergence, kind="pic", rf_period_s=1.0 / self._cycle_freq if self._cycle_freq else None,
+            dt=self.dt, frame_every=s.frame_every,
+        )
+        self._conv_blocks = BlockMap(self.xg, self.node_vol, BLOCKS_1D) if self.conv is not None else None
 
         # ---- 初期プラズマ装荷 -----------------------------------------------
         # 電子・イオンを同一位置に装荷して初期の厳密な電気的中性を保つ (pic.py と
@@ -1007,19 +1015,43 @@ class Pic1dSimulation:
             "sample": {"x": sample_x.tolist(), "vx": sample_vx.tolist()},
             # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
             "circuit": None if self.circuit is None else self.circuit.frame(),
+            # 収束の判定の今の状態 (prompts/137)。判定しなければ None
+            "convergence": None if self.conv is None else self.conv.frame(),
         }
 
+    def _conv_after_step(self, phi: np.ndarray) -> bool:
+        """収束の判定 (prompts/137): 周期平均の足し込み (stride ステップおき) と周期の境での判定。止めるなら True。"""
+        c = self.conv
+        if c is None:
+            return False
+        if c.due(self.step_count):
+            el = self.species["electron"]
+            h = self.history
+            c.sums.add("phi", phi)
+            c.sums.add("n_e", self._cic_deposit(el.x, el.w) / self.node_vol if len(el.x) else np.zeros(self.n_nodes))
+            c.sums.add("N_e", h["w_e"][-1])
+            c.sums.add("N_i", h["w_i"][-1])
+        if c.boundary_passed(self.t):
+            c.close_period(self.t, self.step_count, blocks=self._conv_blocks, circuit=self.circuit)
+        return c.stop_now
+
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
-        """n_steps 回実行して (history, フレーム列) を返す。2D の run_batch と同じ設計。"""
+        """n_steps 回実行して (history, フレーム列) を返す。2D の run_batch と同じ設計。
+
+        収束で止める設定 (convergence.stop、prompts/137) なら、収束したステップから平均区間を取って早めに終える
+        (時間平均・位相分解・EEDF・壁 IEDF・シース振動の区間はその平均区間に移す)。
+        """
         if self._accum_start is None:
             avg = self.s.avg_steps if self.s.avg_steps is not None else max(1, self.s.n_steps // 4)
             avg = min(avg, self.s.n_steps)
             self.enable_density_accum(self.step_count + self.s.n_steps - avg + 1)
+        if self.conv is not None:
+            self.conv.begin_run()
 
         frames: list[dict] = []
-        n_steps_total = self.s.n_steps
+        end = self.step_count + self.s.n_steps
         self._run_t0 = time.perf_counter()
-        for _ in range(n_steps_total):
+        while self.step_count < end:
             if should_stop is not None and should_stop():
                 break
             phi = self.step()
@@ -1033,6 +1065,11 @@ class Pic1dSimulation:
                     "非有限値)。dt を小さくする、初期密度を下げる、n_cells を増やす"
                     "(デバイ長解像) 等を検討してください"
                 )
+            if self._conv_after_step(phi):
+                new_end = self.conv.stop_end(self.step_count, end, self.s.avg_steps, self._accum_start)
+                if new_end is not None:
+                    end = new_end
+                    self.enable_density_accum(self.step_count + 1)
             if self.step_count % self.s.frame_every == 0:
                 frame = self._make_frame(phi)
                 if store_frames:
@@ -1454,4 +1491,6 @@ def build_pic1d_result(sim: Pic1dSimulation, elapsed_s: float) -> dict:
         "circuit": None if sim.circuit is None else sim.circuit.result(
             {"capacitance": "F/m^2", "charge": "C/m^2", "current": "A/m^2"}
         ),
+        # 収束の判定 (prompts/137): 周期ごとの変化・残りの変化と、収束した時。判定しなければ None
+        "convergence": None if sim.conv is None else sim.conv.result(),
     }

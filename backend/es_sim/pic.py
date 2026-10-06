@@ -35,6 +35,7 @@ from scipy.spatial import cKDTree
 
 from . import _numba_kernels
 from .circuit import BlockingCircuit, mesh_capacitor_electrodes
+from .convergence import BLOCKS_2D, BlockMap, make_monitor
 from .fem import EPS0, _material_arrays, _radial_index, assemble
 from .fn import build_fn_surface, distribute_particles, fn_segment_currents
 from .mcc import GasField, MccModel
@@ -809,6 +810,17 @@ class PicSimulation:
             )
         }
         self._f_immobile: dict[str, np.ndarray] = {}  # 不動種の堆積キャッシュ
+
+        # ---- 収束の判定 (prompts/137、convergence.py。周期は阻止コンデンサの集計と同じ RF の周期) ---------
+        # 場は節点を粗いブロックに体積 (_node_area。軸対称は 2πr を含む、周期境界の従節点は 0) で平均して比べる
+        self.conv = make_monitor(
+            self.pic.convergence, kind="pic",
+            rf_period_s=1.0 / self._cycle_freq if self._cycle_freq is not None else None,
+            dt=self.dt, frame_every=self.pic.frame_every,
+        )
+        self._conv_blocks = BlockMap(self.mesh.nodes, self._node_area, BLOCKS_2D) if self.conv is not None else None
+        self._conv_inv_area = np.where(self._node_area > 0.0, 1.0 / np.where(self._node_area > 0.0, self._node_area, 1.0),
+                                       0.0)
 
         # ---- 位相別プロファイル計測 (prompts/75) -------------------------------
         # 大規模化に向けた高速化①の土台として、1ステップ内の主要フェーズの
@@ -2902,7 +2914,32 @@ class PicSimulation:
             "diag": diag,
             # 阻止コンデンサの電極の今の電位・直近の周期の自己バイアス (prompts/134)。無ければ None
             "circuit": None if self.circuit is None else self.circuit.frame(),
+            # 収束の判定の今の状態 (prompts/137)。判定しなければ None
+            "convergence": None if self.conv is None else self.conv.frame(),
         }
+
+    def _conv_after_step(self, phi: np.ndarray) -> bool:
+        """収束の判定 (prompts/137): 周期平均の足し込み (stride ステップおき) と周期の境での判定。止めるなら True。
+
+        電子の密度は時間平均と同じく重心座標で重みを節点へ散布し、節点の体積 (_node_area) で割る。
+        """
+        c = self.conv
+        if c is None:
+            return False
+        if c.due(self.step_count):
+            el = self.species["electron"]
+            if len(el.x):
+                contrib = el.w[:, None] * self._bary_cached(el)
+                w_node = np.bincount(self._nidx_cached(el).ravel(), weights=contrib.ravel(), minlength=self.n_nodes)
+            else:
+                w_node = np.zeros(self.n_nodes)
+            c.sums.add("phi", phi)
+            c.sums.add("n_e", w_node * self._conv_inv_area)
+            c.sums.add("N_e", float(el.w.sum()))
+            c.sums.add("N_i", float(self.species["ion"].w.sum()))
+        if c.boundary_passed(self.t):
+            c.close_period(self.t, self.step_count, blocks=self._conv_blocks, circuit=self.circuit)
+        return c.stop_now
 
     def run_batch(self, callback=None, should_stop=None, store_frames: bool = True):
         """n_steps 回実行して (診断履歴, フレーム列) を返す (テスト用同期 API)。
@@ -2914,6 +2951,8 @@ class PicSimulation:
         避ける目的でFalseを指定する。既定Trueは既存テストAPIとの後方互換用。
         完了時に時間平均フィールドを self.fields へ格納する (averaged_fields()
         の結果。WS の done 送出と検証スクリプトが利用する)。
+        収束で止める設定 (convergence.stop、prompts/137) なら、収束したステップから平均区間を取って早めに終える
+        (時間平均・位相分解・コレクタ・EEDF の区間と、最後の 1 周期の粒子の写しはその平均区間に移す)。
         """
         # 時間平均区間を決めて積算を有効化する (avg_steps、None なら最後の 25%)。
         # enable_density_accum が手動で呼ばれていればその設定を尊重する
@@ -2937,8 +2976,10 @@ class PicSimulation:
             )
 
         frames: list[dict] = []
-        n_steps_total = self.pic.n_steps
-        for step_i in range(n_steps_total):
+        end = self.step_count + self.pic.n_steps
+        if self.conv is not None:
+            self.conv.begin_run()
+        while self.step_count < end:
             if should_stop is not None and should_stop():
                 break
             phi = self.step()
@@ -2955,6 +2996,13 @@ class PicSimulation:
                     "メッシュを細かくする (デバイ長解像) 等を検討してください。"
                     "警告一覧 (ωpe·dt、衝突確率など) も参照してください"
                 )
+            if self._conv_after_step(phi):
+                new_end = self.conv.stop_end(self.step_count, end, self.pic.avg_steps, self._accum_start)
+                if new_end is not None:
+                    end = new_end
+                    self.enable_density_accum(self.step_count + 1)
+                    if self._cycle_enabled:
+                        self._snap_t_start = self.t + (end - self.step_count) * self.dt - self._cycle_period
             if self._cycle_enabled and self.t - self.dt >= self._snap_t_start - 1e-30:
                 # ステップ開始時刻の位相ビンで、粒子位置 (ステップ終端) を保存する
                 self._snapshot_particles(self.t - self.dt)
@@ -2963,7 +3011,7 @@ class PicSimulation:
             # n_steps < frame_every の短い実行でも必ず1回はサンプルされるよう
             # ループの最終ステップでも強制的にサンプルする (フレーム自体の生成・
             # 送出タイミングは do_frame のまま変更しない)
-            do_walk_diag = do_frame or step_i == n_steps_total - 1
+            do_walk_diag = do_frame or self.step_count == end
             if do_walk_diag:
                 t_frame0 = time.perf_counter()
                 if do_walk_diag:

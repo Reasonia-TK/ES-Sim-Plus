@@ -189,13 +189,14 @@ def test_stop_only_when_convergence_is_found_during_the_run():
     mon.begin_run()
     _feed(mon, [{"N_e": 1.0} for _ in range(MIN_SAMPLES + 1)])
     assert mon.converged and mon.stop_now
-    assert mon.stop_end(step_count=500, end=10_000, avg_steps=300) == 800
+    assert mon.stop_end(step_count=500, end=10_000, avg_steps=300, accum_start=9_701) == 800
     assert mon.stopped and not mon.stop_now
-    # 平均区間で終わりが早まらなければ止めない
+    # 平均区間で終わりが早まらなければ止めない。時間平均の区間がもう始まっていても止めない (今の終わりまで)
     mon2 = _monitor(stop=True, hold=2)
     mon2.begin_run()
     _feed(mon2, [{"N_e": 1.0} for _ in range(MIN_SAMPLES + 1)])
-    assert mon2.stop_end(step_count=500, end=600, avg_steps=300) is None and not mon2.stopped
+    assert mon2.stop_end(step_count=500, end=600, avg_steps=300, accum_start=301) is None and not mon2.stopped
+    assert mon2.stop_end(step_count=500, end=10_000, avg_steps=300, accum_start=400) is None and not mon2.stopped
     # 続きの実行 (収束したあと) では止めない
     mon.begin_run()
     _feed(mon, [{"N_e": 1.0} for _ in range(3)])
