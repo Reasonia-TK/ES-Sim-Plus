@@ -94,9 +94,19 @@ def sample_nodes(lay: "AmrPicLayout", values: np.ndarray, x: np.ndarray, y: np.n
     return np.sum(np.asarray(values)[nodes] * w, axis=1)
 
 
-def deposit_points(lay: "AmrPicLayout", x: np.ndarray, y: np.ndarray, q: np.ndarray) -> np.ndarray:
-    """点の量 q を葉セルの 4 隅へ CIC で配る (総和を保存。再格子化の表面電荷の移し替え)。"""
+def deposit_points(lay: "AmrPicLayout", x: np.ndarray, y: np.ndarray, q: np.ndarray,
+                   allowed: np.ndarray | None = None) -> np.ndarray:
+    """点の量 q を葉セルの 4 隅へ CIC で配る (総和を保存。再格子化の表面電荷の移し替え)。
+
+    allowed (全節点の bool) を与えると、重みを allowed の隅に限って規格化し直す (誘電体の表面電荷は表面の
+    後ろの節点へ、kernels/pic.cu の es_dep_surface と同じ規則)。allowed の隅が無い点は 4 隅へ配る。
+    """
     nodes, w = _cic(lay, x, y)
+    if allowed is not None:
+        ok = np.asarray(allowed, dtype=bool)[nodes]
+        sw = np.sum(np.where(ok, w, 0.0), axis=1)
+        has = sw > 0.0
+        w = np.where(has[:, None], np.where(ok, w, 0.0) / np.where(has, sw, 1.0)[:, None], w)
     out = np.zeros(lay.n_nodes)
     np.add.at(out, nodes.ravel(), (np.asarray(q)[:, None] * w).ravel())
     return out

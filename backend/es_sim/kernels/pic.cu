@@ -554,6 +554,51 @@ __device__ __forceinline__ void es_dep_point(double* __restrict__ out, double px
 #endif
 }
 
+// Dielectric surface charge at the hit point (hx, hy): the bilinear weights of the hit cell,
+// restricted to the corners where surface charge may sit (solid[node] != 0: unknown nodes inside a
+// dielectric or on a grid-aligned dielectric face) and renormalized, so the charge sits behind (or
+// on) the surface. A deposit on the gas-side corners would put the charge in the gas, up to one cell
+// in front of the surface: the potential then has its extremum in the gas instead of on the surface,
+// and next to a conductor (where that node is held near the conductor potential) particles of the
+// other sign were trapped in front of the surface instead of being absorbed, which ran away in the
+// GEC sample (prompts/138). Only when no corner may hold it (a dielectric thinner than the cell) all
+// four corners are used.
+__device__ __forceinline__ void es_dep_surface(double* __restrict__ out, double px, double py, double q,
+                                               const unsigned char* __restrict__ solid,
+                                               double x0, double y0, double inv_dx, double inv_dy,
+                                               int nx, int ny, int pxp, int pyp ES_GRID_PARAMS)
+{
+    double wx, wy;
+    long long k[4];
+#ifdef ES_AMR
+    int nd[4];
+    long long cell;
+    es_locate(px, py, nd, &wx, &wy, &cell ES_GRID_ARGS);
+    for (int c = 0; c < 4; ++c) k[c] = nd[c];
+#else
+    int i, j;
+    es_cell(px, py, x0, y0, inv_dx, inv_dy, nx, ny, &i, &j, &wx, &wy);
+    const int s = nx + 1;
+    int i1 = i + 1, j1 = j + 1;
+    if (pxp && i1 == nx) i1 = 0;
+    if (pyp && j1 == ny) j1 = 0;
+    k[0] = (long long)j * s + i;
+    k[1] = (long long)j * s + i1;
+    k[2] = (long long)j1 * s + i;
+    k[3] = (long long)j1 * s + i1;
+#endif
+    const double wc[4] = {(1.0 - wx) * (1.0 - wy), wx * (1.0 - wy), (1.0 - wx) * wy, wx * wy};
+    double sw = 0.0;
+    for (int c = 0; c < 4; ++c)
+        if (solid[k[c]]) sw += wc[c];
+    if (sw > 0.0) {
+        for (int c = 0; c < 4; ++c)
+            if (solid[k[c]] && wc[c] > 0.0) atomicAdd(out + k[c], q * (wc[c] / sw));
+    } else {
+        for (int c = 0; c < 4; ++c) atomicAdd(out + k[c], q * wc[c]);
+    }
+}
+
 extern "C" __global__ void boundary(
     double* __restrict__ x, double* __restrict__ y, double* __restrict__ vx, double* __restrict__ vy,
     double* __restrict__ vz, double* __restrict__ w, unsigned long long* __restrict__ cnt,
@@ -566,8 +611,8 @@ extern "C" __global__ void boundary(
     const double* __restrict__ circ,
     const double* __restrict__ side_gamma, const double* __restrict__ cond_gamma,
     const double* __restrict__ diel_gamma,
-    double* __restrict__ qsurf, const double qw_scale, const double two_pi_inv,
-    const int see_on, const double see_speed, const double see_delta,
+    double* __restrict__ qsurf, const unsigned char* __restrict__ diel_solid, const double qw_scale,
+    const double two_pi_inv, const int see_on, const double see_speed, const double see_delta,
     double* __restrict__ ex_, double* __restrict__ ey_, double* __restrict__ evx, double* __restrict__ evy,
     double* __restrict__ evz, double* __restrict__ ew,
     const int n_coll, const double* __restrict__ coll, const double mass,
@@ -731,10 +776,11 @@ extern "C" __global__ void boundary(
         else if (bkind == 2) { gam = diel_gamma[bidx]; diel = bidx; }
     }
 
-    // (a) dielectric surface charge (RHS units: /2pi in RZ), or the charge of a blocking-capacitor electrode
+    // (a) dielectric surface charge (RHS units: /2pi in RZ; behind the surface, es_dep_surface), or the
+    // charge of a blocking-capacitor electrode
     if (diel >= 0)
-        es_dep_point(qsurf, hx, hy, qw_scale * wp * two_pi_inv, X0, Y0, inv_dx, inv_dy, nx, ny, pxp, pyp
-                     ES_GRID_ARGS);
+        es_dep_surface(qsurf, hx, hy, qw_scale * wp * two_pi_inv, diel_solid, X0, Y0, inv_dx, inv_dy, nx, ny,
+                       pxp, pyp ES_GRID_ARGS);
     if (elec >= 0) atomicAdd(cap_dq + elec, qw_scale * wp);
 
     // (b) IEDF/IADF collectors (ions, averaging window)
@@ -775,8 +821,8 @@ extern "C" __global__ void boundary(
                 ew[k] = wp;
                 atomicAdd(cnt + C_SEE_EV, 1ull);
                 if (diel >= 0)  // the surface loses an electron: +e*w
-                    es_dep_point(qsurf, hx, hy, 1.602176634e-19 * wp * two_pi_inv, X0, Y0, inv_dx, inv_dy,
-                                 nx, ny, pxp, pyp ES_GRID_ARGS);
+                    es_dep_surface(qsurf, hx, hy, 1.602176634e-19 * wp * two_pi_inv, diel_solid, X0, Y0,
+                                   inv_dx, inv_dy, nx, ny, pxp, pyp ES_GRID_ARGS);
                 if (elec >= 0) atomicAdd(cap_dq + elec, 1.602176634e-19 * wp);  // the electrode too
             } else {
                 atomicAdd(cnt + C_OVERFLOW, 1ull);

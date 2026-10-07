@@ -55,6 +55,11 @@ RF 位相分解、イオンサブサイクリング、quiet start、既定 dt = 
 - 電極 SEE・誘電体 SEE の放出方向: どちらも衝突点の法線方向 (v1 は誘電体のみ
   入射と逆方向の近似)。
 - 時間平均の電子温度: 双一次重みで堆積した w·v² から評価 (v1 は P1 重み)。
+- 誘電体の表面電荷の置き場所: 衝突点のセルの 4 隅の双一次重みを、誘電体の中の節点 (未知) に限って規格化し直して
+  配る (表面の後ろに置く。kernels/pic.cu の es_dep_surface、prompts/138)。v1 は進入した誘電体の要素の節点 (表面と
+  誘電体の中) へ P1 で配るので、どちらも気体側の節点には置かない。気体側の隅にも配ると電位の極値が表面ではなく
+  気体の中にでき、導体との接合部で逆符号の粒子が表面の前に閉じ込められて溜まり、GEC のサンプルが約 2300 RF 周期で
+  暴走した。誘電体が格子より薄く 4 隅に誘電体の中の節点が無いときだけ 4 隅へ配る (一様格子は初期化で警告する)。
 
 ## 阻止コンデンサ (自己バイアス、prompts/134)
 
@@ -109,7 +114,7 @@ import numpy as np
 from ..circuit import BlockingCircuit, model_capacitor_electrodes, rf_period
 from ..convergence import BLOCKS_2D, BlockMap, make_monitor
 from ..device import Device, get_device
-from ..eb.build import MASK_FIXED, MASK_SLAVE
+from ..eb.build import MASK_FIXED, MASK_SLAVE, _mark_boundary_cells
 from ..eb.grid import make_grid
 from ..field.electrostatic import fill_fixed
 from ..field.gmg import GMGSolver
@@ -593,6 +598,9 @@ class GpuPicSimulation:
         h_min = min(self.grid.dx, self.grid.dy) if self.amr is None else self.amr.h_min
         self._see_delta = 1e-3 * h_min
         self._has_diel = any(o.type == "dielectric" for o in model.others)
+        self._diel_solid = cp.asarray(self._dielectric_nodes().astype(np.uint8))
+        if self._has_diel and self.amr is None:
+            self._thin_dielectric_warning()
 
         # ---- 表示用メッシュ (v1 UI 互換) ----
         if self.amr is None:
@@ -680,6 +688,57 @@ class GpuPicSimulation:
 
         # ---- 阻止コンデンサ (prompts/134) ----
         self._init_circuit()
+
+    def _dielectric_nodes(self, lay=None) -> np.ndarray:
+        """表面電荷を置ける節点か (kernels/pic.cu の es_dep_surface・prompts/138): 誘電体の中か誘電体の表面の上
+        (格子にそろった面) にある未知の節点。
+
+        一様格子は (ny+1, nx+1) を平坦にした並び、AMR は合成格子の全節点 (lay、省くと今の階層)。
+        """
+        lay = self.amr if lay is None else lay
+        if lay is None:
+            g = self.grid
+            X, Y = np.meshgrid(g.xs, g.ys)
+            free = self.op.mask != MASK_FIXED
+        else:
+            X, Y = lay.xy[:, 0], lay.xy[:, 1]
+            free = lay.op.fixed_group < 0
+        m = self.model
+        other = m.classify_other(X, Y)
+        solid = np.zeros(other.shape, dtype=bool)
+        for k, o in enumerate(m.others):
+            if o.type == "dielectric":
+                solid |= (other == k) | ((other == -1) & o.shape.contains(X, Y, m.tol))
+        return (solid & free).ravel()
+
+    def _thin_dielectric_warning(self) -> None:
+        """誘電体と気体の両方を含むセルで、4 隅に表面電荷を置ける節点が無いもの (誘電体が格子より薄い所) があれば
+        警告する。そこに当たった粒子の電荷は表面の後ろに置けず、4 隅 (気体側を含む) へ配る (es_dep_surface)。
+        """
+        g = self.grid
+        m = self.model
+        diel = [k for k, o in enumerate(m.others) if o.type == "dielectric"]
+        cells = _mark_boundary_cells([m.others[k].shape for k in diel], g)
+        if not np.any(cells):
+            return
+        jc, ic = np.nonzero(cells)
+        s = (np.arange(4) + 0.5) / 4.0
+        sx = g.x0 + (ic[:, None, None] + s[None, None, :]) * g.dx
+        sy = g.y0 + (jc[:, None, None] + s[None, :, None]) * g.dy
+        sx, sy = np.broadcast_arrays(sx, sy)
+        exposed = m.gas_at(sx, sy).any(axis=(1, 2))
+        in_diel = np.isin(m.classify_other(sx, sy), diel)
+        if m.conductors:
+            in_diel &= m.classify_conductor(sx, sy, 0.0) < 0
+        solid = self._dielectric_nodes().reshape(g.ny + 1, g.nx + 1)
+        has = solid[jc, ic] | solid[jc, ic + 1] | solid[jc + 1, ic] | solid[jc + 1, ic + 1]
+        thin = int(np.count_nonzero(exposed & in_diel.any(axis=(1, 2)) & ~has))
+        if thin:
+            self.warnings.append(
+                f"誘電体の表面が通るセルのうち {thin} 個は 4 隅に誘電体の中の節点がありません (誘電体が格子より薄い): "
+                "そこに当たった粒子の表面電荷は気体側の節点にも置かれ、表面の前に電位の極値ができることがあります。"
+                "メッシュを細かくしてください"
+            )
 
     def _setup_amr_fields(self, lay) -> None:
         """AMR の場の表・行列・体積を GPU へ (初期化と再格子化で共通)。"""
@@ -1001,7 +1060,7 @@ class GpuPicSimulation:
             np.int32(self.grid.nx), np.int32(self.grid.ny), np.int32(self._px), np.int32(self._py),
             np.int32(self._n_solid), self._s_type, self._s_kind, self._s_index, self._s_off, self._s_pxy,
             self._s_circ, self._side_gamma, self._cond_gamma, self._diel_gamma,
-            self._q_surf, np.float64(sp.q), np.float64(1.0 / self._two_pi),
+            self._q_surf, self._diel_solid, np.float64(sp.q), np.float64(1.0 / self._two_pi),
             np.int32(self._see_on), np.float64(self._see_speed), np.float64(self._see_delta),
             el.x, el.y, el.vx, el.vy, el.vz, el.w,
             np.int32(self._n_coll), self._coll, np.float64(sp.m),
@@ -1386,8 +1445,9 @@ class GpuPicSimulation:
         new = build_pic_layout(self.model, new_hier)
         phi_new = sample_nodes(lay, self._phi.get(), new.xy[:, 0], new.xy[:, 1])
         q_surf_old = self._q_surf.get()
-        q_surf_new = (deposit_points(new, lay.xy[:, 0], lay.xy[:, 1], q_surf_old) if np.any(q_surf_old)
-                      else np.zeros(new.n_nodes))
+        diel_new = self._dielectric_nodes(new)
+        q_surf_new = (deposit_points(new, lay.xy[:, 0], lay.xy[:, 1], q_surf_old, allowed=diel_new)
+                      if np.any(q_surf_old) else np.zeros(new.n_nodes))
         with self._stream:
             self.solver = AmgGpuSolver(new.op.A_c, self.device, singular=new.op.singular)
             self.amr = new
@@ -1396,6 +1456,7 @@ class GpuPicSimulation:
             self._shape = (new.n_nodes,)
             self._setup_amr_fields(new)
             self._q_surf = cp.asarray(q_surf_new)
+            self._diel_solid = cp.asarray(diel_new.astype(np.uint8))
             self._rho = cp.zeros(self._shape)
             self._phi = cp.asarray(phi_new)
             self._ex = cp.zeros(self._shape)
