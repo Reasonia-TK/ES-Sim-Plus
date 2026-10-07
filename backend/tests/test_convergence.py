@@ -10,6 +10,7 @@ from es_sim.convergence import (
     MIN_SAMPLES,
     TOL_FLUID,
     TOL_PIC,
+    BinnedSeries,
     BlockMap,
     ConvergenceMonitor,
     PeriodSums,
@@ -21,6 +22,16 @@ from es_sim.schema import ConvergenceSettings
 
 def _monitor(kind: str = "fluid", t: float = 0.0, **kw) -> ConvergenceMonitor:
     return ConvergenceMonitor(ConvergenceSettings(**kw), kind=kind, rf_period_s=1.0, dt=0.01, frame_every=10, t=t)
+
+
+def _ar1(rng, n: int, phi: float, std: float) -> np.ndarray:
+    """隣どうしの相関 phi・大きさ (標準偏差) std の揺れ (AR(1))。"""
+    e = rng.standard_normal(n) * std * math.sqrt(1.0 - phi * phi)
+    x = np.empty(n)
+    x[0] = rng.standard_normal() * std
+    for i in range(1, n):
+        x[i] = phi * x[i - 1] + e[i]
+    return x
 
 
 def _feed(mon: ConvergenceMonitor, samples: list[dict], blocks: BlockMap | None = None, circuit=None) -> None:
@@ -62,37 +73,143 @@ def test_slow_decay_early_in_the_run_is_not_passed():
     assert all(r > TOL_FLUID for r in mon.history["r"]["N_e"] if r is not None)
 
 
-def test_white_noise_widens_the_window_and_converges():
-    """周期ごとに 1% の白色雑音だけの量 (PIC 相当、閾値 1%) は、窓が雑音に合わせて広がって収束する。"""
+def test_white_noise_converges_and_keeps_passing():
+    """周期ごとに 0.3% の白色雑音だけの量 (PIC 相当、閾値 1%): 遅い傾きを見分けられる (分解能が閾値に届く) ところで
+    収束し、そのあとはほとんど不合格にならない (傾きの検定は 1 回だけなので、雑音を傾きと見誤らない。CV-c までは
+    窓を何通りも試して 3 割の周期で見誤った)。分解能は周期の数とともに細かくなる。"""
     rng = np.random.default_rng(1)
     mon = _monitor(kind="pic")
     assert mon.tol == TOL_PIC
-    _feed(mon, [{"N_e": 1.0 + 0.01 * rng.standard_normal()} for _ in range(200)])
-    assert mon.converged
-    assert mon.converged_at["period"] < 100
+    _feed(mon, [{"N_e": 1.0 + 0.003 * rng.standard_normal()} for _ in range(600)])
+    assert mon.converged and 3 * mon.max_window <= mon.converged_at["period"] < 200
+    after = mon.history["status"][mon.converged_at["period"] + 1:]
+    assert after.count("fail") / len(after) < 0.02
+    assert mon.history["res"]["N_e"][-1] < 0.5 * TOL_PIC
+
+
+def test_noise_as_large_as_the_tolerance_waits_for_the_resolution():
+    """周期ごとの雑音が閾値と同じ 1% の量: 窓が広がって変化 D は閾値より小さくなるが、遅い傾きを見分けられる
+    (調べた後ろ半分の長さで閾値の分変わる傾きが検定で見える) まで判定中 (resolving) で、収束は百数十周期より後。"""
+    rng = np.random.default_rng(2)
+    mon = _monitor(kind="pic")
+    _feed(mon, [{"N_e": 1.0 + 0.01 * rng.standard_normal()} for _ in range(1100)])
+    assert "resolving" in mon.history["status"]
+    assert mon.converged and mon.converged_at["period"] > 150
     windows = [w for w in mon.history["window"] if w is not None]
     assert 3 <= max(windows) <= mon.max_window
-    # 雑音だけなので、雑音を差し引いた変化 D は閾値より十分小さいことが多い
     d = [v for v in mon.history["d"]["N_e"] if v is not None]
     assert np.median(d) < 0.5 * TOL_PIC
+    f = mon.frame()
+    assert f["res_name"] == "N_e" and f["res"] is not None
 
 
-def test_slow_drift_hidden_in_noise_is_found_with_longer_windows():
-    """0.5% の雑音に 1 周期 0.1% の傾き: 雑音から決めた窓 (2 周期) の変化は閾値より小さいが、窓を広げて傾きを
-    見つけ (減っていない)、収束としない。傾きが止まってから収束する。"""
+def test_slow_drift_hidden_in_noise_is_found_and_released_after_it_stops():
+    """0.5% の雑音に 1 周期 0.1% の傾き: 収束としない (減っていると言えない傾きが、調べた後ろ半分の長さだけ続いたと
+    きの変化: span)。傾きが止まると、傾きを見る後ろ半分から止まる前が抜けるころ (止まった周期の約 2 倍) に収束する。"""
     rng = np.random.default_rng(2)
     mon = _monitor(kind="pic")
     drift = [1.0 + 1.0e-3 * k + 0.005 * rng.standard_normal() for k in range(300)]
     _feed(mon, [{"N_e": v} for v in drift])
     assert not mon.converged
-    # 減っていると言えない傾き: 今の傾きでこれまでの長さの 10 倍 (trend)
-    assert mon.history["r_kind"]["N_e"][-1] == "trend"
+    assert mon.history["r_kind"]["N_e"][-1] == "span"
     f = mon.frame()
-    assert f["worst_name"] == "N_e" and f["worst_kind"] == "trend" and f["worst"] > TOL_PIC
-    flat = [drift[-1] + 0.005 * rng.standard_normal() for _ in range(200)]
+    assert f["worst_name"] == "N_e" and f["worst_kind"] == "span" and f["worst"] > TOL_PIC
+    flat = [drift[-1] + 0.005 * rng.standard_normal() for _ in range(400)]
     _feed(mon, [{"N_e": v} for v in flat])
     assert mon.converged
-    assert mon.converged_at["period"] > 300
+    assert 500 < mon.converged_at["period"] < 700
+
+
+def test_drift_below_the_recent_windows_is_found_in_the_long_history():
+    """0.3% の雑音に 1 周期 0.01% の傾き (2000 周期で 20%): 直近の窓 (最大 3 × max_window + 2 周期) の比較では雑音に
+    埋もれる (CV-c は 61 周期で収束としたまま、後半も半分は合格) が、長い履歴の後ろ半分の回帰で見つかり、200 周期
+    ほどから先はずっと不合格 (span)。はじめに収束としたのは、分解能で見逃しうる範囲 (調べた後ろ半分の長さで閾値の
+    分ほどしか変わらない) のとき。"""
+    rng = np.random.default_rng(3)
+    mon = _monitor(kind="pic")
+    s = 1.0e-4
+    _feed(mon, [{"N_e": 1.0 + s * k + 0.003 * rng.standard_normal()} for k in range(1, 2001)])
+    status = mon.history["status"]
+    assert "pass" not in status[300:]
+    assert mon.history["r_kind"]["N_e"][-1] == "span"
+    if mon.converged:
+        assert s * (mon.converged_at["period"] + 1) / 2 < TOL_PIC
+
+
+def test_noisy_exponential_approach_is_not_passed_before_the_remaining_change_is_small():
+    """0.3% の雑音の中で時定数 100 周期で近づく量 (はじめ 50% 離れている): 残りが閾値 1% になる 391 周期より前には
+    収束としない (CV-c は残り 2% で収束とした)。減り方の比と今の傾きは上限で外挿するので遅めだが 1.5 倍以内。"""
+    rng = np.random.default_rng(1)
+    mon = _monitor(kind="pic")
+    _feed(mon, [{"N_e": 1.0 - 0.5 * math.exp(-k / 100) + 0.003 * rng.standard_normal()} for k in range(1, 801)])
+    assert mon.converged
+    assert 391 <= mon.converged_at["period"] + 1 <= 600
+    assert "decay" in mon.history["r_kind"]["N_e"][100:300]          # 減っている (decay) と見分けている
+
+
+def test_correlated_noise_is_not_mistaken_for_a_trend():
+    """周期をまたいで相関のある揺れ (AR(1)、隣どうしの相関 0.8、大きさ 0.2%): 三階差分の雑音は小さく見えるが、残差の
+    隣どうしの相関で傾きの分散を広げるので、揺れを傾きと見誤らずに収束し、そのあともほとんど不合格にならない
+    (CV-c は相関のある揺れで 8〜9 割の周期が不合格だった)。"""
+    rng = np.random.default_rng(2)
+    mon = _monitor(kind="pic")
+    _feed(mon, [{"N_e": 1.0 + v} for v in _ar1(rng, 1000, 0.8, 0.002)])
+    assert mon.converged
+    after = mon.history["status"][mon.converged_at["period"] + 1:]
+    assert after.count("fail") / len(after) < 0.05
+
+
+def test_field_noise_in_each_block_is_tested_together():
+    """場 (64 ブロック、ブロックごとに 1% の雑音): ブロックの雑音をまとめた χ² の検定なので、定常ならすぐ収束して
+    合格が続き、全体がそろって動く傾き (1 周期 0.01%) は百周期ほどで見つける。CV-d の初め (しきい値を雑音の全体の
+    9 倍にした検定) は、定常で千周期近く収束せず、そろって動く傾きは半分しか見つけなかった。"""
+    x = np.linspace(0.0, 1.0, 64)
+    blocks = BlockMap(x, np.full(64, 1.0 / 64), 64)
+    shape = 1.0 + 0.5 * np.sin(np.pi * x)
+    rng = np.random.default_rng(6)
+    steady = _monitor(kind="pic")
+    _feed(steady, [{"n_e": shape * (1.0 + 0.01 * rng.standard_normal(64))} for _ in range(600)], blocks=blocks)
+    assert steady.converged and steady.converged_at["period"] < 150
+    after = steady.history["status"][steady.converged_at["period"] + 1:]
+    assert after.count("fail") / len(after) < 0.02
+    drift = _monitor(kind="pic")
+    _feed(drift, [{"n_e": shape * (1.0 + 1e-4 * k + 0.01 * rng.standard_normal(64))} for k in range(600)],
+          blocks=blocks)
+    assert "pass" not in drift.history["status"][300:]
+    assert drift.history["r_kind"]["n_e"][-1] == "span"
+
+
+def test_quantity_that_appears_later_waits_for_its_own_history():
+    """途中から現れた量 (PIC): その量の標本が 3 × max_window 周期そろうまで判定中。そのあとも長い履歴が短いうちは
+    分解能が粗く、合格にしない。"""
+    rng = np.random.default_rng(5)
+    mon = _monitor(kind="pic")
+    samples = []
+    for k in range(130):
+        s = {"N_e": 1.0 + 0.003 * rng.standard_normal()}
+        if k >= 58:
+            s["N_i"] = 1.0 + 0.003 * rng.standard_normal()
+        samples.append(s)
+    _feed(mon, samples)
+    status = mon.history["status"]
+    assert set(status[:58 + 3 * mon.max_window - 1]) == {"warming"}
+    assert status[-1] in ("resolving", "pass")
+    json.dumps(mon.result(), allow_nan=False)
+
+
+def test_binned_series_keeps_a_fixed_number_of_equal_bins():
+    """長い履歴: ビンがあふれたら隣どうしを合わせる。最後以外のビンは同じ長さで、周期の番号と値の和は保たれる。"""
+    bs = BinnedSeries(max_bins=8)
+    for k in range(37):
+        bs.add(k, np.array([k, 2.0 * k]))
+    assert bs.n == 37 and len(bs.count) <= 8
+    assert set(bs.count[:-1]) == {bs.size}
+    c, t, y = bs.arrays(list(range(len(bs.count))))
+    assert np.dot(c, t) == pytest.approx(sum(range(37)))
+    assert np.allclose(c @ y, [sum(range(37)), 2.0 * sum(range(37))])
+    idx = bs.tail(0.5)
+    assert sum(bs.count[i] for i in idx) >= 37 / 2 and idx[-1] == len(bs.count) - 1
+    assert bs.last_period() == 36
 
 
 def test_constant_quantity_converges_after_hold_checks():
@@ -105,6 +222,8 @@ def test_constant_quantity_converges_after_hold_checks():
     assert mon.converged_at["period"] == MIN_SAMPLES - 1 + 2
     assert mon.history["r_kind"]["N_e"][-1] == "none"               # 有意な変化が無い
     assert mon.history["r_kind"]["N_e"][0] is None                    # 判定中は無し
+    assert set(mon.history["res"]["N_e"]) == {None}                   # 流体は分解能を使わない
+    assert not mon._bins
 
 
 def test_one_failing_quantity_blocks_and_resets_the_hold():
@@ -253,9 +372,11 @@ def test_period_sums_copy_the_first_value():
 def test_result_and_frame_are_json_serialisable():
     rng = np.random.default_rng(4)
     mon = _monitor(kind="pic")
-    _feed(mon, [{"N_e": 1.0 + 0.02 * k + 0.01 * rng.standard_normal()} for k in range(40)])
+    _feed(mon, [{"N_e": 1.0 + 0.02 * k + 0.01 * rng.standard_normal()} for k in range(100)])
     r = mon.result()
     json.dumps(r, allow_nan=False)
-    json.dumps(mon.frame(), allow_nan=False)
-    assert len(r["t"]) == len(r["status"]) == len(r["d"]["N_e"]) == 40
+    f = mon.frame()
+    json.dumps(f, allow_nan=False)
+    assert len(r["t"]) == len(r["status"]) == len(r["d"]["N_e"]) == len(r["res"]["N_e"]) == 100
+    assert r["res"]["N_e"][-1] is not None and f["res_name"] == "N_e"
     assert not r["converged"]

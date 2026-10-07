@@ -60,7 +60,7 @@ export interface SweepConvergence {
   converged_period: number | null;
   converged_t: number | null;
   /** 最後の判定の状態 */
-  status: "warming" | "noisy" | "fail" | "pass" | null;
+  status: "warming" | "noisy" | "fail" | "pass" | "resolving" | null;
   checks: number;
   stopped: boolean;
 }

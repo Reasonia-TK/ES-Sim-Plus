@@ -13,7 +13,7 @@ import { SettingsPanel } from "../src/pages/SettingsPanel";
 import { SweepCases } from "../src/pages/widgets/SweepCases";
 import { isolatedPoints } from "../src/plots/LineChart";
 import { usePrefs } from "../src/prefs/prefs";
-import { convergenceFrameRows, convergenceResultRows, convPct, convQuantityLabel, convWorstAt } from "../src/results/charts/Convergence";
+import { convergenceFrameRows, convergenceResultRows, convPct, convQuantityLabel, convResAt, convWorstAt } from "../src/results/charts/Convergence";
 import { ResultsCharts } from "../src/results/ResultsCharts";
 import { DEFAULT_DISPLAY, useResultsView } from "../src/results/resultsView";
 import { RunSummary } from "../src/results/RunSummary";
@@ -63,7 +63,15 @@ function drifting(): ConvergenceResult {
   return c;
 }
 
-const text = (rows: [unknown, unknown][]) => rows.map(([k, v]) => `${String(k)}=${String(v)}`).join("\n");
+/** PIC: 変化も残りも閾値以下だが、遅い傾きを見分けるには周期が足りない (分解能、CV-d) */
+function resolving(): ConvergenceResult {
+  const c = converged({ tol: 1e-2, converged: false, converged_t: null, converged_step: null, converged_period: null, now_passing: false });
+  c.status = [...c.status.slice(0, 6), "resolving", "resolving", "resolving", "resolving"];
+  c.res = { phi: [...W, 0.03, 0.025, 0.02, 0.015], n_e: [...W, 0.01, 0.009, 0.008, 0.007], N_e: [...W, 0.002, 0.002, 0.002, 0.002], N_i: [...W, 0.002, 0.002, 0.002, 0.002] };
+  return c;
+}
+
+const text =(rows: [unknown, unknown][]) => rows.map(([k, v]) => `${String(k)}=${String(v)}`).join("\n");
 
 const initialJobs = useJobs.getState();
 
@@ -87,6 +95,8 @@ describe("labels and numbers", () => {
   it("writes relative values in percent, tiny ones in exponent form, and infinity as ∞", () => {
     expect(convPct(1e-3)).toBe("0.10%");
     expect(convPct(0.35)).toBe("35%");
+    expect(convPct(4.0)).toBe("400%");
+    expect(convPct(0.996)).toBe("100%");
     expect(convPct(3e-4)).toBe("0.030%");
     expect(convPct(1e-6)).toBe("1.0e-4%");
     expect(convPct(0)).toBe("0%");
@@ -135,6 +145,23 @@ describe("summary rows", () => {
     expect(s).toContain("1.0% / RF 1 周期");
   });
 
+  it("shows the coarsest resolution while a PIC run waits to resolve slow drifts", () => {
+    const s = text(convergenceResultRows(resolving(), null, t));
+    expect(s).toContain("状態=判定中 (遅い傾きを見分けるにはまだ周期が足りない)");
+    expect(s).toContain("いちばん遠い量=n_e: 変化 0.030%、残り 0.020% (減り方から外挿)");
+    expect(s).toContain("分解能 (見逃しうる変化)=φ: 1.5% (後ろ半分の長さで)");
+    expect(convResAt(resolving(), 9)).toEqual({ name: "phi", v: 0.015 });
+    expect(convResAt(resolving(), 0)).toBeNull();
+    // 流体 (分解能が無い) の結果には出さない
+    expect(text(convergenceResultRows(converged(), null, t))).not.toContain("分解能");
+    // PIC の減っていると言えない傾きは、調べた後ろ半分の長さだけ続くとして (span)
+    const drift = resolving();
+    drift.status[9] = "fail";
+    drift.r.n_e[9] = 0.04;
+    drift.r_kind!.n_e[9] = "span";
+    expect(text(convergenceResultRows(drift, null, t))).toContain("n_e: 変化 0.030%、残り 4.0% (傾きが調べた後ろ半分の長さだけ続くとして)");
+  });
+
   it("omits the farthest quantity while warming up and marks results without the kind of estimate", () => {
     const c = converged({ converged: false, converged_t: null, converged_step: null, converged_period: null, now_passing: false });
     c.status = c.status.slice(0, 4);
@@ -155,6 +182,9 @@ describe("summary rows", () => {
     expect(text(convergenceFrameRows({ ...f, status: "fail", worst_name: "V_dc:left", checks: 30 }, null, t))).toContain("V_dc (左の電極): max(変化, 残り) ∞");
     const done = text(convergenceFrameRows({ ...f, status: "pass", converged: true, converged_t: 9 * T, now_passing: true, checks: 10 }, null, t));
     expect(done).toContain("状態=収束 (t = 664 ns)");
+    const live = text(convergenceFrameRows({ ...f, status: "resolving", worst: 4e-3, worst_name: "n_e", res: 0.02, res_name: "V_dc:left", checks: 80 }, null, t));
+    expect(live).toContain("状態=判定中 (遅い傾きを見分けるにはまだ周期が足りない)");
+    expect(live).toContain("分解能 (見逃しうる変化)=V_dc (左の電極): 2.0% (後ろ半分の長さで)");
   });
 });
 
@@ -262,11 +292,14 @@ describe("sweep cases", () => {
     handleEvent({ type: "case", id: "s1", case: 0, value: 1, ok: true, convergence: conv({ converged: true, converged_period: 9, converged_t: 10 * T, status: "pass", checks: 12 }) });
     handleEvent({ type: "case", id: "s1", case: 1, value: 2, ok: true, convergence: conv({}) });
     handleEvent({ type: "case", id: "s1", case: 2, value: 3, ok: true, convergence: conv({ status: "warming", checks: 4 }) });
+    handleEvent({ type: "job", job: job({ id: "s1", kind: "sweep", state: "running", runs: 1, options: { values: [1, 2, 3, 4] } }) });
+    handleEvent({ type: "case", id: "s1", case: 3, value: 4, ok: true, convergence: conv({ status: "resolving", checks: 90 }) });
     render(<SweepCases />);
     expect(screen.getByText("収束")).toBeTruthy();
     expect(screen.getByText("10 周期目")).toBeTruthy();
     expect(screen.getByText("未収束")).toBeTruthy();
     expect(screen.getByText("判定中 (周期がまだ足りない)")).toBeTruthy();
+    expect(screen.getByText("判定中 (遅い傾きを見分けるにはまだ周期が足りない)")).toBeTruthy();
   });
 
   it("has no convergence column for cases without a judgement", () => {

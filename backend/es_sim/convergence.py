@@ -32,13 +32,35 @@ PIC・流体の時間発展で、周期平均の量が定常に落ち着いた�
   見つける)。標本の範囲で有意な変化が無い、または変化が丸め誤差 (1e-10) 以下なら 0。1 周期の変化が小さくても緩和の
   時定数が長い (阻止コンデンサの充電など) ときに、まだ定常でないことを見逃さない。
 - 全ての量で D ≤ tol かつ R ≤ tol を ``hold`` 回続けて満たしたら収束 (最初の 1 回の周期・時刻・ステップを残す)。
-  判定には 3W 周期と、雑音の見積もりの分 (MIN_SAMPLES 周期) が要る。雑音のある量 (周期ごとの雑音が閾値の 1% を
-  越える。PIC) があるときは、遅い傾きを探す範囲がそろう 3 × max_window 周期まで判定しない (標本が少ないと雑音に
-  埋もれた傾きを見つけられず、早すぎる合格になる)。
+  判定には 3W 周期と、雑音の見積もりの分 (MIN_SAMPLES 周期) が要る。PIC と雑音のある量 (周期ごとの雑音が閾値の
+  1% を越える) は 3 × max_window 周期まで判定しない (短い標本で早すぎる合格をしない)。
+
+PIC の量 (CV-d): 粒子の雑音と周期をまたぐ揺れ (総数などのゆっくりした揺れ) があるので、残りの変化 R は上の窓の
+走査ではなく、長い履歴の回帰で見積もる (``_trend``)。
+
+- 長い履歴: 周期平均を等しい長さのビンにまとめて持つ (``BinnedSeries``、最大 TREND_BINS 個。あふれたら隣どうしを
+  合わせて長さを 2 倍)。直近の窓 (最大 3 × max_window + 2 周期) では雑音に埋もれる遅い傾きも、長い区間なら見える。
+- 傾きの検定: これまでの周期の後ろ半分 (走り始めの速い変化を除く) のビンに直線を当て、傾きを 1 回だけ検定する
+  (窓を何通りも試すと雑音を傾きと見誤りやすい)。傾きの分散は二次式を当てた残差 (バッチ平均。減っていく量の曲がりは
+  数えない) から見積もり、残差の隣どうしの相関 ρ で (1 + ρ)/(1 − ρ) 倍する (三階差分は周期をまたぐ相関を見ない)。
+  しきい値はスカラーなら 3σ 相当の t 分布の点、場 (ブロックのベクトル) はブロックの雑音をまとめた χ² の点 (自由度は
+  残差から見た実効的なブロックの数。相関のあるブロックはまとめて数える)。
+- 有意な傾きは、区間の前半と後半の傾きの比 q で減り方を見分ける。比も後半の傾きも上限 (3σ) を使い、減っていれば
+  時定数 τ = 前半と後半の中心の間隔 / ln(1/q⁺) から R = 終わりの傾き × τ (指数で近づく量なら正確、"decay")。減って
+  いると言えなければ、傾きが調べた後ろ半分の長さ (PIC_HORIZON × これまでの長さ) だけ続いたときの変化 ("span")。
+  流体の 10 倍の外挿は PIC には使わない (総数などのゆっくりした揺れ (±0.5%、千周期ほど) を傾きとして外挿し、
+  定常でも不合格にした。2026-10-07 決定)。
+- 分解能 (``res``): 検定で見つけられる最小の傾きで、同じ長さ (後ろ半分) だけ走ったときの変化。閾値を越えるうちは
+  合格にしない (状態 "resolving")。収束としたときに見逃しうる傾きは、調べた後ろ半分と同じ長さだけ走っても閾値の分
+  ほどしか変わらない。雑音が閾値と同じくらいの量は、分解能が届くまで百〜数百周期かかる。
+- 限界: 傾きを見る区間は後ろ半分なので、途中で急に止まった変化は、止まった周期の約 2 倍まで不合格のまま
+  (安全側)。後ろ半分で閾値の分も変わらないほど遅い傾き (それより長く続くもの) は、収束としたあとで見えてから
+  不合格になる。
 
 結果の無限大・未計算の値は JSON に載せられないので None にする (状態 "fail" で R が None なら無限大)。R の種類
-(``r_kind``) も残す: "none" (有意な変化が無い)・"decay" (減っているとして等比で外挿)・"trend" (減っていると言えない、
-または減り方がとても遅い: 今の傾きでこれまでの長さの 10 倍だけ変わり続けたときの値なので大きく出る)。
+(``r_kind``) も残す: "none" (有意な変化が無い)・"decay" (減っているとして等比で外挿)・"trend" (流体: 減っていると
+言えない、または減り方がとても遅い: 今の傾きでこれまでの長さの 10 倍だけ変わり続けたときの値なので大きく出る)・
+"span" (PIC: 減っていると言えない傾きが、調べた後ろ半分の長さだけ続いたときの変化)。
 """
 
 from __future__ import annotations
@@ -70,6 +92,18 @@ HORIZON = 10.0
 STOP_AVG_PERIODS = 10
 #: PIC の場を 1 周期に足し込む回数の目安
 PIC_SAMPLES_PER_PERIOD = 64
+#: PIC の長い履歴のビンの数の上限 (あふれたら隣どうしを合わせて長さを 2 倍にする、CV-d)
+TREND_BINS = 64
+#: 傾きを見る区間: これまでの周期の後ろからこの割合 (走り始めの速い変化を除く)
+TREND_SPAN = 0.5
+#: 傾きの検定に要る、区間の中のビンの数の下限 (二次式の残差の自由度 5)
+TREND_MIN_BINS = 8
+#: 残差の隣どうしの相関 ρ の上限 (傾きの分散を (1 + ρ) / (1 − ρ) 倍する。強すぎる相関は見積もりが当てにならない)
+RHO_MAX = 0.9
+#: PIC の分解能と、減っていると言えない傾きを外挿する長さ: これまでの周期の数のこの倍 (= 傾きを見た後ろ半分。
+#: 2026-10-07 決定。10 倍にすると、PIC の総数のゆっくりした揺れ (±0.5%、千周期ほど) を傾きとして外挿して不合格に
+#: した。これまでと同じ長さで分解能を保証すると、揺れで分解能が閾値まで下がらなかった)
+PIC_HORIZON = TREND_SPAN
 
 FIELDS = ("phi", "n_e")
 TOTALS = ("N_e", "N_i")
@@ -171,6 +205,113 @@ class PeriodSums:
         return len(self._sum)
 
 
+class BinnedSeries:
+    """周期ごとの値を等しい長さのビンにまとめた長い履歴 (PIC の傾きの検定、CV-d)。
+
+    ビンは最大 ``max_bins`` 個で、あふれたら隣どうしを合わせて長さを 2 倍にする (どのビンも同じ長さ、最後のビン
+    だけ途中のことがある)。ビンごとに周期の数・周期の番号の和・値の和 (場はブロックの配列) を持つので、走らせた
+    長さによらずメモリは一定。
+    """
+
+    def __init__(self, max_bins: int = TREND_BINS) -> None:
+        self.max_bins = int(max_bins)
+        self.size = 1
+        self.count: list[int] = []
+        self.ksum: list[float] = []
+        self.xsum: list = []
+
+    def add(self, k: int, x) -> None:
+        if not self.count or self.count[-1] >= self.size:
+            if len(self.count) >= self.max_bins:
+                self._merge()
+            self.count.append(0)
+            self.ksum.append(0.0)
+            self.xsum.append(np.zeros(np.shape(x)) if np.ndim(x) else 0.0)
+        self.count[-1] += 1
+        self.ksum[-1] += float(k)
+        self.xsum[-1] = self.xsum[-1] + x
+
+    def _merge(self) -> None:
+        def pairs(a: list) -> list:
+            return [a[i] + a[i + 1] for i in range(0, len(a) - 1, 2)] + ([a[-1]] if len(a) % 2 else [])
+
+        self.count, self.ksum, self.xsum = pairs(self.count), pairs(self.ksum), pairs(self.xsum)
+        self.size *= 2
+
+    @property
+    def n(self) -> int:
+        """足した周期の数。"""
+        return sum(self.count)
+
+    def tail(self, frac: float) -> list[int]:
+        """後ろから、周期の数が全体の frac 以上になるまでのビンの番号 (古い順)。"""
+        need = frac * self.n
+        idx: list[int] = []
+        cum = 0
+        for i in range(len(self.count) - 1, -1, -1):
+            idx.append(i)
+            cum += self.count[i]
+            if cum >= need:
+                break
+        return idx[::-1]
+
+    def arrays(self, idx: list[int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """ビンの周期の数 c、中心の周期の番号 t、平均 y (行がビン。スカラーの量は 1 列)。"""
+        c = np.array([self.count[i] for i in idx], dtype=np.float64)
+        t = np.array([self.ksum[i] / self.count[i] for i in idx])
+        y = np.array([np.atleast_1d(self.xsum[i] / self.count[i]) for i in idx], dtype=np.float64)
+        return c, t, y
+
+    def last_period(self) -> float:
+        """最後に足した周期の番号 (ビンの周期は続いているとみなす)。"""
+        return self.ksum[-1] / self.count[-1] + (self.count[-1] - 1) / 2.0
+
+
+def _t_point(dof: int, z: float = Z_SIG) -> float:
+    """t 分布で、正規分布の z (3σ) と同じ片側の確率になる点 (Cornish–Fisher の展開。自由度 5 で誤差 0.3% 以下)。"""
+    v = float(max(dof, 1))
+    return (z + (z**3 + z) / (4 * v) + (5 * z**5 + 16 * z**3 + 3 * z) / (96 * v**2)
+            + (3 * z**7 + 19 * z**5 + 17 * z**3 - 15 * z) / (384 * v**3)
+            + (79 * z**9 + 776 * z**7 + 1482 * z**5 - 1920 * z**3 - 945 * z) / (92160 * v**4))
+
+
+def _fit_slope(c: np.ndarray, t: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """周期の数 c で重み付けして直線を当てた傾き (1 周期あたり、列ごと)・Σc(t − t̄)²・重心の周期の番号。"""
+    tbar = float(np.dot(c, t) / c.sum())
+    dt = t - tbar
+    stt = float(np.dot(c, dt * dt))
+    ybar = (c @ y) / c.sum()
+    b = ((c * dt) @ (y - ybar)) / stt
+    return b, stt, tbar
+
+
+def _chi2_point(p: float, z: float) -> float:
+    """χ²_p / p の上側の点 (Wilson–Hilferty の近似。z は正規分布の点、p は実効的な自由度)。"""
+    p = max(float(p), 1.0)
+    return (1.0 - 2.0 / (9.0 * p) + z * math.sqrt(2.0 / (9.0 * p))) ** 3
+
+
+def _fit_noise(c: np.ndarray, t: np.ndarray, y: np.ndarray,
+               w: np.ndarray | None) -> tuple[float, float, int, float]:
+    """二次式を当てた残差から、1 周期あたりの雑音の分散 (場はブロックの体積で重み付けした和)・残差の隣どうしの相関・
+    自由度・実効的なブロックの数。ビンの平均の分散は雑音の分散 / c なので、c を掛けて 1 周期あたりにそろえる
+    (バッチ平均)。二次式なので、減っていく量の曲がりは雑音に数えない。実効的なブロックの数は残差のグラム行列 G
+    から (tr G)² / tr G² (互いに独立なブロックの数。相関のあるブロックはまとめて数える。スカラーは 1)。"""
+    u = (t - np.dot(c, t) / c.sum()) / max(1.0, float(np.ptp(t)))
+    x = np.stack([np.ones_like(u), u, u * u], axis=1)
+    beta = np.linalg.solve(x.T @ (c[:, None] * x), x.T @ (c[:, None] * y))
+    r = (y - x @ beta) * np.sqrt(c)[:, None]
+    rw = r * w if w is not None else r
+    rss = float(np.sum(rw * r))
+    dof = len(c) - 3
+    if rss <= 0.0 or dof <= 0:
+        return 0.0, 0.0, max(dof, 1), 1.0
+    rho = float(np.sum(rw[1:] * r[:-1]) / rss)
+    g = rw @ r.T
+    p_eff = rss * rss / float(np.sum(g * g))
+    return rss / dof, rho, dof, p_eff
+
+
 def circuit_vdc(circuit, t0: float, t1: float) -> list[tuple[str, float, float]]:
     """阻止コンデンサの RF 周期ごとの集計のうち、終わりの時刻が (t0, t1] の周期の V_dc と |V1| の平均 (電極ごと)。"""
     if circuit is None or circuit.period is None:
@@ -222,6 +363,8 @@ class ConvergenceMonitor:
         # 周期の途中から始めたら、最初の周期は短いので捨てる
         self._partial = t - self._k * self.period_s > 0.5 * self.dt
         self._samples: deque = deque(maxlen=3 * self.max_window + 2)
+        #: PIC の量ごとの長い履歴 (傾きの検定、CV-d)。流体は使わない
+        self._bins: dict[str, BinnedSeries] = {}
         self.weights: np.ndarray | None = None
         self.blocks: tuple | None = None
         self._w_prev = 1
@@ -235,7 +378,7 @@ class ConvergenceMonitor:
         self.run_end: int | None = None
         self._converged_at_run_start = False
         self.history: dict = {"t": [], "step": [], "period": [], "window": [], "status": [],
-                              "d": {}, "r": {}, "noise": {}, "r_kind": {}}
+                              "d": {}, "r": {}, "noise": {}, "r_kind": {}, "res": {}}
 
     # ---- エンジンから -------------------------------------------------------------------------
 
@@ -307,6 +450,9 @@ class ConvergenceMonitor:
         if not sample:
             return
         self._samples.append(sample)
+        if self.kind == "pic":
+            for name, v in sample.items():
+                self._bins.setdefault(name, BinnedSeries()).add(k_closed, v[0] if name.startswith(VDC_PREFIX) else v)
         self._judge(t, step, k_closed)
 
     # ---- 判定 ---------------------------------------------------------------------------------
@@ -397,20 +543,30 @@ class ConvergenceMonitor:
         r_out: dict[str, float | None] = {n: None for n in names}
         noise_out: dict[str, float | None] = {n: None for n in names}
         kind_out: dict[str, str | None] = {n: None for n in names}
+        res_out: dict[str, float | None] = {n: None for n in names}
+        pic = self.kind == "pic"
         if n_min < MIN_SAMPLES:
             status = "warming"
         elif window is None:
             status = "noisy"
-        elif n_min < (3 * window if noise_free else max(3 * window, 3 * self.max_window)):
+        elif n_min < 3 * window:
             status = "warming"
+        elif (pic or not noise_free) and n_min < max(3 * self.max_window, 2 * TREND_MIN_BINS):
+            status = "warming"       # PIC・雑音のある量: 短い標本で早すぎる合格をしないよう 3 × max_window 周期まで
         else:
-            ok = True
+            fail = resolving = False
             for n in names:
-                d, r, eta, kind = self._change(n, series[n], window, sig2[n] or 0.0, inners[n], k_closed + 1)
-                d_out[n], r_out[n], noise_out[n], kind_out[n] = d, r, eta, kind
+                d, r, eta, kind = self._change(n, series[n], window, sig2[n] or 0.0, inners[n], k_closed + 1,
+                                               scan=not pic)
+                res = None
+                if pic:
+                    r, kind, res = self._trend(n, series[n], sig2[n] or 0.0, inners[n], k_closed + 1)
+                d_out[n], r_out[n], noise_out[n], kind_out[n], res_out[n] = d, r, eta, kind, res
                 if not (d <= self.tol and r <= self.tol):
-                    ok = False
-            status = "pass" if ok else "fail"
+                    fail = True
+                elif res is not None and res > self.tol:
+                    resolving = True
+            status = "fail" if fail else ("resolving" if resolving else "pass")
 
         self._passes = self._passes + 1 if status == "pass" else 0
         self.now_passing = status == "pass"
@@ -427,17 +583,18 @@ class ConvergenceMonitor:
         h["period"].append(int(k_closed))
         h["window"].append(window)
         h["status"].append(status)
-        for key, vals in (("d", d_out), ("r", r_out), ("noise", noise_out), ("r_kind", kind_out)):
+        for key, vals in (("d", d_out), ("r", r_out), ("noise", noise_out), ("r_kind", kind_out), ("res", res_out)):
             for n in set(h[key]) | set(vals):
                 lst = h[key].setdefault(n, [None] * n_prev)
                 lst.append(vals.get(n))
 
     def _change(self, name: str, x: list, w: int, sig2: float, inner,
-                elapsed: int) -> tuple[float, float, float, str]:
+                elapsed: int, *, scan: bool = True) -> tuple[float, float, float, str]:
         """窓 w の変化 D・残りの変化 R・雑音の幅 η (どれも相対) と R の種類。elapsed: 始めからの周期の数 (外挿の上限)。
 
         R の種類: "none" (有意な変化が無い・丸め誤差、R = 0)、"decay" (減っているとして等比で外挿)、"trend" (減って
         いると言えない、または減り方がとても遅いので、今の傾きでこれまでの長さの HORIZON 倍だけ変わり続けたとき)。
+        scan=False なら R は見積もらない (0、PIC は ``_trend`` で見積もる)。
         """
         vals = self._values(name, x)
         n = len(vals)
@@ -458,9 +615,11 @@ class ConvergenceMonitor:
             return math.inf, math.inf, 0.0, "trend"
         d = math.sqrt(max(0.0, n1 - nv)) / scale
         eta = math.sqrt(max(nv, 0.0)) / scale
-        # 残りの変化: 変化が有意になる最初の窓 (W から広げる) で、窓ごとの変化の減り方から外挿する
         r = 0.0
         kind = "none"
+        if not scan:
+            return d, r, eta, kind
+        # 残りの変化: 変化が有意になる最初の窓 (W から広げる) で、窓ごとの変化の減り方から外挿する
         for wr in range(w, n // 3 + 1):
             if wr != w:
                 d1, d2 = diffs(wr)
@@ -485,13 +644,85 @@ class ConvergenceMonitor:
             break
         return d, r, eta, kind
 
+    def _trend(self, name: str, x: list, sig2: float, inner, elapsed: int) -> tuple[float, str, float]:
+        """PIC の量の残りの変化 R・その種類・分解能 (どれも相対、CV-d)。
+
+        長い履歴の後ろ半分のビンに直線を当て、傾きを 1 回だけ検定する。傾きの分散は二次式を当てた残差から見積もり
+        (バッチ平均)、残差の隣どうしの相関 ρ で (1 + ρ)/(1 − ρ) 倍する (周期をまたぐ揺れ)。三階差分の雑音より
+        小さくはしない。しきい値はスカラーなら 3σ 相当の t 分布の点の 2 乗、場はブロックの雑音をまとめた χ² の点
+        (実効的なブロックの数 p_eff の自由度。ブロックごとの雑音に埋もれる全体の傾きも見える)。有意でなければ
+        R = 0 (none)。有意なら区間の前半と後半の傾きの比 q で減り方を見分け、減っていれば時定数 τ = 前半と後半の
+        中心の間隔 / ln(1/q⁺) と区間の終わりの傾きから R = 傾き × τ (decay)。比も後半の傾きも上限 (3σ。場は傾きの
+        向きの成分なので雑音は 1/p_eff) を使う。減っていると言えなければ、傾きが調べた後ろ半分の長さ (PIC_HORIZON ×
+        これまでの長さ) だけ続いたときの変化 (span)。分解能は、検定で見つけられる最小の傾きで同じ長さだけ走ったとき
+        の変化。
+        """
+        bs = self._bins[name]
+        scale = self._scale(name, x, 1, inner)
+        if scale <= 0.0:
+            return 0.0, "none", 0.0
+        w = self.weights if name in FIELDS and self.weights is not None else None
+        idx = bs.tail(TREND_SPAN)
+        if len(idx) < TREND_MIN_BINS:
+            return 0.0, "none", math.inf       # 途中から現れた量: 見分けるにはまだ周期が足りない
+        c, t, y = bs.arrays(idx)
+        if w is not None and len(w) != y.shape[1]:
+            w = None
+
+        def ip(a: np.ndarray, b: np.ndarray) -> float:
+            return float(np.dot(w, a * b)) if w is not None else float(np.dot(a, b))
+
+        s2, rho, dof, p_eff = _fit_noise(c, t, y, w)
+        rho = min(max(rho, 0.0), RHO_MAX)
+        var_unit = max(sig2, s2 * (1.0 + rho) / (1.0 - rho))
+        b, stt, _ = _fit_slope(c, t, y)
+        var_b = var_unit / stt
+        z = _t_point(dof)
+        if y.shape[1] > 1:
+            thr = _chi2_point(p_eff, z)                 # ‖b‖² のしきい値 (var_b の倍数)
+            b_min = math.sqrt(max(thr - 1.0, 0.0) * var_b)
+            p_dir = p_eff
+        else:
+            thr = z * z
+            b_min = z * math.sqrt(var_b)
+            p_dir = 1.0
+        span = PIC_HORIZON * elapsed
+        res = b_min * span / scale
+        nb2 = ip(b, b)
+        b_ns = math.sqrt(max(0.0, nb2 - var_b)) / scale
+        if nb2 <= thr * var_b or b_ns * HORIZON * elapsed <= R_FLOOR:
+            return 0.0, "none", res
+        cap = b_ns * HORIZON * elapsed
+        # 減り方: 区間を周期の数で半分に分け、前半と後半の傾きの比 (指数で近づくなら e^(−間隔/τ))
+        cum = np.cumsum(c)
+        j = min(max(int(np.searchsorted(cum, cum[-1] / 2.0)) + 1, 2), len(c) - 2)
+        b_old, s_old, t_old = _fit_slope(c[:j], t[:j], y[:j])
+        b_new, s_new, t_new = _fit_slope(c[j:], t[j:], y[j:])
+        v_old, v_new = var_unit / s_old, var_unit / s_new
+        no2 = ip(b_old, b_old)
+        r_geo = math.inf
+        if no2 > v_old:
+            # 雑音で後半の傾きがたまたま小さいと、まっすぐな傾きを「減っている」と見誤るので、比も後半の傾きも
+            # 上限 (3σ、傾きの検定と同じ) で外挿する
+            q = ip(b_new, b_old) / no2
+            q_up = abs(q) + Z_SIG * math.sqrt((v_new + q * q * v_old) / no2 / p_dir)
+            if q_up < 1.0:
+                tau = (t_new - t_old) / math.log(1.0 / q_up)
+                bn = (math.sqrt(max(0.0, ip(b_new, b_new) - v_new)) + Z_SIG * math.sqrt(v_new / p_dir)) / scale
+                r_geo = bn * q_up ** ((bs.last_period() - t_new) / (t_new - t_old)) * tau
+        if r_geo <= cap:
+            return r_geo, "decay", res
+        return b_ns * span, "span", res
+
     # ---- 結果 ---------------------------------------------------------------------------------
 
     def frame(self) -> dict:
-        """フレームに載せる今の状態 (最後に判定した周期)。worst は max(D, R) がいちばん大きい量の値 (無限大は None)。"""
+        """フレームに載せる今の状態 (最後に判定した周期)。worst は max(D, R) がいちばん大きい量の値 (無限大は None)、
+        res は分解能がいちばん粗い量の分解能 (PIC、CV-d)。"""
         h = self.history
         worst = worst_name = worst_kind = None
-        if h["status"] and h["status"][-1] in ("pass", "fail"):
+        res = res_name = None
+        if h["status"] and h["status"][-1] in ("pass", "fail", "resolving"):
             best = -1.0
             for n in h["d"]:
                 d = h["d"][n][-1]
@@ -503,12 +734,21 @@ class ConvergenceMonitor:
                     best, worst_name, worst_kind = v, n, h["r_kind"][n][-1]
             if worst_name is not None:
                 worst = _finite_or_none(best)
+            coarse = -1.0
+            for n, lst in h["res"].items():
+                v = lst[-1]
+                if v is not None and v > coarse:
+                    coarse, res_name = v, n
+            if res_name is not None:
+                res = _finite_or_none(coarse)
         return {
             "status": h["status"][-1] if h["status"] else "warming",
             "window": h["window"][-1] if h["window"] else None,
             "worst": worst,
             "worst_name": worst_name,
             "worst_kind": worst_kind,
+            "res": res,
+            "res_name": res_name,
             "tol": self.tol,
             "checks": len(h["t"]),
             "converged": self.converged,
@@ -542,6 +782,7 @@ class ConvergenceMonitor:
             "r": clean(h["r"]),
             "noise": clean(h["noise"]),
             "r_kind": {n: list(lst) for n, lst in h["r_kind"].items()},
+            "res": clean(h["res"]),
             "converged": self.converged,
             "converged_t": at.get("t"),
             "converged_step": at.get("step"),

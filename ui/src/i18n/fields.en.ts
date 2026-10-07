@@ -172,7 +172,7 @@ export const fieldsEn: DeepPartialStrings<typeof fieldsJa> = {
     },
     ConvergenceSettings: {
       enabled: "Judge whether the period-averaged φ, n_e, electron and ion totals and self-bias have settled (almost no extra cost)",
-      tol: "Passes when the change and the remaining change (both relative) are at most this. Blank = automatic (fluid 0.1%, PIC 1%)",
+      tol: "Passes when the change and the remaining change (both relative) are at most this. Blank = automatic (fluid 0.1%, PIC 1%). PIC also waits until a slow drift that could be missed (the resolution: its change over the examined second half) is at most this (250-350 periods when the noise is about the tolerance)",
       rf_periods: "Averaging length (periods of the lowest RF frequency)",
       steps: "Judging period when there is no RF or CSV waveform. Blank = 10 × frame_every",
       hold: "Converged after this many consecutive passes",

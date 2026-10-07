@@ -343,8 +343,9 @@ const en: Resources = {
     selfBiasV1: "|V1| {{label}}",
     convTitle: "Convergence judgement (per judging period)",
     convNote:
-      "max(change D, remaining change R) per quantity, both relative (V_dc relative to |V1|). Converged after all quantities stay at or below the tolerance (grey dashes) for several periods (green line). For a quantity that is not shown to be decaying, R is the change if the current slope continued for 10 × the run so far, so it looks large. ∞ is drawn at the top",
+      "max(change D, remaining change R) per quantity, both relative (V_dc relative to |V1|). Converged after all quantities stay at or below the tolerance (grey dashes) for several periods (green line). For a quantity that is not shown to be decaying, R is the change if the current slope continued for 10 × the run so far (PIC: for the examined second half), so it looks large. ∞ is drawn at the top. PIC also waits until the resolution (grey dots: the change a slow slope that could still be missed would make over the length of the second half) is at or below the tolerance",
     convTol: "Tolerance",
+    convRes: "Resolution (coarsest quantity)",
     convX: "Period",
     convY: "max(D, R)",
     rfTitle: "RF phase",
@@ -459,6 +460,8 @@ const en: Resources = {
     convWorst: "Farthest quantity",
     convWorstValue: "{{name}}: change {{d}}, remaining {{r}} ({{kind}})",
     convWorstLive: "{{name}}: max(change, remaining) {{v}}",
+    convRes: "Resolution (change that could be missed)",
+    convResValue: "{{name}}: {{v}} (over the second half's length)",
     convSettings: "Tolerance / judging period / consecutive passes",
     convSettingsValue: "{{tol}} / {{period}} / {{hold}}",
     convChecks: "Judged periods",
@@ -1283,10 +1286,16 @@ const en: Resources = {
     status: {
       warming: "Judging (not enough periods yet)",
       noisy: "Fluctuating too much to compare (fast early change or noise; if it persists, raise the tolerance or the judging period)",
+      resolving: "Judging (more periods needed to resolve slow drifts)",
       fail: "Not converged",
       pass: "Passed",
     },
-    kind: { none: "no significant change", decay: "extrapolated from the decay", trend: "slope continued for 10 × the run so far" },
+    kind: {
+      none: "no significant change",
+      decay: "extrapolated from the decay",
+      trend: "slope continued for 10 × the run so far",
+      span: "slope continued over the examined second half",
+    },
     periodRf: "{{n}} RF periods ({{t}})",
   },
   hints2: {

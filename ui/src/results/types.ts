@@ -166,10 +166,16 @@ export interface CircuitFrame {
 
 // ---- 収束の判定 (prompts/137。backend convergence.ConvergenceMonitor) ----
 
-/** 判定の状態: 判定中 (周期が足りない)・揺れが大きく比べられない (走り始めの速い変化か雑音)・未収束・合格 */
-export type ConvStatus = "warming" | "noisy" | "fail" | "pass";
-/** 残りの変化 R の種類: 有意な変化なし・減り方から外挿・傾きが続くとしてこれまでの長さの 10 倍 */
-export type ConvKind = "none" | "decay" | "trend";
+/**
+ * 判定の状態: 判定中 (周期が足りない)・揺れが大きく比べられない (走り始めの速い変化か雑音)・未収束・合格・
+ * 判定中 (PIC: 変化は閾値以下だが、遅い傾きを見分けるには周期が足りない、CV-d)
+ */
+export type ConvStatus = "warming" | "noisy" | "fail" | "pass" | "resolving";
+/**
+ * 残りの変化 R の種類: 有意な変化なし・減り方から外挿・傾きが続くとしてこれまでの長さの 10 倍 (流体)・
+ * 傾きが調べた後ろ半分の長さだけ続くとして (PIC、CV-d)
+ */
+export type ConvKind = "none" | "decay" | "trend" | "span";
 
 /**
  * 判定の周期ごとの履歴。量は "phi"・"n_e" (場、粗いブロックの L2)・"N_e"・"N_i" (総数)・"V_dc:<電極>" (|V1| 比)。
@@ -194,6 +200,11 @@ export interface ConvergenceResult {
   noise: Record<string, (number | null)[]>;
   /** CV-c (prompts/137) から。古い結果には無い */
   r_kind?: Record<string, (ConvKind | null)[]>;
+  /**
+   * 分解能 (PIC の量、CV-d): 見つけられる最小の傾きで、調べた後ろ半分の長さだけ走ったときの変化 (相対)。閾値を越える
+   * うちは合格にしない。流体の量・判定していない周期は null、古い結果には無い
+   */
+  res?: Record<string, (number | null)[]>;
   converged: boolean;
   converged_t: number | null;
   converged_step: number | null;
@@ -209,6 +220,9 @@ export interface ConvergenceFrame {
   worst: number | null;
   worst_name?: string | null;
   worst_kind?: ConvKind | null;
+  /** 分解能がいちばん粗い量とその分解能 (PIC、CV-d) */
+  res?: number | null;
+  res_name?: string | null;
   tol: number;
   checks: number;
   converged: boolean;
