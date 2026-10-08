@@ -2,7 +2,8 @@
 
 サンプル (examples/<キー>.json) の設定のまま、ジョブと同じ組み立て (流体 2D: make_fluid2d_simulation と
 Fluid2dRunner.result、PIC: make_pic_simulation と batch._build_results_bundle) で走らせ、PLANS の周期数まで
-「続き」で延ばして、結果の束 {version: 1, meta, <種類>: 結果} を gzip で書く。UI はサンプルを開いたときに
+(収束までの種類は、収束の判定 (prompts/137) が収束とするまで。周期数はその上限) 「続き」で延ばして、結果の束
+{version: 1, meta, <種類>: 結果} を gzip で書く。UI はサンプルを開いたときに
 これを「読み込んだ実行」として並べる (ui/src/io/exampleResults.ts)。
 
 - 時間平均の場・位相分解は最後の区間のもの (平均の長さは PLANS の周期数、None ならサンプルの avg_steps)。
@@ -45,11 +46,15 @@ MAX_HISTORY = 2000
 #: 有効数字 (既定) と、結果の項目ごとの有効数字 (大きな配列)
 DIGITS = 7
 DIGITS_BY_PART = {"fields": 4, "collectors": 4, "cycle": 3}
-#: サンプルごとの (種類, 合計の RF 周期数, 最後に時間平均する RF 周期数)。合計の None はサンプルの n_steps の
-#: まま (延ばさない)、平均の None はサンプルの avg_steps。続きの 1 回の長さはサンプルの n_steps
-PLANS: dict[str, list[tuple[str, int | None, int | None]]] = {
-    "gec_cell": [("fluid2d", 100, None), ("pic", 600, 50)],
-    "ccp_demo": [("pic", None, None)],
+#: サンプルごとの (種類, 合計の RF 周期数, 最後に時間平均する RF 周期数, 収束まで)。合計の None はサンプルの
+#: n_steps のまま (延ばさない)、平均の None はサンプルの avg_steps。続きの 1 回の長さはサンプルの n_steps。
+#: 収束まで (True) なら、続きのたびに収束の判定 (prompts/137) を見て、収束していたら平均区間を 1 回走らせて終える
+#: (合計はその上限)。GEC の流体は 3416 周期で収束とした (2026-10-08。ユーザーが手で走らせた目安は約 3000 周期)。
+#: GEC の PIC は、誘電体の表面電荷を気体側の節点に置いていたころ約 2300 周期で暴走した (prompts/138 で直した)。
+#: 直したあとは 2178 周期で収束とした (2026-10-08。prompts/138 の確かめの計算は 3200 周期で初めて合格)
+PLANS: dict[str, list[tuple[str, int | None, int | None, bool]]] = {
+    "gec_cell": [("fluid2d", 5000, None, True), ("pic", 4000, 50, True)],
+    "ccp_demo": [("pic", None, None, False)],
 }
 
 
@@ -128,8 +133,23 @@ def _chunks(total: int, chunk: int, final: int) -> list[int]:
     return sizes + [final]
 
 
-def _run(kind: str, project: Project, periods: int | None, avg_periods: int | None, log) -> tuple[dict, dict]:
-    """1 つの種類を走らせて (結果, 記録) を返す。"""
+def _conv_text(conv) -> str:
+    """ログ用の収束の判定の今の状態 (例: "fail、いちばん遠い n_e 12%")。"""
+    f = conv.frame()
+    out = f"判定 {f['status']}"
+    if f.get("worst_name"):
+        worst = f["worst"]
+        out += f"、いちばん遠い {f['worst_name']} {'∞' if worst is None else f'{worst:.2%}'}"
+    if f.get("res_name") and f.get("res") is not None:
+        out += f"、分解能 {f['res_name']} {f['res']:.2%}"
+    if f["converged"]:
+        out += "、収束済み"
+    return out
+
+
+def _run(kind: str, project: Project, periods: int | None, avg_periods: int | None, converge: bool,
+         log) -> tuple[dict, dict]:
+    """1 つの種類を走らせて (結果, 記録) を返す。converge なら収束したところで平均区間を走らせて終える。"""
     if kind == "fluid2d":
         sim = make_fluid2d_simulation(project)
         settings = sim.s
@@ -143,14 +163,29 @@ def _run(kind: str, project: Project, periods: int | None, avg_periods: int | No
     total = chunk if periods is None or spp is None else max(chunk, periods * spp)
     sample_avg = settings.avg_steps
     avg = None if avg_periods is None or spp is None else avg_periods * spp
-    sizes = _chunks(total, chunk, max(chunk, avg or 0))
+    final = max(chunk, avg or 0)
+    conv = getattr(sim, "conv", None)
+    if converge and conv is None:
+        raise SystemExit(f"{kind}: 収束の判定が無効なので、収束までは走らせられません (convergence.enabled)")
+    # 収束まで: 平均区間 (avg、無ければサンプルの avg_steps) だけを最後に走らせる
+    final_conv = avg if avg is not None else int(sample_avg or chunk)
+    sizes = [] if converge else _chunks(total, chunk, final)
     acc: dict[str, list] = {"t": [], "v_dc": [], "v1": [], "i_dc": []}
     t0 = time.perf_counter()
     done = 0
     step0 = sim.step_count
-    for i, n in enumerate(sizes):
-        if avg is not None and i == len(sizes) - 1:
-            n_avg = avg
+    i = 0
+    while True:
+        if converge:
+            last = conv.converged or done + final_conv >= total
+            n = final_conv if last else min(chunk, total - final_conv - done)
+        else:
+            if i >= len(sizes):
+                break
+            n = sizes[i]
+            last = i == len(sizes) - 1
+        if last and (converge or avg is not None):
+            n_avg = n if converge else avg
         else:
             n_avg = None if sample_avg is None else min(int(sample_avg), n)
         if i:
@@ -165,10 +200,17 @@ def _run(kind: str, project: Project, periods: int | None, avg_periods: int | No
                 settings.avg_steps = n_avg
         sim.run_batch(store_frames=False)
         done += n
+        i += 1
         msg = f"  {kind}: {done}/{total} ステップ ({time.perf_counter() - t0:.0f} 秒)"
+        if spp is not None:
+            msg += f"、{done / spp:.0f} 周期"
         if sim.circuit is not None and sim.circuit.history["v_dc"]:
             msg += f"、V_dc {sim.circuit.history['v_dc'][-1]}"
+        if conv is not None:
+            msg += f"、{_conv_text(conv)}"
         log(msg)
+        if converge and last:
+            break
     elapsed = time.perf_counter() - t0
     if kind == "fluid2d":
         result = Fluid2dRunner().result(sim, elapsed)
@@ -184,6 +226,9 @@ def _run(kind: str, project: Project, periods: int | None, avg_periods: int | No
                 e[k] = [row[j] for row in acc[k] + list(h[k])]
     record = {"engine": _engine(sim), "steps": int(done), "periods": None if spp is None else round(done / spp, 2),
               "elapsed_s": round(elapsed, 1)}
+    if conv is not None:
+        at = conv.converged_at
+        record["converged_period"] = None if at is None else at["period"] + 1
     return result, record
 
 
@@ -208,7 +253,7 @@ def build(key: str, log=print, only: list[str] | None = None) -> Path:
     """PLANS の種類を計算して書く。only なら、その種類だけ計算し直し、ほかの種類は今のファイルのまま残す。"""
     plan = PLANS[key]
     if only:
-        unknown = sorted(set(only) - {kind for kind, _, _ in plan})
+        unknown = sorted(set(only) - {kind for kind, *_ in plan})
         if unknown:
             raise SystemExit(f"{key} の表にない種類: {', '.join(unknown)}")
     data = json.loads((EXAMPLES / f"{key}.json").read_text(encoding="utf-8"))
@@ -217,7 +262,7 @@ def build(key: str, log=print, only: list[str] | None = None) -> Path:
     bundle: dict = {"version": 1}
     runs: dict[str, dict] = {}
     today = _dt.datetime.now().astimezone().date().isoformat()
-    for kind, periods, avg_periods in plan:
+    for kind, periods, avg_periods, converge in plan:
         if only and kind not in only:
             if kind not in old:
                 raise SystemExit(f"{key}.json.gz に {kind} が無いので、残せません (--only を外して全部を作る)")
@@ -226,9 +271,9 @@ def build(key: str, log=print, only: list[str] | None = None) -> Path:
             runs[kind].setdefault("generated", old.get("meta", {}).get("generated"))
             log(f"{key}: {kind} は今のファイルのまま")
             continue
-        log(f"{key}: {kind} ({'サンプルのまま' if periods is None else f'{periods} 周期'}"
-            f"{'' if avg_periods is None else f'、最後の {avg_periods} 周期を時間平均'})")
-        result, record = _run(kind, Project.model_validate(data), periods, avg_periods, log)
+        span = "サンプルのまま" if periods is None else (f"収束まで (上限 {periods} 周期)" if converge else f"{periods} 周期")
+        log(f"{key}: {kind} ({span}{'' if avg_periods is None else f'、最後の {avg_periods} 周期を時間平均'})")
+        result, record = _run(kind, Project.model_validate(data), periods, avg_periods, converge, log)
         record["generated"] = today
         bundle[kind] = result
         runs[kind] = record
